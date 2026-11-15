@@ -1,0 +1,333 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Stat & Ward Difficulty Outcome Playground</title>
+  <style>
+    :root {
+      --bg: #fafbf9;
+      --panel: #f2f4f3;
+      --ink: #162326;
+      --muted: #4e6166;
+      --line: #cfd8d7;
+      --clean: #1b6b63;
+      --strained: #d99b26;
+      --backlash: #a63429;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 16px;
+      font-family: "Plus Jakarta Sans", system-ui, -apple-system, sans-serif;
+      background: var(--bg);
+      color: var(--ink);
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: 1fr 1.25fr;
+      gap: 16px;
+    }
+    @media (max-width: 680px) {
+      .grid { grid-template-columns: 1fr; }
+    }
+    .controls, .results {
+      background: #ffffff;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 14px;
+    }
+    .control-group {
+      margin-bottom: 12px;
+    }
+    .control-group:last-child { margin-bottom: 0; }
+    label {
+      display: flex;
+      justify-content: space-between;
+      font-size: 12.5px;
+      font-weight: 600;
+      margin-bottom: 4px;
+    }
+    input[type="range"], select {
+      width: 100%;
+      accent-color: var(--clean);
+    }
+    select {
+      font: inherit;
+      font-size: 13px;
+      padding: 6px 8px;
+      border: 1px solid var(--line);
+      border-radius: 4px;
+      background: var(--panel);
+    }
+    .checkbox-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      margin-top: 8px;
+    }
+    .stacked-bar {
+      height: 26px;
+      border-radius: 5px;
+      overflow: hidden;
+      display: flex;
+      margin-bottom: 12px;
+      border: 1px solid var(--line);
+    }
+    .seg-clean { background: var(--clean); }
+    .seg-strained { background: var(--strained); }
+    .seg-backlash { background: var(--backlash); }
+    .band-cards {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 8px;
+      margin-bottom: 12px;
+    }
+    .band {
+      padding: 8px 10px;
+      border-radius: 5px;
+      background: var(--panel);
+      border-left: 4px solid var(--line);
+    }
+    .band.clean { border-left-color: var(--clean); }
+    .band.strained { border-left-color: var(--strained); }
+    .band.backlash { border-left-color: var(--backlash); }
+    .band-pct {
+      font-size: 18px;
+      font-weight: 700;
+    }
+    .band-name {
+      font-size: 11.5px;
+      color: var(--muted);
+    }
+    .formula-box {
+      font-family: "JetBrains Mono", ui-monospace, monospace;
+      font-size: 11.5px;
+      background: var(--panel);
+      padding: 8px 10px;
+      border-radius: 4px;
+      border: 1px solid var(--line);
+      color: var(--ink);
+    }
+    .sim-row {
+      margin-top: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+    .roll-btn {
+      font: inherit;
+      font-size: 12.5px;
+      font-weight: 600;
+      padding: 6px 12px;
+      border-radius: 4px;
+      border: 1px solid var(--clean);
+      background: #e1f0ee;
+      color: var(--ink);
+      cursor: pointer;
+    }
+    .roll-btn:hover {
+      background: var(--clean);
+      color: #ffffff;
+    }
+    .roll-output {
+      font-size: 12.5px;
+      font-weight: 600;
+    }
+  </style>
+</head>
+<body>
+  <div class="grid">
+    <div class="controls">
+      <div class="control-group">
+        <label for="riggingInput">
+          <span>Rigging Stat</span>
+          <span id="riggingVal">+2</span>
+        </label>
+        <input id="riggingInput" type="range" min="-1" max="4" step="1" value="2" />
+      </div>
+
+      <div class="control-group">
+        <label for="oilInput">
+          <span>Lantern Oil Spent</span>
+          <span id="oilVal">1 charge (+1)</span>
+        </label>
+        <input id="oilInput" type="range" min="0" max="2" step="1" value="1" />
+      </div>
+
+      <div class="control-group">
+        <label for="tierSelect">
+          <span>Ward Seal Tier</span>
+        </label>
+        <select id="tierSelect">
+          <option value="0">Tier I — Apprentice Latch (0)</option>
+          <option value="1" selected>Tier II — Reliquary Seal (-1)</option>
+          <option value="2">Tier III — Guild Vault (-2)</option>
+          <option value="3">Tier IV — Sovereign Ward (-3)</option>
+        </select>
+      </div>
+
+      <label class="checkbox-row" for="assistCheck">
+        <input id="assistCheck" type="checkbox" />
+        <span>Assisted Pry-Bar (roll 3d6, keep highest 2)</span>
+      </label>
+    </div>
+
+    <div class="results">
+      <div class="stacked-bar" aria-label="Outcome probability distribution">
+        <div id="barClean" class="seg-clean" title="Clean Breach (10+)"></div>
+        <div id="barStrained" class="seg-strained" title="Strained Entry (7-9)"></div>
+        <div id="barBacklash" class="seg-backlash" title="Ward Backlash (<=6)"></div>
+      </div>
+
+      <div class="band-cards">
+        <div class="band clean">
+          <div class="band-pct" id="pctClean">0%</div>
+          <div class="band-name">Clean (10+)</div>
+        </div>
+        <div class="band strained">
+          <div class="band-pct" id="pctStrained">0%</div>
+          <div class="band-name">Strained (7–9)</div>
+        </div>
+        <div class="band backlash">
+          <div class="band-pct" id="pctBacklash">0%</div>
+          <div class="band-name">Backlash (≤6)</div>
+        </div>
+      </div>
+
+      <div class="formula-box" id="formulaBox"></div>
+
+      <div class="sim-row">
+        <button type="button" class="roll-btn" id="sampleRollBtn">Roll sample check</button>
+        <span class="roll-output" id="sampleRollText">Exact combinatorial odds shown above.</span>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const riggingInput = document.getElementById('riggingInput');
+    const oilInput = document.getElementById('oilInput');
+    const tierSelect = document.getElementById('tierSelect');
+    const assistCheck = document.getElementById('assistCheck');
+
+    function reportHeight() {
+      window.parent.postMessage({ type: 'cairn:embed:resize', height: Math.max(245, document.documentElement.scrollHeight) }, '*');
+    }
+
+    function computeDistribution(netMod, assisted) {
+      let clean = 0;
+      let strained = 0;
+      let backlash = 0;
+      let totalOutcomes = 0;
+
+      if (!assisted) {
+        for (let d1 = 1; d1 <= 6; d1++) {
+          for (let d2 = 1; d2 <= 6; d2++) {
+            totalOutcomes++;
+            const score = d1 + d2 + netMod;
+            if (score >= 10) clean++;
+            else if (score >= 7) strained++;
+            else backlash++;
+          }
+        }
+      } else {
+        for (let d1 = 1; d1 <= 6; d1++) {
+          for (let d2 = 1; d2 <= 6; d2++) {
+            for (let d3 = 1; d3 <= 6; d3++) {
+              totalOutcomes++;
+              const sorted = [d1, d2, d3].sort((a, b) => b - a);
+              const score = sorted[0] + sorted[1] + netMod;
+              if (score >= 10) clean++;
+              else if (score >= 7) strained++;
+              else backlash++;
+            }
+          }
+        }
+      }
+
+      return {
+        cleanPct: (clean / totalOutcomes) * 100,
+        strainedPct: (strained / totalOutcomes) * 100,
+        backlashPct: (backlash / totalOutcomes) * 100
+      };
+    }
+
+    function fmtSign(n) {
+      return n >= 0 ? `+${n}` : `${n}`;
+    }
+
+    function update() {
+      const rigging = Number(riggingInput.value);
+      const oil = Number(oilInput.value);
+      const tierPenalty = Number(tierSelect.value);
+      const assisted = assistCheck.checked;
+      const netMod = rigging + oil - tierPenalty;
+
+      document.getElementById('riggingVal').textContent = fmtSign(rigging);
+      document.getElementById('oilVal').textContent = `${oil} ${oil === 1 ? 'charge' : 'charges'} (+${oil})`;
+
+      const dist = computeDistribution(netMod, assisted);
+      document.getElementById('barClean').style.width = `${dist.cleanPct.toFixed(1)}%`;
+      document.getElementById('barStrained').style.width = `${dist.strainedPct.toFixed(1)}%`;
+      document.getElementById('barBacklash').style.width = `${dist.backlashPct.toFixed(1)}%`;
+
+      document.getElementById('pctClean').textContent = `${dist.cleanPct.toFixed(1)}%`;
+      document.getElementById('pctStrained').textContent = `${dist.strainedPct.toFixed(1)}%`;
+      document.getElementById('pctBacklash').textContent = `${dist.backlashPct.toFixed(1)}%`;
+
+      const diceExpr = assisted ? 'keepHigh2(3d6)' : '2d6';
+      document.getElementById('formulaBox').textContent =
+        ` Illustrative formula: ${diceExpr} ${fmtSign(rigging)} (rigging) + ${oil} (oil) - ${tierPenalty} (ward) = ${diceExpr} ${fmtSign(netMod)}`;
+
+      window.parent.postMessage(
+        {
+          type: 'cairn:embed:telemetry',
+          summary: `Net ${fmtSign(netMod)} -> Clean ${dist.cleanPct.toFixed(0)}% / Strained ${dist.strainedPct.toFixed(0)}% / Backlash ${dist.backlashPct.toFixed(0)}%`
+        },
+        '*'
+      );
+      reportHeight();
+    }
+
+    document.getElementById('sampleRollBtn').addEventListener('click', () => {
+      const rigging = Number(riggingInput.value);
+      const oil = Number(oilInput.value);
+      const tierPenalty = Number(tierSelect.value);
+      const assisted = assistCheck.checked;
+      const netMod = rigging + oil - tierPenalty;
+
+      const rolls = [1 + Math.floor(Math.random() * 6), 1 + Math.floor(Math.random() * 6)];
+      if (assisted) rolls.push(1 + Math.floor(Math.random() * 6));
+      const sorted = [...rolls].sort((a, b) => b - a);
+      const base = sorted[0] + sorted[1];
+      const total = base + netMod;
+      const label = total >= 10 ? 'Clean Breach' : total >= 7 ? 'Strained Entry' : 'Ward Backlash';
+      document.getElementById('sampleRollText').textContent =
+        `Rolled [${rolls.join(', ')}] ${fmtSign(netMod)} = ${total} (${label})`;
+    });
+
+    [riggingInput, oilInput, tierSelect, assistCheck].forEach((el) => {
+      el.addEventListener('input', update);
+      el.addEventListener('change', update);
+    });
+
+    window.addEventListener('message', (event) => {
+      if (event.data && event.data.type === 'cairn:embed:init' && event.data.props) {
+        const p = event.data.props;
+        if (typeof p.defaultRigging === 'number') riggingInput.value = String(p.defaultRigging);
+        if (typeof p.defaultTierPenalty === 'number') tierSelect.value = String(p.defaultTierPenalty);
+        if (typeof p.defaultOil === 'number') oilInput.value = String(p.defaultOil);
+        update();
+      }
+    });
+
+    window.addEventListener('resize', reportHeight);
+    update();
+    window.parent.postMessage({ type: 'cairn:embed:ready', height: document.documentElement.scrollHeight }, '*');
+  </script>
+</body>
+</html>

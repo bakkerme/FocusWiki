@@ -1,0 +1,18 @@
+{
+  "projects": [
+    {
+      "id": "cindervault-rpg",
+      "name": "Cindervault RPG",
+      "description": "Fictional tabletop & engine action design spec with interactive resolution embeds",
+      "rootPath": "sample-repos/cindervault-rpg",
+      "defaultDoc": "docs/vault-breach-action.md"
+    },
+    {
+      "id": "helios-lab",
+      "name": "Helios Bench Runbook",
+      "description": "Fictional optics & FPGA bench inventory, dependencies, and cold-start runbooks",
+      "rootPath": "sample-repos/helios-lab",
+      "defaultDoc": "docs/bench-inventory.md"
+    }
+  ]
+}

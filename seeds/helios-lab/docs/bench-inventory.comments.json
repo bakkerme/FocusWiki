@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "document": "docs/bench-inventory.md",
+  "threads": [
+    {
+      "id": "thr_lab_open_01",
+      "status": "open",
+      "createdAt": "2026-11-15T03:50:00.000Z",
+      "updatedAt": "2026-11-15T03:50:00.000Z",
+      "anchor": {
+        "quote": "Maintain at least twenty minutes of UPS holdover margin whenever unattended overnight interferometry sweeps are active.",
+        "prefix": "",
+        "suffix": "",
+        "headingContext": "Operational Notes"
+      },
+      "messages": [
+        {
+          "id": "msg_lab_01",
+          "author": "Bench Lead",
+          "role": "human",
+          "createdAt": "2026-11-15T03:50:00.000Z",
+          "body": "With both hlx-fpga-rig and hlx-optics-bench energized (760 W total), the simulator shows ~49 minutes holdover on a fresh pack. Should we bump the alert threshold to 30 minutes as cells age?"
+        }
+      ],
+      "history": [
+        {
+          "action": "created",
+          "actor": "Bench Lead",
+          "role": "human",
+          "at": "2026-11-15T03:50:00.000Z"
+        }
+      ]
+    }
+  ]
+}

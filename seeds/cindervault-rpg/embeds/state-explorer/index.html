@@ -1,0 +1,389 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Ward-Breach State Explorer</title>
+  <style>
+    :root {
+      --bg: #fafbf9;
+      --panel: #f2f4f3;
+      --ink: #162326;
+      --muted: #4e6166;
+      --line: #cfd8d7;
+      --accent: #1b6b63;
+      --accent-soft: #e1f0ee;
+      --warn: #b8741a;
+      --warn-soft: #fdf3dc;
+      --danger: #a63429;
+      --danger-soft: #fae8e6;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 16px;
+      font-family: "Plus Jakarta Sans", system-ui, -apple-system, sans-serif;
+      background: var(--bg);
+      color: var(--ink);
+      line-height: 1.45;
+    }
+    .layout {
+      display: grid;
+      grid-template-columns: 1.35fr 1fr;
+      gap: 16px;
+      align-items: start;
+    }
+    @media (max-width: 680px) {
+      .layout { grid-template-columns: 1fr; }
+    }
+    .diagram-box {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 12px;
+    }
+    svg {
+      width: 100%;
+      height: auto;
+      display: block;
+    }
+    .state-node {
+      cursor: pointer;
+      transition: opacity 120ms ease;
+    }
+    .state-node rect {
+      fill: #ffffff;
+      stroke: #9ab0ae;
+      stroke-width: 1.5;
+      rx: 6;
+    }
+    .state-node.is-valid rect {
+      stroke: var(--accent);
+      stroke-dasharray: 4 2;
+    }
+    .state-node.is-active rect {
+      fill: var(--accent);
+      stroke: var(--accent);
+      stroke-dasharray: none;
+    }
+    .state-node.is-active.kind-warn rect {
+      fill: var(--warn);
+      stroke: var(--warn);
+    }
+    .state-node.is-active.kind-danger rect {
+      fill: var(--danger);
+      stroke: var(--danger);
+    }
+    .state-node text {
+      font-size: 12px;
+      font-weight: 600;
+      fill: var(--ink);
+      pointer-events: none;
+    }
+    .state-node.is-active text {
+      fill: #ffffff;
+    }
+    .edge {
+      stroke: #b5c4c2;
+      stroke-width: 1.6;
+      fill: none;
+    }
+    .edge.is-available {
+      stroke: var(--accent);
+      stroke-width: 2.2;
+    }
+    .inspector {
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 14px;
+      background: #ffffff;
+    }
+    .state-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      gap: 8px;
+      margin-bottom: 6px;
+    }
+    .state-title {
+      font-size: 16px;
+      font-weight: 700;
+      margin: 0;
+    }
+    .owner-pill {
+      font-size: 12px;
+      padding: 2px 8px;
+      border-radius: 4px;
+      background: var(--accent-soft);
+      color: var(--accent);
+      font-weight: 600;
+    }
+    .desc {
+      font-size: 13px;
+      color: var(--muted);
+      margin: 0 0 12px 0;
+    }
+    .triggers-label {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--muted);
+      margin-bottom: 6px;
+    }
+    .triggers {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-bottom: 12px;
+    }
+    button.trigger-btn {
+      font: inherit;
+      font-size: 12.5px;
+      font-weight: 600;
+      padding: 6px 10px;
+      border-radius: 4px;
+      border: 1px solid var(--accent);
+      background: var(--accent-soft);
+      color: var(--ink);
+      cursor: pointer;
+    }
+    button.trigger-btn:hover {
+      background: var(--accent);
+      color: #ffffff;
+    }
+    button.trigger-btn.secondary {
+      border-color: var(--line);
+      background: var(--panel);
+    }
+    button.trigger-btn.secondary:hover {
+      background: #dfe6e5;
+      color: var(--ink);
+    }
+    pre.payload {
+      margin: 0;
+      padding: 10px;
+      font-family: "JetBrains Mono", ui-monospace, monospace;
+      font-size: 11.5px;
+      background: var(--panel);
+      border-radius: 4px;
+      border: 1px solid var(--line);
+      overflow-x: auto;
+      color: var(--ink);
+    }
+    .hint {
+      font-size: 11.5px;
+      color: var(--muted);
+      margin-top: 8px;
+    }
+  </style>
+</head>
+<body>
+  <div class="layout">
+    <div class="diagram-box">
+      <svg viewBox="0 0 440 300" role="img" aria-label="Ward-Breach state machine graph">
+        <defs>
+          <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+            <path d="M 0 1 L 10 5 L 0 9 z" fill="#8ea3a1" />
+          </marker>
+        </defs>
+        <path id="edge-idle-intent" class="edge" d="M 105 55 L 155 55" marker-end="url(#arrow)" />
+        <path id="edge-intent-stakes" class="edge" d="M 285 55 L 320 55" marker-end="url(#arrow)" />
+        <path id="edge-intent-idle" class="edge" d="M 220 75 C 200 105, 85 105, 65 75" marker-end="url(#arrow)" />
+        <path id="edge-stakes-roll" class="edge" d="M 375 75 L 265 140" marker-end="url(#arrow)" />
+        <path id="edge-roll-clean" class="edge" d="M 190 165 L 95 225" marker-end="url(#arrow)" />
+        <path id="edge-roll-strained" class="edge" d="M 220 180 L 220 225" marker-end="url(#arrow)" />
+        <path id="edge-roll-backlash" class="edge" d="M 250 165 L 345 225" marker-end="url(#arrow)" />
+
+        <g class="state-node" data-state="idle" tabindex="0" role="button" aria-label="Idle state">
+          <rect x="20" y="34" width="85" height="42" />
+          <text x="62" y="59" text-anchor="middle">Idle</text>
+        </g>
+        <g class="state-node" data-state="declare_intent" tabindex="0" role="button" aria-label="Intent Declared state">
+          <rect x="155" y="34" width="130" height="42" />
+          <text x="220" y="59" text-anchor="middle">Intent Declared</text>
+        </g>
+        <g class="state-node" data-state="stakes_locked" tabindex="0" role="button" aria-label="Stakes Locked state">
+          <rect x="320" y="34" width="105" height="42" />
+          <text x="372" y="59" text-anchor="middle">Stakes Locked</text>
+        </g>
+        <g class="state-node" data-state="resolving_roll" tabindex="0" role="button" aria-label="Resolving Check state">
+          <rect x="155" y="138" width="130" height="42" />
+          <text x="220" y="163" text-anchor="middle">Resolving Check</text>
+        </g>
+        <g class="state-node" data-state="clean_breach" tabindex="0" role="button" aria-label="Clean Breach outcome">
+          <rect x="20" y="228" width="120" height="44" />
+          <text x="80" y="254" text-anchor="middle">Clean Breach</text>
+        </g>
+        <g class="state-node kind-warn" data-state="strained_entry" tabindex="0" role="button" aria-label="Strained Entry outcome">
+          <rect x="160" y="228" width="120" height="44" />
+          <text x="220" y="254" text-anchor="middle">Strained Entry</text>
+        </g>
+        <g class="state-node kind-danger" data-state="ward_backlash" tabindex="0" role="button" aria-label="Ward Backlash outcome">
+          <rect x="300" y="228" width="120" height="44" />
+          <text x="360" y="254" text-anchor="middle">Ward Backlash</text>
+        </g>
+      </svg>
+      <div class="hint">Click any highlighted state node or trigger button to step transitions. Illustrative prototype state machine.</div>
+    </div>
+
+    <div class="inspector">
+      <div class="state-header">
+        <h3 class="state-title" id="stateTitle">Idle</h3>
+        <span class="owner-pill" id="stateOwner">Player</span>
+      </div>
+      <p class="desc" id="stateDesc"></p>
+
+      <div class="triggers-label">Valid transitions from current state</div>
+      <div class="triggers" id="triggerButtons"></div>
+
+      <div class="triggers-label">Engine state snapshot</div>
+      <pre class="payload" id="statePayload"></pre>
+    </div>
+  </div>
+
+  <script>
+    const STATES = {
+      idle: {
+        title: 'Idle (Threshold Sealed)',
+        owner: 'Player',
+        desc: 'Doorway runes are dormant. Player may inspect ward tier or declare a Breach attempt without spending oil.',
+        edges: [
+          { to: 'declare_intent', label: 'Declare Breach', edgeId: 'edge-idle-intent' }
+        ],
+        payload: { phase: 'idle', oilCommitted: 0, wardResonance: 1, doorLocked: true }
+      },
+      declare_intent: {
+        title: 'Intent Declared',
+        owner: 'Player + Engine',
+        desc: 'Engine previews Rigging modifier and Ward Tier penalty. Player may still abort freely before oil is spent.',
+        edges: [
+          { to: 'stakes_locked', label: 'Commit Lantern Oil', edgeId: 'edge-intent-stakes' },
+          { to: 'idle', label: 'Withdraw Attempt', edgeId: 'edge-intent-idle' }
+        ],
+        payload: { phase: 'declare_intent', previewModifier: '+2 Rigging, -1 Tier II', abortAllowed: true }
+      },
+      stakes_locked: {
+        title: 'Stakes Locked',
+        owner: 'Rules Engine',
+        desc: 'Lantern charges are deducted atomically. Retreating is no longer free; the roll must now resolve.',
+        edges: [
+          { to: 'resolving_roll', label: 'Roll 2d6 Check', edgeId: 'edge-stakes-roll' }
+        ],
+        payload: { phase: 'stakes_locked', oilCommitted: 2, abortAllowed: false, netBonus: 3 }
+      },
+      resolving_roll: {
+        title: 'Resolving Check',
+        owner: 'Rules Engine',
+        desc: 'Engine sums 2d6 + Rigging + Oil - Ward Penalty and routes strictly into one of three threshold bands.',
+        edges: [
+          { to: 'clean_breach', label: 'Total 10+ (Clean)', edgeId: 'edge-roll-clean' },
+          { to: 'strained_entry', label: 'Total 7–9 (Strained)', edgeId: 'edge-roll-strained' },
+          { to: 'ward_backlash', label: 'Total ≤6 (Backlash)', edgeId: 'edge-roll-backlash' }
+        ],
+        payload: { phase: 'resolving_roll', formula: '2d6 + rigging + oil - wardTierPenalty' }
+      },
+      clean_breach: {
+        title: 'Clean Breach (10+)',
+        owner: 'Encounter Model',
+        desc: 'Seal unlatches silently. Ward Resonance remains unchanged and the delve team keeps initiative.',
+        edges: [{ to: 'idle', label: 'Reset Demo Doorway', edgeId: '' }],
+        payload: { outcome: 'clean_breach', doorLocked: false, resonanceDelta: 0, alertTriggered: false }
+      },
+      strained_entry: {
+        title: 'Strained Entry (7–9)',
+        owner: 'Encounter Model + Player',
+        desc: 'Seal opens, but Ward Resonance ticks +1 and player chooses one cost: vent 1 extra oil or draw patrol notice.',
+        edges: [{ to: 'idle', label: 'Reset Demo Doorway', edgeId: '' }],
+        payload: { outcome: 'strained_entry', doorLocked: false, resonanceDelta: 1, pendingChoice: ['vent_oil', 'patrol_notice'] }
+      },
+      ward_backlash: {
+        title: 'Ward Backlash (≤6)',
+        owner: 'Encounter Model / GM',
+        desc: 'Seal fractures into unstable resonance (+2 clock), dealing arc shock and leaving the iron latch jammed.',
+        edges: [{ to: 'idle', label: 'Reset Demo Doorway', edgeId: '' }],
+        payload: { outcome: 'ward_backlash', doorLocked: true, resonanceDelta: 2, unstableFracture: true }
+      }
+    };
+
+    let currentState = 'declare_intent';
+    let transitionCount = 0;
+
+    function reportHeight() {
+      const h = Math.max(260, document.documentElement.scrollHeight);
+      window.parent.postMessage({ type: 'cairn:embed:resize', height: h }, '*');
+    }
+
+    function setState(nextState) {
+      if (!STATES[nextState]) return;
+      currentState = nextState;
+      transitionCount += 1;
+      render();
+      window.parent.postMessage(
+        {
+          type: 'cairn:embed:telemetry',
+          summary: `State: ${STATES[currentState].title} (${transitionCount} steps)`
+        },
+        '*'
+      );
+    }
+
+    function render() {
+      const info = STATES[currentState];
+      document.getElementById('stateTitle').textContent = info.title;
+      document.getElementById('stateOwner').textContent = info.owner;
+      document.getElementById('stateDesc').textContent = info.desc;
+      document.getElementById('statePayload').textContent = JSON.stringify(info.payload, null, 2);
+
+      const validTargets = new Set(info.edges.map((e) => e.to));
+      const validEdgeIds = new Set(info.edges.map((e) => e.edgeId).filter(Boolean));
+
+      document.querySelectorAll('.state-node').forEach((el) => {
+        const key = el.getAttribute('data-state');
+        el.classList.toggle('is-active', key === currentState);
+        el.classList.toggle('is-valid', key !== currentState && validTargets.has(key));
+      });
+
+      document.querySelectorAll('.edge').forEach((el) => {
+        el.classList.toggle('is-available', validEdgeIds.has(el.id));
+      });
+
+      const btnContainer = document.getElementById('triggerButtons');
+      btnContainer.innerHTML = '';
+      info.edges.forEach((edge) => {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'trigger-btn' + (edge.to === 'idle' && currentState !== 'declare_intent' ? ' secondary' : '');
+        btn.textContent = edge.label;
+        btn.addEventListener('click', () => setState(edge.to));
+        btnContainer.appendChild(btn);
+      });
+
+      reportHeight();
+    }
+
+    document.querySelectorAll('.state-node').forEach((el) => {
+      const activate = () => setState(el.getAttribute('data-state'));
+      el.addEventListener('click', activate);
+      el.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          activate();
+        }
+      });
+    });
+
+    window.addEventListener('message', (event) => {
+      const data = event.data;
+      if (data && data.type === 'cairn:embed:init' && data.props) {
+        if (typeof data.props.initialState === 'string' && STATES[data.props.initialState]) {
+          currentState = data.props.initialState;
+          render();
+        }
+      }
+    });
+
+    window.addEventListener('resize', reportHeight);
+    render();
+    window.parent.postMessage({ type: 'cairn:embed:ready', height: document.documentElement.scrollHeight }, '*');
+  </script>
+</body>
+</html>

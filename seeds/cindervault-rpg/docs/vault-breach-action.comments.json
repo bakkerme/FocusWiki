@@ -1,0 +1,97 @@
+{
+  "version": 1,
+  "document": "docs/vault-breach-action.md",
+  "threads": [
+    {
+      "id": "thr_seed_open_01",
+      "status": "open",
+      "createdAt": "2026-11-15T03:40:00.000Z",
+      "updatedAt": "2026-11-15T03:45:00.000Z",
+      "anchor": {
+        "quote": "the Ward-Seal fractures into unstable resonance before the iron doors unlatch",
+        "prefix": "fails a Breach check on a 6 or lower, ",
+        "suffix": ", adding +2 segments to the room clock",
+        "headingContext": "Threshold Bands and Clock Rules"
+      },
+      "messages": [
+        {
+          "id": "msg_seed_01",
+          "author": "Mira (Systems Review)",
+          "role": "human",
+          "createdAt": "2026-11-15T03:40:00.000Z",
+          "body": "If the +2 resonance surge fills segment 4/4 on the room clock, does the room hazard trigger before or after the jammed-bolt status is applied?"
+        },
+        {
+          "id": "msg_seed_02",
+          "author": "Rules Bot",
+          "role": "bot",
+          "createdAt": "2026-11-15T03:45:00.000Z",
+          "body": "Good catch: the bolt jams atomically on step 4, then clock overflow resolves immediately afterward so the party cannot slip through an open doorway during discharge."
+        }
+      ],
+      "history": [
+        {
+          "action": "created",
+          "actor": "Mira (Systems Review)",
+          "role": "human",
+          "at": "2026-11-15T03:40:00.000Z"
+        },
+        {
+          "action": "replied",
+          "actor": "Rules Bot",
+          "role": "bot",
+          "at": "2026-11-15T03:45:00.000Z"
+        }
+      ]
+    },
+    {
+      "id": "thr_seed_resolved_02",
+      "status": "resolved",
+      "createdAt": "2026-11-15T03:20:00.000Z",
+      "updatedAt": "2026-11-15T03:32:00.000Z",
+      "anchor": {
+        "quote": "each breach attempt caps committed Lantern Oil at two charges per action",
+        "prefix": "To keep mid-delve tension predictable, ",
+        "suffix": " regardless of pack capacity. Assisted",
+        "headingContext": "Resource Caps and Assumptions"
+      },
+      "messages": [
+        {
+          "id": "msg_seed_03",
+          "author": "Devon (Balance)",
+          "role": "human",
+          "createdAt": "2026-11-15T03:20:00.000Z",
+          "body": "Previously uncapped Lantern Oil let high-supply teams guarantee 10+ on Tier III vaults. Confirming the two-charge ceiling matches the Outcome Playground slider."
+        },
+        {
+          "id": "msg_seed_04",
+          "author": "Devon (Balance)",
+          "role": "human",
+          "createdAt": "2026-11-15T03:32:00.000Z",
+          "body": "Verified against the playground slider max=2. Marking resolved."
+        }
+      ],
+      "history": [
+        {
+          "action": "created",
+          "actor": "Devon (Balance)",
+          "role": "human",
+          "at": "2026-11-15T03:20:00.000Z"
+        },
+        {
+          "action": "replied",
+          "actor": "Devon (Balance)",
+          "role": "human",
+          "at": "2026-11-15T03:32:00.000Z"
+        },
+        {
+          "action": "resolved",
+          "actor": "Devon (Balance)",
+          "role": "human",
+          "at": "2026-11-15T03:32:00.000Z",
+          "note": "Slider range and prose aligned at 2 charges."
+        }
+      ]
+    }
+  ]
+}

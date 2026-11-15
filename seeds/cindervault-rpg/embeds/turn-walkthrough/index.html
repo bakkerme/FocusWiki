@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Encounter Step-Through Walkthrough</title>
+  <style>
+    :root {
+      --bg: #fafbf9;
+      --panel: #f2f4f3;
+      --ink: #162326;
+      --muted: #4e6166;
+      --line: #cfd8d7;
+      --accent: #1b6b63;
+      --accent-soft: #e1f0ee;
+      --amber: #c27d18;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 16px;
+      font-family: "Plus Jakarta Sans", system-ui, -apple-system, sans-serif;
+      background: var(--bg);
+      color: var(--ink);
+    }
+    .stepper {
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      gap: 6px;
+      margin-bottom: 14px;
+    }
+    .step-tab {
+      font: inherit;
+      font-size: 12px;
+      padding: 8px 6px;
+      border-radius: 5px;
+      border: 1px solid var(--line);
+      background: var(--panel);
+      color: var(--muted);
+      cursor: pointer;
+      text-align: left;
+      font-weight: 600;
+    }
+    .step-tab.active {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: #ffffff;
+    }
+    .card {
+      background: #ffffff;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 14px;
+      display: grid;
+      grid-template-columns: 1.5fr 1fr;
+      gap: 16px;
+    }
+    @media (max-width: 640px) {
+      .stepper { grid-template-columns: 1fr 1fr; }
+      .card { grid-template-columns: 1fr; }
+    }
+    .beat-title {
+      margin: 0 0 6px 0;
+      font-size: 16px;
+      font-weight: 700;
+    }
+    .actor-line {
+      font-size: 12.5px;
+      font-weight: 600;
+      color: var(--accent);
+      margin-bottom: 8px;
+    }
+    .narrative {
+      font-size: 13.5px;
+      line-height: 1.55;
+      color: var(--ink);
+      margin: 0 0 12px 0;
+    }
+    .choice-row {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-top: 8px;
+    }
+    .choice-btn {
+      font: inherit;
+      font-size: 12px;
+      font-weight: 600;
+      padding: 6px 10px;
+      border-radius: 4px;
+      border: 1px solid var(--line);
+      background: var(--panel);
+      cursor: pointer;
+    }
+    .choice-btn.selected {
+      border-color: var(--accent);
+      background: var(--accent-soft);
+      color: var(--accent);
+    }
+    .meters {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 5px;
+      padding: 12px;
+      font-size: 12.5px;
+    }
+    .meter-row {
+      display: flex;
+      justify-content: space-between;
+      padding: 5px 0;
+      border-bottom: 1px solid #e0e7e6;
+    }
+    .meter-row:last-child { border-bottom: none; }
+    .clock-pips {
+      display: inline-flex;
+      gap: 4px;
+      align-items: center;
+    }
+    .pip {
+      width: 11px;
+      height: 11px;
+      border-radius: 50%;
+      border: 1.5px solid var(--amber);
+      background: transparent;
+    }
+    .pip.filled {
+      background: var(--amber);
+    }
+    .controls {
+      margin-top: 12px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .nav-btn {
+      font: inherit;
+      font-size: 12.5px;
+      font-weight: 600;
+      padding: 6px 12px;
+      border-radius: 4px;
+      border: 1px solid var(--line);
+      background: #ffffff;
+      cursor: pointer;
+    }
+    .nav-btn:disabled {
+      opacity: 0.45;
+      cursor: default;
+    }
+    .step-counter {
+      font-size: 12px;
+      color: var(--muted);
+    }
+  </style>
+</head>
+<body>
+  <div class="stepper" id="stepper"></div>
+
+  <div class="card">
+    <div>
+      <div class="actor-line" id="beatActor"></div>
+      <h3 class="beat-title" id="beatTitle"></h3>
+      <p class="narrative" id="beatNarrative"></p>
+      <div id="consequenceBranch" style="display:none">
+        <div style="font-size:12px;font-weight:600;color:#4e6166;margin-bottom:4px;">Select 7–9 consequence cost:</div>
+        <div class="choice-row">
+          <button type="button" class="choice-btn selected" id="optVent">Vent 1 extra Lantern Oil</button>
+          <button type="button" class="choice-btn" id="optPatrol">Trigger Hallway Patrol Clock</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="meters">
+      <div style="font-weight:700;margin-bottom:6px;">Reliquary Doorway State</div>
+      <div class="meter-row">
+        <span>Door Seal</span>
+        <strong id="mDoor"></strong>
+      </div>
+      <div class="meter-row">
+        <span>Sable Lantern Oil</span>
+        <strong id="mOil"></strong>
+      </div>
+      <div class="meter-row">
+        <span>Check Breakdown</span>
+        <strong id="mRoll"></strong>
+      </div>
+      <div class="meter-row">
+        <span>Ward Resonance</span>
+        <span class="clock-pips" id="mClock"></span>
+      </div>
+      <div class="meter-row">
+        <span>Patrol Alert</span>
+        <strong id="mAlert"></strong>
+      </div>
+    </div>
+  </div>
+
+  <div class="controls">
+    <button type="button" class="nav-btn" id="prevBtn">Previous beat</button>
+    <span class="step-counter" id="stepCounter"></span>
+    <button type="button" class="nav-btn" id="nextBtn">Next beat</button>
+  </div>
+
+  <script>
+    const BEATS = [
+      {
+        short: '1. Inspect',
+        actor: 'Player -> Engine Query',
+        title: 'Sable inspects the Sunken Reliquary seal',
+        narrative: 'Sable examines the copper ward-filament on the Reliquary door. The engine exposes Tier II Ward resistance (-1) and her Rigging +2 rating before any resource is spent.',
+        door: 'Sealed (Tier II)',
+        oil: 4,
+        roll: 'Preview: +1 net',
+        resonance: 1,
+        alert: 'Quiet'
+      },
+      {
+        short: '2. Lock Stakes',
+        actor: 'Player -> Rules Engine',
+        title: 'Commit 1 Lantern Oil for stabilized arc-tongs',
+        narrative: 'Sable commits 1 Lantern Oil (+1 bonus), bringing her net modifier to +2. The engine deducts oil from 4 to 3 and locks the action against free rollback.',
+        door: 'Stakes Locked',
+        oil: 3,
+        roll: '2d6 + 2 queued',
+        resonance: 1,
+        alert: 'Quiet'
+      },
+      {
+        short: '3. Roll 2d6',
+        actor: 'Rules Engine',
+        title: 'Dice roll [4, 2] + 2 = 8 (Strained Entry)',
+        narrative: 'The engine rolls 4 and 2 (base 6) plus +2 net modifier for a total of 8. Because 8 falls in the 7–9 band, the doorway unlatches under strain rather than cleanly.',
+        door: 'Unlatching (7–9)',
+        oil: 3,
+        roll: '[4,2] + 2 = 8',
+        resonance: 1,
+        alert: 'Quiet'
+      },
+      {
+        short: '4. Clock Tick',
+        actor: 'Encounter Model',
+        title: 'Ward Resonance advances from 1/4 to 2/4',
+        narrative: 'As copper filaments snap, the Encounter Model advances the room Ward Resonance clock to 2/4 and prompts Sable to choose how the team absorbs the remaining feedback.',
+        door: 'Ajar (Arcing)',
+        oil: 3,
+        roll: '8 -> Strained',
+        resonance: 2,
+        alert: 'Pending choice'
+      },
+      {
+        short: '5. Aftermath',
+        actor: 'Player Choice -> Model Commit',
+        title: 'Team resolves the Strained Entry cost',
+        narrative: '',
+        door: 'Open',
+        oil: 2,
+        roll: 'Resolved',
+        resonance: 2,
+        alert: 'Quiet'
+      }
+    ];
+
+    let index = 0;
+    let costChoice = 'vent'; // 'vent' | 'patrol'
+
+    function reportHeight() {
+      window.parent.postMessage({ type: 'cairn:embed:resize', height: Math.max(250, document.documentElement.scrollHeight) }, '*');
+    }
+
+    function render() {
+      const stepper = document.getElementById('stepper');
+      stepper.innerHTML = '';
+      BEATS.forEach((b, idx) => {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'step-tab' + (idx === index ? ' active' : '');
+        btn.textContent = b.short;
+        btn.addEventListener('click', () => {
+          index = idx;
+          render();
+        });
+        stepper.appendChild(btn);
+      });
+
+      const beat = BEATS[index];
+      document.getElementById('beatActor').textContent = beat.actor;
+      document.getElementById('beatTitle').textContent = beat.title;
+
+      let oil = beat.oil;
+      let alertState = beat.alert;
+      let narrative = beat.narrative;
+
+      if (index === 4) {
+        if (costChoice === 'vent') {
+          oil = 2;
+          alertState = 'Quiet (0/3)';
+          narrative = 'Sable floods the hinge coil with 1 extra Lantern Oil (dropping reserve to 2). The hum dies down before the Bronze Automaton in the next gallery hears it.';
+        } else {
+          oil = 3;
+          alertState = 'Alerted (1/3)';
+          narrative = 'Sable preserves her remaining 3 Lantern Oil and lets the ward chime ring down the hall. The Encounter Model ticks the Gallery Patrol clock to 1/3.';
+        }
+      }
+
+      document.getElementById('beatNarrative').textContent = narrative;
+      document.getElementById('consequenceBranch').style.display = index >= 3 ? 'block' : 'none';
+      document.getElementById('optVent').classList.toggle('selected', costChoice === 'vent');
+      document.getElementById('optPatrol').classList.toggle('selected', costChoice === 'patrol');
+
+      document.getElementById('mDoor').textContent = beat.door;
+      document.getElementById('mOil').textContent = `${oil} / 4 charges`;
+      document.getElementById('mRoll').textContent = beat.roll;
+      document.getElementById('mAlert').textContent = alertState;
+
+      const clockEl = document.getElementById('mClock');
+      clockEl.innerHTML = '';
+      for (let p = 1; p <= 4; p++) {
+        const dot = document.createElement('span');
+        dot.className = 'pip' + (p <= beat.resonance ? ' filled' : '');
+        clockEl.appendChild(dot);
+      }
+
+      document.getElementById('prevBtn').disabled = index === 0;
+      document.getElementById('nextBtn').disabled = index === BEATS.length - 1;
+      document.getElementById('stepCounter').textContent = `Beat ${index + 1} of ${BEATS.length} (fictional trace)`;
+
+      window.parent.postMessage(
+        { type: 'cairn:embed:telemetry', summary: `Beat ${index + 1}/${BEATS.length}: ${beat.short}` },
+        '*'
+      );
+      reportHeight();
+    }
+
+    document.getElementById('prevBtn').addEventListener('click', () => {
+      if (index > 0) { index -= 1; render(); }
+    });
+    document.getElementById('nextBtn').addEventListener('click', () => {
+      if (index < BEATS.length - 1) { index += 1; render(); }
+    });
+    document.getElementById('optVent').addEventListener('click', () => {
+      costChoice = 'vent';
+      render();
+    });
+    document.getElementById('optPatrol').addEventListener('click', () => {
+      costChoice = 'patrol';
+      render();
+    });
+
+    window.addEventListener('message', (event) => {
+      if (event.data && event.data.type === 'cairn:embed:init' && event.data.props) {
+        const step = Number(event.data.props.initialBeat);
+        if (Number.isInteger(step) && step >= 0 && step < BEATS.length) {
+          index = step;
+          render();
+        }
+      }
+    });
+
+    window.addEventListener('resize', reportHeight);
+    render();
+    window.parent.postMessage({ type: 'cairn:embed:ready', height: document.documentElement.scrollHeight }, '*');
+  </script>
+</body>
+</html>
