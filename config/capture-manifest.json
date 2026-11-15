@@ -1,0 +1,249 @@
+{
+  "schemaVersion": 1,
+  "appName": "Cairn Repository Documentation Hub",
+  "defaultBaseUrl": "http://127.0.0.1:8088",
+  "alternateBaseUrls": [
+    "http://100.117.116.91:8088"
+  ],
+  "targets": [
+    {
+      "id": "doc-initial-edit",
+      "label": "Document Initial View (Current Visual Edit Default)",
+      "defaultSelected": true,
+      "actualAppState": "visual-edit-default",
+      "honestStateNote": "App currently opens directly in TipTap visual edit mode with text-label formatting toolbar, left repository/document sidebar, and open right review margin. Proposed read-first viewer mode is not yet implemented.",
+      "route": "/?project=cindervault-rpg&doc=docs%2Fvault-breach-action.md",
+      "projectId": "cindervault-rpg",
+      "docPath": "docs/vault-breach-action.md",
+      "captureScope": "viewport",
+      "viewport": {
+        "width": 1440,
+        "height": 900,
+        "deviceScaleFactor": 1,
+        "colorScheme": "light",
+        "reducedMotion": true
+      },
+      "steps": [
+        { "kind": "navigate" },
+        { "kind": "ensureMode", "mode": "visual" },
+        { "kind": "ensureReviewSidebar", "open": true, "showResolved": false },
+        { "kind": "scrollContainerTop", "selector": ".sheet-scroll", "top": 0 }
+      ],
+      "readiness": {
+        "requiredSelectors": [
+          ".workbench",
+          ".nav-sidebar",
+          ".repo-topbar",
+          ".editor-toolbar",
+          ".ProseMirror h1",
+          ".ProseMirror table",
+          ".review-sidebar",
+          ".save-badge.saved"
+        ],
+        "waitForFonts": true,
+        "waitForVisibleEmbeds": false,
+        "assertSavedState": true,
+        "timeoutMs": 12000
+      }
+    },
+    {
+      "id": "source-editing",
+      "label": "Markdown Source Mode (Current Centered Textarea)",
+      "defaultSelected": true,
+      "actualAppState": "markdown-source-textarea",
+      "honestStateNote": "Switched via the header 'Markdown source' toggle. Currently renders a centered 78ch <textarea> inside .sheet-scroll rather than a full-workspace code editor; switching modes does not modify disk content.",
+      "route": "/?project=cindervault-rpg&doc=docs%2Fvault-breach-action.md",
+      "projectId": "cindervault-rpg",
+      "docPath": "docs/vault-breach-action.md",
+      "captureScope": "viewport",
+      "viewport": {
+        "width": 1440,
+        "height": 900,
+        "deviceScaleFactor": 1,
+        "colorScheme": "light",
+        "reducedMotion": true
+      },
+      "steps": [
+        { "kind": "navigate" },
+        { "kind": "ensureMode", "mode": "source" },
+        { "kind": "scrollContainerTop", "selector": ".sheet-scroll", "top": 0 }
+      ],
+      "readiness": {
+        "requiredSelectors": [
+          ".workbench",
+          ".repo-topbar",
+          "textarea.markdown-source-editor",
+          ".save-badge.saved"
+        ],
+        "minTextareaChars": 120,
+        "waitForFonts": true,
+        "waitForVisibleEmbeds": false,
+        "assertSavedState": true,
+        "timeoutMs": 12000
+      }
+    },
+    {
+      "id": "review-thread-open",
+      "label": "Inline Review Thread Focused with Anchored Highlight & History",
+      "defaultSelected": true,
+      "actualAppState": "visual-edit-review-thread-open",
+      "honestStateNote": "Visual edit mode with the open inline comment thread selected, resolved threads shown for comparison, thread audit history expanded, and the anchored prose highlight scrolled into view. Pure UI state; does not write to .comments.json.",
+      "route": "/?project=cindervault-rpg&doc=docs%2Fvault-breach-action.md",
+      "projectId": "cindervault-rpg",
+      "docPath": "docs/vault-breach-action.md",
+      "captureScope": "viewport",
+      "viewport": {
+        "width": 1440,
+        "height": 900,
+        "deviceScaleFactor": 1,
+        "colorScheme": "light",
+        "reducedMotion": true
+      },
+      "steps": [
+        { "kind": "navigate" },
+        { "kind": "ensureMode", "mode": "visual" },
+        { "kind": "ensureReviewSidebar", "open": true, "showResolved": true },
+        { "kind": "selectThread", "index": 0, "expandHistory": true },
+        {
+          "kind": "scrollElementIntoContainer",
+          "container": ".sheet-scroll",
+          "target": ".cairn-comment-highlight.active, .cairn-comment-highlight",
+          "offsetTop": 160
+        }
+      ],
+      "readiness": {
+        "requiredSelectors": [
+          ".workbench",
+          ".review-sidebar",
+          ".thread-card.active",
+          ".cairn-comment-highlight",
+          ".save-badge.saved"
+        ],
+        "waitForFonts": true,
+        "waitForVisibleEmbeds": false,
+        "assertSavedState": true,
+        "timeoutMs": 12000
+      }
+    },
+    {
+      "id": "embed-visible",
+      "label": "Sandboxed Interactive Embed Visible in Document Flow",
+      "defaultSelected": true,
+      "actualAppState": "visual-edit-embed-visible",
+      "honestStateNote": "Visual edit mode scrolled to the first sandboxed project component (embeds/state-explorer/index.html), showing the block action header, iframe height container, and surrounding prose.",
+      "route": "/?project=cindervault-rpg&doc=docs%2Fvault-breach-action.md",
+      "projectId": "cindervault-rpg",
+      "docPath": "docs/vault-breach-action.md",
+      "captureScope": "viewport",
+      "viewport": {
+        "width": 1440,
+        "height": 900,
+        "deviceScaleFactor": 1,
+        "colorScheme": "light",
+        "reducedMotion": true
+      },
+      "steps": [
+        { "kind": "navigate" },
+        { "kind": "ensureMode", "mode": "visual" },
+        {
+          "kind": "scrollElementIntoContainer",
+          "container": ".sheet-scroll",
+          "target": ".embed-frame-wrapper",
+          "offsetTop": 24
+        }
+      ],
+      "readiness": {
+        "requiredSelectors": [
+          ".workbench",
+          ".embed-frame-wrapper",
+          "iframe.embed-sandbox-iframe",
+          ".save-badge.saved"
+        ],
+        "waitForFonts": true,
+        "waitForVisibleEmbeds": true,
+        "assertSavedState": true,
+        "timeoutMs": 15000
+      }
+    },
+    {
+      "id": "narrow-viewport",
+      "label": "Narrow Responsive Layout (768x960 Single-Column Stack)",
+      "defaultSelected": true,
+      "actualAppState": "narrow-single-column-visual-edit",
+      "honestStateNote": "Single-column <=880px layout at 768x960 scrolled to the sidebar-to-document transition so reviewers can inspect stacked navigation, wrapping text-label toolbar controls, and narrow prose legibility.",
+      "route": "/?project=cindervault-rpg&doc=docs%2Fvault-breach-action.md",
+      "projectId": "cindervault-rpg",
+      "docPath": "docs/vault-breach-action.md",
+      "captureScope": "viewport",
+      "viewport": {
+        "width": 768,
+        "height": 960,
+        "deviceScaleFactor": 1,
+        "colorScheme": "light",
+        "reducedMotion": true
+      },
+      "steps": [
+        { "kind": "navigate" },
+        { "kind": "ensureMode", "mode": "visual" },
+        { "kind": "scrollWindowToElement", "target": ".document-stage", "offsetTop": 64 }
+      ],
+      "readiness": {
+        "requiredSelectors": [
+          ".workbench",
+          ".document-stage",
+          ".repo-topbar",
+          ".editor-toolbar",
+          ".ProseMirror h1",
+          ".save-badge.saved"
+        ],
+        "waitForFonts": true,
+        "waitForVisibleEmbeds": false,
+        "assertSavedState": true,
+        "timeoutMs": 12000
+      }
+    },
+    {
+      "id": "helios-lab-embed",
+      "label": "Helios Lab Runbook: Inventory Table & Power Sequencer Embed",
+      "defaultSelected": false,
+      "actualAppState": "visual-edit-second-project-embed",
+      "honestStateNote": "Second repository (helios-lab) in visual edit mode scrolled to show the synthetic RFC 5737 inventory table, sandboxed power-sequencer component, and open review thread.",
+      "route": "/?project=helios-lab&doc=docs%2Fbench-inventory.md",
+      "projectId": "helios-lab",
+      "docPath": "docs/bench-inventory.md",
+      "captureScope": "viewport",
+      "viewport": {
+        "width": 1440,
+        "height": 900,
+        "deviceScaleFactor": 1,
+        "colorScheme": "light",
+        "reducedMotion": true
+      },
+      "steps": [
+        { "kind": "navigate" },
+        { "kind": "ensureMode", "mode": "visual" },
+        { "kind": "ensureReviewSidebar", "open": true, "showResolved": false },
+        {
+          "kind": "scrollElementIntoContainer",
+          "container": ".sheet-scroll",
+          "target": ".embed-frame-wrapper",
+          "offsetTop": 140
+        }
+      ],
+      "readiness": {
+        "requiredSelectors": [
+          ".workbench",
+          ".ProseMirror table",
+          ".embed-frame-wrapper",
+          "iframe.embed-sandbox-iframe",
+          ".review-sidebar",
+          ".save-badge.saved"
+        ],
+        "waitForFonts": true,
+        "waitForVisibleEmbeds": true,
+        "assertSavedState": true,
+        "timeoutMs": 15000
+      }
+    }
+  ]
+}
