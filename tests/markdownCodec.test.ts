@@ -93,4 +93,43 @@ Press <kbd>Alt+C</kbd> to comment on a selected clause[^design-note].
     const out = proseMirrorToMarkdown(pm);
     expect(out).toContain('not valid key value syntax');
   });
+
+  it('preserves untouched compact GFM tables and blocks verbatim when editing prose with baseMarkdown', () => {
+    const compactTable = [
+      '| Beat | Authoritative Owner | Input Consumed | Guaranteed Output |',
+      '| :--- | :--- | :--- | :--- |',
+      '| 1. Inspect & Declare | Player | Target doorway ID, Rigging toolset | Previewed modifier without resource spend |',
+      '| 2. Lock Stakes | Rules Engine | Committed Lantern Oil (`0` to `2` charges) | Atomic oil deduction; rollback disabled |'
+    ].join('\n');
+
+    const baseDoc = `# Action Resolution\n\n> Initial specification note.\n\nIntroductory paragraph.\n\n${compactTable}\n`;
+    const pm = markdownToProseMirror(baseDoc);
+
+    // 1. Edit only the blockquote (simulating appending "But maybe one day.")
+    const bq = pm.content![1];
+    const bqPara = bq.content![0];
+    bqPara.content![0].text = 'Initial specification note. But maybe one day.';
+
+    const serializedAfterProseEdit = proseMirrorToMarkdown(pm, baseDoc);
+    expect(serializedAfterProseEdit).toContain('> Initial specification note. But maybe one day.');
+    // Untouched compact table must remain byte-for-byte identical (no pipe padding churn)
+    expect(serializedAfterProseEdit).toContain(compactTable);
+
+    // 2. Insert a brand-new paragraph above the table; untouched table still stays verbatim
+    pm.content!.splice(3, 0, {
+      type: 'paragraph',
+      content: [{ type: 'text', text: 'Newly inserted paragraph above the matrix.' }]
+    });
+    const serializedAfterInsert = proseMirrorToMarkdown(pm, baseDoc);
+    expect(serializedAfterInsert).toContain('Newly inserted paragraph above the matrix.');
+    expect(serializedAfterInsert).toContain(compactTable);
+
+    // 3. Edit an actual cell inside the table -> table updates cleanly with new cell content
+    const tableNode = pm.content!.find((n) => n.type === 'table')!;
+    tableNode.content![1].content![1].content![0].content = [
+      { type: 'text', text: 'Updated Owner' }
+    ];
+    const serializedAfterTableEdit = proseMirrorToMarkdown(pm, baseDoc);
+    expect(serializedAfterTableEdit).toContain('Updated Owner');
+  });
 });

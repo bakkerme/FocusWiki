@@ -52,7 +52,7 @@
       "label": "Explicit Visual Editor Mode (Icon Toolbar & Authoring Save Status)",
       "defaultSelected": true,
       "actualAppState": "visual-edit-explicit",
-      "honestStateNote": "Entered explicitly via Edit into Visual editor mode: shows sticky formatting toolbar, authoring Save status badge (Saved), Visual / Source switcher, Done button, and expanded Project embeds inventory.",
+      "honestStateNote": "Entered explicitly via Edit into Visual editor mode: shows sticky formatting toolbar, authoring Save status badge (Saved), Visual / Source switcher, text-label Revert button (disabled until session changes exist), primary Done button, and expanded Project embeds inventory.",
       "route": "/?project=cindervault-rpg&doc=docs%2Fvault-breach-action.md",
       "projectId": "cindervault-rpg",
       "docPath": "docs/vault-breach-action.md",
@@ -76,6 +76,8 @@
           ".nav-sidebar",
           ".repo-topbar",
           ".mode-switch",
+          ".btn-revert-session",
+          ".btn-done-editing",
           ".editor-toolbar",
           ".ProseMirror h1",
           ".ProseMirror .tableWrapper table",
@@ -626,6 +628,153 @@
         "waitForVisibleEmbeds": true,
         "assertSavedState": true,
         "timeoutMs": 15000
+      }
+    },
+    {
+      "id": "desktop-centered-review-closed",
+      "label": "Desktop Read with Docs Open & Review Closed (Centered in Document Stage)",
+      "defaultSelected": false,
+      "actualAppState": "desktop-nav-open-review-closed-centered",
+      "honestStateNote": "Desktop 1440x900 Read mode with left Docs navigation open and right Review rail closed: constrained 67ch prose column centers symmetrically inside main.document-stage (not underneath left nav).",
+      "route": "/?project=cindervault-rpg&doc=docs%2Fvault-breach-action.md",
+      "projectId": "cindervault-rpg",
+      "docPath": "docs/vault-breach-action.md",
+      "captureScope": "viewport",
+      "viewport": {
+        "width": 1440,
+        "height": 900,
+        "deviceScaleFactor": 1,
+        "colorScheme": "light",
+        "reducedMotion": true
+      },
+      "steps": [
+        { "kind": "navigate" },
+        { "kind": "ensureNavDrawer", "open": true },
+        { "kind": "ensureReviewSidebar", "open": false },
+        { "kind": "scrollContainerTop", "selector": ".sheet-scroll", "top": 0 }
+      ],
+      "readiness": {
+        "requiredSelectors": [
+          ".workbench.nav-open.review-closed[data-workspace-mode=\"read\"]",
+          ".nav-sidebar",
+          ".prose-container",
+          ".ProseMirror h1"
+        ],
+        "waitForFonts": true,
+        "waitForVisibleEmbeds": false,
+        "assertSavedState": true,
+        "timeoutMs": 12000
+      }
+    },
+    {
+      "id": "phone-visual-edit-revert",
+      "label": "Phone Visual Editor Header with Text-Label Revert + Primary Done (390x844)",
+      "defaultSelected": false,
+      "actualAppState": "phone-visual-edit-revert-done",
+      "honestStateNote": "Phone portrait 390x844 in Visual editor mode showing compact Visual/Source switcher alongside text-label Revert and primary Done buttons without horizontal overflow.",
+      "route": "/?project=cindervault-rpg&doc=docs%2Fvault-breach-action.md",
+      "projectId": "cindervault-rpg",
+      "docPath": "docs/vault-breach-action.md",
+      "captureScope": "viewport",
+      "viewport": {
+        "width": 390,
+        "height": 844,
+        "deviceScaleFactor": 1,
+        "colorScheme": "light",
+        "reducedMotion": true
+      },
+      "steps": [
+        { "kind": "navigate" },
+        { "kind": "ensureMode", "mode": "visual" },
+        { "kind": "scrollContainerTop", "selector": ".sheet-scroll", "top": 0 }
+      ],
+      "readiness": {
+        "requiredSelectors": [
+          ".workbench[data-workspace-mode=\"visual\"]",
+          ".mode-switch",
+          ".btn-revert-session",
+          ".btn-done-editing",
+          ".editor-toolbar"
+        ],
+        "waitForFonts": true,
+        "waitForVisibleEmbeds": false,
+        "assertSavedState": true,
+        "timeoutMs": 12000
+      }
+    },
+    {
+      "id": "desktop-rich-change-review",
+      "label": "Desktop Rich Change Review Workspace (1440x900 — Prose Word Diff & Table Formatting Separated)",
+      "defaultSelected": false,
+      "actualAppState": "desktop-rich-change-review-modal",
+      "honestStateNote": "1440x900 Rich Change Review modal on cindervault-rpg showing human document title + path, inline word addition ('But maybe one day.'), explicit Formatting only badge for GFM table pipe padding, Rich/Raw toggle, whole-tree commit scope, and zero OpenBot attribution text.",
+      "route": "/?project=cindervault-rpg&doc=docs%2Fvault-breach-action.md",
+      "projectId": "cindervault-rpg",
+      "docPath": "docs/vault-breach-action.md",
+      "captureScope": "viewport",
+      "viewport": {
+        "width": 1440,
+        "height": 900,
+        "deviceScaleFactor": 1,
+        "colorScheme": "light",
+        "reducedMotion": true
+      },
+      "steps": [
+        { "kind": "navigate" },
+        {
+          "kind": "openGitReviewModal",
+          "viewMode": "rich",
+          "expandFirstFormattingPreview": true
+        }
+      ],
+      "readiness": {
+        "requiredSelectors": [
+          ".change-review-modal",
+          ".change-file-rail",
+          ".change-detail-pane",
+          ".rich-token-add",
+          ".rich-change-card.is-formatting-only",
+          ".change-commit-footer"
+        ],
+        "waitForFonts": true,
+        "waitForVisibleEmbeds": false,
+        "assertSavedState": true,
+        "timeoutMs": 12000
+      }
+    },
+    {
+      "id": "phone-rich-change-review",
+      "label": "Phone Rich Change Review Workspace (390x844 Stacked Sheet)",
+      "defaultSelected": false,
+      "actualAppState": "phone-rich-change-review-modal",
+      "honestStateNote": "390x844 phone portrait Rich Change Review sheet showing compact file rail, inline word diff ('But maybe one day.'), separated formatting-only table card, Rich/Raw switcher, and responsive commit controls.",
+      "route": "/?project=cindervault-rpg&doc=docs%2Fvault-breach-action.md",
+      "projectId": "cindervault-rpg",
+      "docPath": "docs/vault-breach-action.md",
+      "captureScope": "viewport",
+      "viewport": {
+        "width": 390,
+        "height": 844,
+        "deviceScaleFactor": 1,
+        "colorScheme": "light",
+        "reducedMotion": true
+      },
+      "steps": [
+        { "kind": "navigate" },
+        { "kind": "openGitReviewModal", "viewMode": "rich" }
+      ],
+      "readiness": {
+        "requiredSelectors": [
+          ".change-review-modal",
+          ".change-file-rail",
+          ".rich-token-add",
+          ".rich-change-card.is-formatting-only",
+          ".change-commit-footer"
+        ],
+        "waitForFonts": true,
+        "waitForVisibleEmbeds": false,
+        "assertSavedState": true,
+        "timeoutMs": 12000
       }
     }
   ]

@@ -2,7 +2,6 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { OPENBOT_TRAILER } from '../server/gitService.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, __dirname.includes(`${path.sep}dist${path.sep}`) ? '../../..' : '..');
@@ -46,11 +45,7 @@ function seedSingleRepo(repoName: string, forceReset: boolean): void {
   execFileSync('git', ['add', '-A'], { cwd: repoDest, stdio: 'pipe' });
   execFileSync(
     'git',
-    [
-      'commit',
-      '-m',
-      `Initialize fictional ${repoName} documentation repository\n\n${OPENBOT_TRAILER}`
-    ],
+    ['commit', '-m', `Initialize fictional ${repoName} documentation repository`],
     { cwd: repoDest, stdio: 'pipe' }
   );
   console.log(`[seed] Initialized Git repository ${repoDest} on branch main`);

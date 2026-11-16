@@ -23,6 +23,11 @@ export type CaptureStep =
       clickCommentPill?: boolean;
       draftText?: string;
     }
+  | {
+      kind: 'openGitReviewModal';
+      viewMode?: 'rich' | 'raw-file';
+      expandFirstFormattingPreview?: boolean;
+    }
   | { kind: 'scrollContainerTop'; selector: string; top: number }
   | {
       kind: 'scrollElementIntoContainer';
@@ -719,6 +724,34 @@ export function buildInPageStepAndReadinessExpression(spec: InPageCaptureSpec): 
                 }
                 ta.dispatchEvent(new Event("input", { bubbles: true }));
               }
+            }
+          }
+          await new Promise((r) => requestAnimationFrame(r));
+          continue;
+        }
+
+        if (s.kind === "openGitReviewModal") {
+          const gitBtn = document.querySelector(".git-status-btn");
+          if (!gitBtn) throw new Error(".git-status-btn not found");
+          gitBtn.click();
+          const modalOk = await waitCond(
+            () =>
+              Boolean(document.querySelector(".change-review-modal")) &&
+              !document.querySelector(".change-review-empty")?.textContent?.includes("Inspecting"),
+            6000
+          );
+          if (!modalOk) throw new Error("Change review modal did not finish loading");
+          if (s.viewMode === "raw-file") {
+            const rawBtn = Array.from(
+              document.querySelectorAll(".change-view-switch button")
+            ).find((b) => (b.textContent || "").trim() === "Raw diff");
+            if (rawBtn) rawBtn.click();
+          }
+          if (s.expandFirstFormattingPreview) {
+            const det = document.querySelector(".rich-formatting-details");
+            if (det && !det.hasAttribute("open")) {
+              const sum = det.querySelector("summary");
+              if (sum) sum.click();
             }
           }
           await new Promise((r) => requestAnimationFrame(r));

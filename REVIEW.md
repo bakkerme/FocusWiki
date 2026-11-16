@@ -64,7 +64,7 @@ cd /workspace/wiki-prototype
 4. **Minute 4 — External Edits, Conflict Protection & Local Git Commit (`Scenarios 2, 6, 8`):**
    - Edit `sample-repos/cindervault-rpg/docs/vault-breach-action.md` externally on disk while clean (`Saved locally`): the browser reloads the external edit via SSE before any commit.
    - Trigger a simultaneous edit conflict: Cairn refuses to overwrite disk, backs up the editor buffer under `.cairn/conflicts/`, and opens the side-by-side **Conflict resolution** modal.
-   - Click the `main · ... uncommitted` badge in the top bar to inspect the checkout path and unified `git diff HEAD`, enter a commit message, and click **Commit changes** (commits locally on `main` with the OpenBot trailer; never pushes).
+   - Click the `main · ... uncommitted` badge in the top bar to open **Review working changes**: inspect structured Markdown diffs (which highlight inline prose additions while separating formatting-only table pipe alignment from real cell changes), human-readable `.comments.json` updates, code diffs, or secondary **Raw diff**, enter a commit message, and click **Commit N files** (commits locally on `main` preserving your exact message and author identity; never pushes).
 
 5. **Minute 5 — Cross-Project Search, Lab Runbook & Responsive Portrait/Landscape Drawers:**
    - Switch **Repository** to **Helios Bench Runbook (`main`)**, toggle rails in *Helios Rack Power & Boot Sequencer* (`embeds/power-sequencer/index.html`), and search `Ward-Seal` or `198.51.100.41` across repositories.
@@ -79,9 +79,9 @@ cd /workspace/wiki-prototype
 | :--- | :--- |
 | `npm run typecheck` | Passed (`tsc --noEmit`, 0 errors) |
 | `npm run build` | Passed (`dist/client` Vite bundle + self-hosted WOFF2 fonts; `dist/server` compiled Node ESM) |
-| `npm test` | Passed (`5` test files, `23/23` Vitest + Supertest + Playwright Chromium E2E tests covering Scenarios 1–9, capture pipeline validation, Read-mode IA + prose commenting, dynamic & fallback embed sizing, Visual/Source authoring + 409 conflict recovery, portrait/landscape/above-880/desktop action-pair geometry & collapsible panels, native root scroll + modal drawer scroll lock/inert/focus-trap/draft preservation across rotation, and `helios-lab` wide-table non-clipping) |
+| `npm test` | Passed (`6` test files, `30/30` Vitest + Supertest + Playwright Chromium E2E tests covering Scenarios 1–9, block-preserving Markdown table/prose serialization, Rich Change Review comparators, capture pipeline validation, Read-mode IA + centered reading column with Review closed, edit-session `Done` + `Revert` across Visual/Source + autosave race/save-error/409 conflict, Rich Change Review UI + clean human commits without forced OpenBot trailers, and responsive drawers/tables) |
 | `./scripts/server-ctl.sh restart && curl -fsS http://100.117.116.91:8088/healthz` | Passed (`{"status":"ok","service":"cairn-wiki-hub","projectCount":2,...}`; verified sockets exclusively on `127.0.0.1:8088` and `100.117.116.91:8088` via `ss -lntp`) |
-| `npm run capture -- run --packet responsive-ia-pass-03 --all --base-url http://100.117.116.91:8088` | Passed (`16/16` screenshots captured & validated in `captures/packets/responsive-ia-pass-03`, `valid: true`, `0` issues) |
+| `npm run capture -- run --packet review-pass-04 --all --base-url http://100.117.116.91:8088` | Passed (`20/20` screenshots captured & validated in `captures/packets/review-pass-04`, `valid: true`, `0` issues) |
 
 ---
 

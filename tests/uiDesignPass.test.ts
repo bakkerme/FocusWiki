@@ -523,4 +523,318 @@ describe('Council UI Design & Responsive IA Pass — Interactive Browser Verific
       await context.close();
     }
   }, 25000);
+
+  it('centers the constrained reading column horizontally inside main.document-stage when Review is closed (with Docs open or closed)', async () => {
+    const context = await browser!.newContext({ viewport: { width: 1440, height: 900 } });
+    const page = await context.newPage();
+
+    try {
+      await page.goto(`${baseUrl}/?project=cindervault-rpg&doc=docs%2Fvault-breach-action.md`);
+      await page.waitForSelector('.ProseMirror h1');
+
+      // 1. Close Review while keeping left Docs navigation open
+      await page.locator('.review-sidebar .panel-close-btn').click();
+      await page.waitForFunction(() => !document.querySelector('.review-sidebar'));
+
+      const navOpenGeom = await page.evaluate(() => {
+        const nav = document.querySelector('.nav-sidebar')!.getBoundingClientRect();
+        const stage = document.querySelector('main.document-stage')!.getBoundingClientRect();
+        const prose = document.querySelector('.prose-container')!.getBoundingClientRect();
+        return {
+          navRight: nav.right,
+          stageLeft: stage.left,
+          stageRight: stage.right,
+          proseLeft: prose.left,
+          proseRight: prose.right,
+          proseWidth: prose.width
+        };
+      });
+
+      // Stage starts immediately to the right of Docs nav (not underneath nav)
+      expect(Math.abs(navOpenGeom.stageLeft - navOpenGeom.navRight)).toBeLessThanOrEqual(1);
+      expect(navOpenGeom.stageLeft).toBeGreaterThanOrEqual(240);
+      // Symmetric horizontal gutters inside available document stage
+      const leftGutterNavOpen = navOpenGeom.proseLeft - navOpenGeom.stageLeft;
+      const rightGutterNavOpen = navOpenGeom.stageRight - navOpenGeom.proseRight;
+      expect(Math.abs(leftGutterNavOpen - rightGutterNavOpen)).toBeLessThanOrEqual(2);
+      expect(leftGutterNavOpen).toBeGreaterThan(100);
+      // Constrained reading line length preserved
+      expect(navOpenGeom.proseWidth).toBeLessThanOrEqual(730);
+      expect(navOpenGeom.proseWidth).toBeGreaterThanOrEqual(600);
+
+      // 2. Also close Docs navigation -> centers symmetrically across full-width stage
+      await page.locator('.nav-sidebar .panel-close-btn').click();
+      await page.waitForFunction(() => !document.querySelector('.nav-sidebar'));
+
+      const bothClosedGeom = await page.evaluate(() => {
+        const stage = document.querySelector('main.document-stage')!.getBoundingClientRect();
+        const prose = document.querySelector('.prose-container')!.getBoundingClientRect();
+        return {
+          stageLeft: stage.left,
+          stageRight: stage.right,
+          proseLeft: prose.left,
+          proseRight: prose.right,
+          proseWidth: prose.width
+        };
+      });
+
+      expect(bothClosedGeom.stageLeft).toBe(0);
+      const leftGutterBothClosed = bothClosedGeom.proseLeft - bothClosedGeom.stageLeft;
+      const rightGutterBothClosed = bothClosedGeom.stageRight - bothClosedGeom.proseRight;
+      expect(Math.abs(leftGutterBothClosed - rightGutterBothClosed)).toBeLessThanOrEqual(2);
+      expect(bothClosedGeom.proseWidth).toBeLessThanOrEqual(730);
+    } finally {
+      await context.close();
+    }
+  }, 25000);
+
+  it('handles edit-session Done + Revert atomically across Visual/Source switches, pre-existing uncommitted baseline, autosave races, save errors, and external conflicts', async () => {
+    const docRel = 'docs/session-revert-fixture.md';
+    const docAbs = path.join(repoRoot, docRel);
+    const unrelatedRel = 'docs/unrelated-working-file.md';
+    const unrelatedAbs = path.join(repoRoot, unrelatedRel);
+
+    const headContent = '# Session Revert Fixture\n\nCommitted base paragraph for anchor.\n';
+    fs.writeFileSync(docAbs, headContent, 'utf8');
+    execFileSync('git', ['add', docRel], { cwd: repoRoot });
+    execFileSync('git', ['commit', '-m', 'Add session revert fixture'], { cwd: repoRoot });
+
+    // Pre-existing uncommitted edit on disk BEFORE entering Edit (must NOT be discarded by Revert)
+    const preExistingUncommitted =
+      '# Session Revert Fixture\n\nCommitted base paragraph for anchor. Pre-existing uncommitted sentence.\n';
+    fs.writeFileSync(docAbs, preExistingUncommitted, 'utf8');
+    fs.writeFileSync(unrelatedAbs, '# Unrelated Dirty File\n\nKeep me untouched.\n', 'utf8');
+
+    const context = await browser!.newContext({ viewport: { width: 1440, height: 900 } });
+    context.setDefaultTimeout(6000);
+    const page = await context.newPage();
+
+    try {
+      await page.goto(`${baseUrl}/?project=cindervault-rpg&doc=${encodeURIComponent(docRel)}`);
+      await page.waitForSelector('.workbench[data-workspace-mode="read"]');
+
+      // Enter Edit -> Revert starts disabled (no session changes yet), Done is enabled
+      await page.locator('.btn-edit-entry').click();
+      await page.waitForSelector('.workbench[data-workspace-mode="visual"]');
+      expect(await page.locator('.btn-revert-session').isDisabled()).toBe(true);
+      expect(await page.locator('.btn-done-editing').isDisabled()).toBe(false);
+
+      // Edit in Visual mode and wait for autosave to write to disk
+      await page.locator('.ProseMirror p').first().click();
+      await page.keyboard.press('End');
+      await page.keyboard.type(' Visual session edit.');
+      await page.waitForFunction(() => {
+        const btn = document.querySelector('.btn-revert-session') as HTMLButtonElement | null;
+        return Boolean(btn && !btn.disabled && document.querySelector('.save-badge.saved'));
+      });
+      expect(fs.readFileSync(docAbs, 'utf8')).toContain('Visual session edit.');
+
+      // Post a comment during the session (must be retained after Revert)
+      await fetch(`${baseUrl}/api/projects/cindervault-rpg/comments`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          path: docRel,
+          quote: 'Committed base paragraph for anchor.',
+          author: 'Session Reviewer',
+          role: 'human',
+          body: 'Comment created during edit session.'
+        })
+      });
+
+      // Switch to Markdown source -> baseline from initial Edit entry must remain intact
+      await page.locator('.mode-switch button:has-text("Markdown source")').click();
+      await page.waitForSelector('textarea.markdown-source-editor');
+      expect(await page.locator('.btn-revert-session').isDisabled()).toBe(false);
+
+      const ta = page.locator('textarea.markdown-source-editor');
+      const v2 = await ta.inputValue();
+      await ta.fill(`${v2}\n## Source Session Section\n\nAutosaved source paragraph.\n`);
+      await page.waitForSelector('.save-badge.saved');
+      expect(fs.readFileSync(docAbs, 'utf8')).toContain('Source Session Section');
+
+      // Trigger a pending autosave race (fill without waiting 600ms) and immediately click Revert
+      await ta.fill(`${v2}\n## Raced Draft That Must Never Persist\n`);
+      await page.locator('.btn-revert-session').click();
+      await page.waitForSelector('.workbench[data-workspace-mode="read"]');
+
+      // Wait past the 600ms autosave debounce window to prove cancelled draft never overwrites disk
+      await page.waitForTimeout(750);
+      expect(fs.readFileSync(docAbs, 'utf8')).toBe(preExistingUncommitted);
+      expect(fs.readFileSync(unrelatedAbs, 'utf8')).toContain('Keep me untouched.');
+
+      // Reload page and confirm baseline + session comment are preserved
+      await page.reload();
+      await page.waitForSelector('.ProseMirror h1');
+      const proseAfterReload = (await page.locator('.ProseMirror').textContent()) || '';
+      expect(proseAfterReload).toContain('Pre-existing uncommitted sentence.');
+      expect(proseAfterReload).not.toContain('Visual session edit.');
+      expect(proseAfterReload).not.toContain('Raced Draft');
+      expect(await page.locator('.review-sidebar .thread-card').count()).toBe(1);
+
+      // Test Done save-error guard: fail PUT /doc once -> Done must NOT exit Edit while save failed
+      await page.locator('.btn-edit-entry').click();
+      await page.locator('.mode-switch button:has-text("Markdown source")').click();
+      await page.waitForSelector('textarea.markdown-source-editor');
+
+      let blockSaves = true;
+      await page.route('**/api/projects/cindervault-rpg/doc', async (route) => {
+        if (blockSaves && route.request().method() === 'PUT') {
+          await route.fulfill({
+            status: 500,
+            contentType: 'application/json',
+            body: JSON.stringify({ error: 'server_error', message: 'Simulated disk error' })
+          });
+          return;
+        }
+        await route.continue();
+      });
+
+      await page.locator('textarea.markdown-source-editor').fill(
+        `${preExistingUncommitted}\nNew paragraph guarded by Done.\n`
+      );
+      await page.locator('.btn-done-editing').click();
+      await page.waitForSelector('.save-badge.conflict:has-text("Save error")');
+      // Must stay in source editing mode rather than quietly exiting
+      expect(await page.getAttribute('.workbench', 'data-workspace-mode')).toBe('source');
+
+      blockSaves = false;
+      await page.unroute('**/api/projects/cindervault-rpg/doc');
+      await page.locator('.btn-done-editing').click();
+      await page.waitForSelector('.workbench[data-workspace-mode="read"]');
+      expect(fs.readFileSync(docAbs, 'utf8')).toContain('New paragraph guarded by Done.');
+
+      // Test external bot edit before Revert -> surfaces 409 Conflict instead of overwriting bot edit
+      await page.locator('.btn-edit-entry').click();
+      await page.locator('.mode-switch button:has-text("Markdown source")').click();
+      await page.waitForSelector('textarea.markdown-source-editor');
+      await page.locator('textarea.markdown-source-editor').fill(
+        `${preExistingUncommitted}\nTemporary draft before external conflict.\n`
+      );
+      await page.waitForSelector('.save-badge.saved');
+
+      const botDiskEdit = `${preExistingUncommitted}\nExternal bot concurrent update on disk.\n`;
+      fs.writeFileSync(docAbs, botDiskEdit, 'utf8');
+
+      await page.locator('.btn-revert-session').click();
+      await page.waitForSelector('.modal-panel:has-text("External File Edit Detected")');
+      expect(await page.getAttribute('.workbench', 'data-workspace-mode')).toBe('source');
+      expect(fs.readFileSync(docAbs, 'utf8')).toBe(botDiskEdit);
+    } finally {
+      await context.close();
+    }
+  }, 30000);
+
+  it('renders safe Rich Change Review (prose word diff, formatting-only table separation, comments, code, add/delete) and commits with zero OpenBot trailer', async () => {
+    // Isolate a clean project working tree in heliosRoot for rich change review + commit verification
+    const invPath = path.join(heliosRoot, 'docs', 'bench-inventory.md');
+    const origInv = fs.readFileSync(invPath, 'utf8');
+
+    // Pad table pipes (formatting-only) + add real prose sentence + inert raw <script> block
+    const modifiedInv = origInv
+      .replace(
+        'fictional prototype data.',
+        'fictional prototype data. Verified on bench B.'
+      )
+      .replace(
+        '| Asset ID | Hostname | Documentation IP | Upstream Dependency | Nominal Draw | Operational Role |',
+        '| Asset ID     | Hostname     | Documentation IP | Upstream Dependency | Nominal Draw | Operational Role     |'
+      ) + '\n<script>window.__richReviewExecutedScript = true;</script>\n';
+    fs.writeFileSync(invPath, modifiedInv, 'utf8');
+
+    // Add a new doc, delete cold-start-runbook.md, modify an embed HTML file, and add a comment reply
+    fs.writeFileSync(
+      path.join(heliosRoot, 'docs', 'added-calibration.md'),
+      '# Added Calibration Spec\n\nNew calibration notes.\n',
+      'utf8'
+    );
+    fs.unlinkSync(path.join(heliosRoot, 'docs', 'cold-start-runbook.md'));
+    const seqHtmlPath = path.join(heliosRoot, 'embeds', 'power-sequencer', 'index.html');
+    fs.writeFileSync(seqHtmlPath, `${fs.readFileSync(seqHtmlPath, 'utf8')}\n<!-- updated -->\n`, 'utf8');
+
+    const context = await browser!.newContext({ viewport: { width: 1440, height: 900 } });
+    context.setDefaultTimeout(6000);
+    const page = await context.newPage();
+
+    try {
+      await page.goto(`${baseUrl}/?project=helios-lab&doc=docs%2Fbench-inventory.md`);
+      await page.waitForSelector('.git-status-btn');
+
+      // Add a comment via API so .comments.json is also modified in the working tree
+      await fetch(`${baseUrl}/api/projects/helios-lab/comments`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          path: 'docs/bench-inventory.md',
+          quote: 'ordered PDU rail energization',
+          author: 'Lab Lead',
+          role: 'human',
+          body: 'Confirm 5-second relay delay.'
+        })
+      });
+
+      await page.locator('.git-status-btn').click();
+      await page.waitForSelector('.change-review-modal');
+      await page.waitForSelector('.change-file-item');
+
+      // Zero OpenBot / Co-authored-by attribution leak anywhere in UI
+      const modalText = (await page.locator('.change-review-modal').textContent()) || '';
+      expect(modalText).not.toContain('OpenBot');
+      expect(modalText).not.toContain('Co-authored-by');
+
+      // Safe inert rendering: raw <script> never executed and zero iframes mounted in review modal
+      expect(await page.evaluate(() => (window as unknown as Record<string, unknown>).__richReviewExecutedScript)).toBeUndefined();
+      expect(await page.locator('.change-review-modal iframe').count()).toBe(0);
+
+      // All 5 changed working-tree files are listed (modified .md, .comments.json, added .md, deleted .md, modified .html)
+      expect(await page.locator('.change-file-item').count()).toBe(5);
+
+      // Selected bench-inventory.md shows inline word addition AND Formatting only card for padded table
+      expect(await page.locator('.rich-token-add').first().textContent()).toContain('Verified on bench B.');
+      expect(await page.locator('.rich-change-card.is-formatting-only').count()).toBe(1);
+
+      // Secondary Raw diff toggle works cleanly
+      await page.locator('.change-view-switch button:has-text("Raw diff")').click();
+      await page.waitForSelector('.change-detail-scroll pre.diff-viewer');
+      await page.locator('.change-view-switch button:has-text("Rich review")').click();
+
+      // Inspect .comments.json human-readable review
+      await page.locator('.change-file-item:has-text("Review comments")').click();
+      await page.waitForSelector('.rich-comments-review');
+      expect(await page.locator('.rich-comments-review').textContent()).toContain(
+        'Confirm 5-second relay delay.'
+      );
+
+      // Inspect .html component code diff fallback
+      await page.locator('.change-file-item:has-text("Component · power-sequencer")').click();
+      await page.waitForSelector('.rich-code-review');
+      expect(await page.locator('.rich-code-fallback-banner').textContent()).toContain(
+        'Source code diff (html)'
+      );
+
+      // Verify narrow phone layout (390x844) inside Change Review modal without overflow
+      await page.setViewportSize({ width: 390, height: 844 });
+      await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+      const phoneOverflowX = await page.evaluate(
+        () => document.documentElement.scrollWidth - window.innerWidth
+      );
+      expect(phoneOverflowX).toBeLessThanOrEqual(1);
+
+      // Commit all working-tree changes as human user -> verify git log has NO forced OpenBot trailer
+      await page.locator('.commit-message-input').fill('Update bench inventory and add calibration spec');
+      await page.locator('.commit-author-input').fill('Helena Vance');
+      await page.locator('.commit-submit-btn').click();
+      await page.waitForSelector('.change-review-banner:has-text("Committed")');
+
+      const logBody = execFileSync('git', ['log', '-1', '--format=%B'], {
+        cwd: heliosRoot,
+        encoding: 'utf8'
+      });
+      expect(logBody.trim()).toBe('Update bench inventory and add calibration spec');
+      expect(logBody).not.toContain('OpenBot');
+      expect(logBody).not.toContain('Co-authored-by');
+    } finally {
+      await context.close();
+    }
+  }, 30000);
 });

@@ -5,7 +5,6 @@ import path from 'node:path';
 import request from 'supertest';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createHubApp, type HubAppInstance } from '../server/app.js';
-import { OPENBOT_TRAILER } from '../server/gitService.js';
 
 function copyDir(src: string, dest: string): void {
   fs.mkdirSync(dest, { recursive: true });
@@ -22,7 +21,7 @@ function initGitRepo(dir: string): void {
   execFileSync('git', ['config', 'user.name', 'Test Seeder'], { cwd: dir, stdio: 'pipe' });
   execFileSync('git', ['config', 'user.email', 'test@local.invalid'], { cwd: dir, stdio: 'pipe' });
   execFileSync('git', ['add', '-A'], { cwd: dir, stdio: 'pipe' });
-  execFileSync('git', ['commit', '-m', `Seed test repo\n\n${OPENBOT_TRAILER}`], {
+  execFileSync('git', ['commit', '-m', 'Seed test repo'], {
     cwd: dir,
     stdio: 'pipe'
   });
@@ -293,7 +292,7 @@ describe('Hub API & Repository Integration (Acceptance Scenarios 1–9)', () => 
     expect(fs.readFileSync(savedCopyAbs, 'utf8')).toBe(staleEditorVersion);
   });
 
-  it('exposes Git diff and performs deliberate local commits with OpenBot trailer without pushing (Scenario 8)', async () => {
+  it('exposes rich + raw Git diff, guards stale snapshots, and commits locally without forced OpenBot attribution (Scenario 8)', async () => {
     const doc = await request(hub.app)
       .get('/api/projects/helios-lab/doc?path=docs/cold-start-runbook.md')
       .expect(200);
@@ -310,23 +309,68 @@ describe('Hub API & Repository Integration (Acceptance Scenarios 1–9)', () => 
     const diffRes = await request(hub.app).get('/api/projects/helios-lab/git/diff').expect(200);
     expect(diffRes.body.status.isClean).toBe(false);
     expect(diffRes.body.diff).toContain('+Allow 15 minutes before alignment.');
+    expect(diffRes.body.snapshotDigest).toBeTruthy();
+    expect(diffRes.body.files).toHaveLength(1);
+    expect(diffRes.body.files[0].category).toBe('markdown');
+    expect(diffRes.body.files[0].markdownReview.substantiveCount).toBeGreaterThanOrEqual(1);
 
+    // Concurrent working-tree file added after opening review -> stale expectedSnapshotDigest returns 409
+    fs.writeFileSync(path.join(labDir, 'docs/new-checklist.md'), '# Checklist\n\n- [ ] Check UPS\n', 'utf8');
+    const staleCommit = await request(hub.app)
+      .post('/api/projects/helios-lab/git/commit')
+      .send({
+        message: 'Document 15-minute thermal soak window',
+        authorName: 'Bench Reviewer',
+        expectedSnapshotDigest: diffRes.body.snapshotDigest
+      })
+      .expect(409);
+    expect(staleCommit.body.error).toBe('working_tree_changed');
+    expect(staleCommit.body.latestReview.files).toHaveLength(2);
+
+    // Commit with refreshed snapshotDigest succeeds with zero forced OpenBot trailer
     const commitRes = await request(hub.app)
       .post('/api/projects/helios-lab/git/commit')
       .send({
         message: 'Document 15-minute thermal soak window',
-        authorName: 'Bench Reviewer'
+        authorName: 'Bench Reviewer',
+        expectedSnapshotDigest: staleCommit.body.latestReview.snapshotDigest
       })
       .expect(200);
 
     expect(commitRes.body.status.isClean).toBe(true);
 
-    const gitLog = execFileSync('git', ['log', '-1', '--format=%B'], {
+    const gitLogBody = execFileSync('git', ['log', '-1', '--format=%B'], {
       cwd: labDir,
       encoding: 'utf8'
     });
-    expect(gitLog).toContain('Document 15-minute thermal soak window');
-    expect(gitLog).toContain(OPENBOT_TRAILER);
+    const gitLogAuthor = execFileSync('git', ['log', '-1', '--format=%an <%ae>'], {
+      cwd: labDir,
+      encoding: 'utf8'
+    }).trim();
+
+    expect(gitLogBody.trim()).toBe('Document 15-minute thermal soak window');
+    expect(gitLogBody).not.toContain('OpenBot');
+    expect(gitLogBody).not.toContain('Co-authored-by:');
+    expect(gitLogAuthor).toBe('Bench Reviewer <test@local.invalid>');
+
+    // Intentional user-supplied trailers remain preserved verbatim
+    fs.writeFileSync(path.join(labDir, 'docs/new-checklist.md'), '# Checklist\n\n- [x] Check UPS\n', 'utf8');
+    const customTrailerMsg =
+      'Complete UPS verification\n\nCo-authored-by: Alex Collaborator <alex@example.org>';
+    await request(hub.app)
+      .post('/api/projects/helios-lab/git/commit')
+      .send({
+        message: customTrailerMsg,
+        authorName: 'Bench Reviewer'
+      })
+      .expect(200);
+
+    const trailerLog = execFileSync('git', ['log', '-1', '--format=%B'], {
+      cwd: labDir,
+      encoding: 'utf8'
+    });
+    expect(trailerLog.trim()).toBe(customTrailerMsg);
+    expect(trailerLog).not.toContain('OpenBot');
   });
 
   it('rejects path traversal, .git exposure, secret filenames, and unregistered projects (Scenario 9)', async () => {

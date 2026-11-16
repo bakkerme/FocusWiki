@@ -629,22 +629,152 @@ function convertPmBlocksToMdast(nodes: ProseMirrorNode[] | undefined): RootConte
   return out;
 }
 
-export function proseMirrorToMarkdown(doc: ProseMirrorNode): string {
-  const root: Root = {
-    type: 'root',
-    children: convertPmBlocksToMdast(doc.content)
+export function proseMirrorToMarkdown(doc: ProseMirrorNode, baseMarkdown?: string): string {
+  const stringifyMdastNodes = (children: RootContent[]): string => {
+    const root: Root = {
+      type: 'root',
+      children
+    };
+    return unified()
+      .use(remarkGfm)
+      .use(remarkFrontmatter, ['yaml', 'toml'])
+      .use(remarkStringify, {
+        bullet: '-',
+        fences: true,
+        listItemIndent: 'one',
+        rule: '-'
+      })
+      .stringify(root);
   };
 
-  const rendered = unified()
-    .use(remarkGfm)
-    .use(remarkFrontmatter, ['yaml', 'toml'])
-    .use(remarkStringify, {
-      bullet: '-',
-      fences: true,
-      listItemIndent: 'one',
-      rule: '-'
-    })
-    .stringify(root);
+  if (typeof baseMarkdown === 'string' && baseMarkdown.length > 0) {
+    const normalizedBase = baseMarkdown.replace(/\r\n/g, '\n');
+    const baseTree = unified()
+      .use(remarkParse)
+      .use(remarkGfm)
+      .use(remarkFrontmatter, ['yaml', 'toml'])
+      .parse(normalizedBase);
 
+    const basePmDoc = markdownToProseMirror(normalizedBase);
+    const basePmBlocks = basePmDoc.content ?? [];
+
+    if (
+      baseTree.children.length > 0 &&
+      baseTree.children.length === basePmBlocks.length &&
+      baseTree.children.every(
+        (n) =>
+          typeof n.position?.start?.offset === 'number' &&
+          typeof n.position?.end?.offset === 'number'
+      )
+    ) {
+      const baseSlices = baseTree.children.map((mdNode, idx) => {
+        const start = mdNode.position!.start!.offset!;
+        const end = mdNode.position!.end!.offset!;
+        const mdastCanonical = convertPmBlocksToMdast([basePmBlocks[idx]]);
+        return {
+          key: JSON.stringify(mdastCanonical),
+          raw: normalizedBase.slice(start, end),
+          start,
+          end
+        };
+      });
+
+      const rawDocBlocks = doc.content ?? [];
+      const liveBlocks = rawDocBlocks.filter((b) => convertPmBlocksToMdast([b]).length > 0);
+
+      if (liveBlocks.length > 0) {
+        const liveMdastPerBlock = liveBlocks.map((b) => convertPmBlocksToMdast([b]));
+        const liveKeys = liveMdastPerBlock.map((m) => JSON.stringify(m));
+
+        const mLen = baseSlices.length;
+        const nLen = liveKeys.length;
+        const matchedBaseForLive = new Array<number>(nLen).fill(-1);
+
+        if (mLen * nLen <= 250_000) {
+          const dp: Uint16Array[] = Array.from(
+            { length: mLen + 1 },
+            () => new Uint16Array(nLen + 1)
+          );
+          for (let i = mLen - 1; i >= 0; i--) {
+            for (let j = nLen - 1; j >= 0; j--) {
+              if (baseSlices[i].key === liveKeys[j]) {
+                dp[i][j] = dp[i + 1][j + 1] + 1;
+              } else {
+                dp[i][j] = dp[i + 1][j] >= dp[i][j + 1] ? dp[i + 1][j] : dp[i][j + 1];
+              }
+            }
+          }
+          let i = 0;
+          let j = 0;
+          while (i < mLen && j < nLen) {
+            if (baseSlices[i].key === liveKeys[j]) {
+              matchedBaseForLive[j] = i;
+              i++;
+              j++;
+            } else if (dp[i + 1][j] >= dp[i][j + 1]) {
+              i++;
+            } else {
+              j++;
+            }
+          }
+        } else {
+          let searchFrom = 0;
+          for (let j = 0; j < nLen; j++) {
+            for (let i = searchFrom; i < mLen; i++) {
+              if (baseSlices[i].key === liveKeys[j]) {
+                matchedBaseForLive[j] = i;
+                searchFrom = i + 1;
+                break;
+              }
+            }
+          }
+        }
+
+        if (
+          mLen === nLen &&
+          matchedBaseForLive.every((baseIdx, liveIdx) => baseIdx === liveIdx)
+        ) {
+          return normalizedBase.endsWith('\n') ? normalizedBase : `${normalizedBase}\n`;
+        }
+
+        const outParts: string[] = [];
+        const firstMatch = matchedBaseForLive[0];
+        if (firstMatch === 0 && baseSlices[0].start > 0) {
+          const leading = normalizedBase.slice(0, baseSlices[0].start);
+          if (/^\s+$/.test(leading)) {
+            outParts.push(leading);
+          }
+        }
+
+        for (let j = 0; j < nLen; j++) {
+          if (j > 0) {
+            const prevMatch = matchedBaseForLive[j - 1];
+            const curMatch = matchedBaseForLive[j];
+            if (prevMatch !== -1 && curMatch === prevMatch + 1) {
+              const between = normalizedBase.slice(
+                baseSlices[prevMatch].end,
+                baseSlices[curMatch].start
+              );
+              outParts.push(between.includes('\n') ? between : '\n\n');
+            } else {
+              outParts.push('\n\n');
+            }
+          }
+
+          const curMatch = matchedBaseForLive[j];
+          if (curMatch !== -1) {
+            outParts.push(baseSlices[curMatch].raw);
+          } else {
+            outParts.push(stringifyMdastNodes(liveMdastPerBlock[j]).trimEnd());
+          }
+        }
+
+        const joined = outParts.join('');
+        return joined.endsWith('\n') ? joined : `${joined}\n`;
+      }
+    }
+  }
+
+  const rendered = stringifyMdastNodes(convertPmBlocksToMdast(doc.content));
   return rendered.endsWith('\n') ? rendered : `${rendered}\n`;
 }

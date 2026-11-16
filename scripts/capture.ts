@@ -108,11 +108,7 @@ async function runIsolatedFixtureServer(port: number): Promise<void> {
     execFileSync('git', ['add', '-A'], { cwd: destRepo, stdio: 'ignore' });
     execFileSync(
       'git',
-      [
-        'commit',
-        '-m',
-        `Initialize isolated ${repoId} capture fixture\n\nCo-authored-by: OpenBot <335604065+openbotgit[bot]@users.noreply.github.com>`
-      ],
+      ['commit', '-m', `Initialize isolated ${repoId} capture fixture`],
       { cwd: destRepo, stdio: 'ignore' }
     );
   }

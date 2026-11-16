@@ -68,7 +68,7 @@ Acceptance scenarios:
 
 ## Deliverables and handoff
 
-Source, SPEC.md, ARCHITECTURE.md, README.md, Dockerfile, compose.yaml, example repositories and component source, meaningful tests, and REVIEW.md with a five-minute reviewer walkthrough. Include exact commands run, test outcomes, dependencies/licenses, known limitations, rootless Docker status, account owning the daemon, review URL, service lifetime, and stop/start instructions. Any git commits must end with: Co-authored-by: OpenBot <335604065+openbotgit[bot]@users.noreply.github.com>
+Source, SPEC.md, ARCHITECTURE.md, README.md, Dockerfile, compose.yaml, example repositories and component source, meaningful tests, and REVIEW.md with a five-minute reviewer walkthrough. Include exact commands run, test outcomes, dependencies/licenses, known limitations, rootless Docker status, account owning the daemon, review URL, service lifetime, and stop/start instructions. Assistant-authored repository git commits during development must end with: Co-authored-by: OpenBot <335604065+openbotgit[bot]@users.noreply.github.com> (do not force assistant attribution onto user-authored commits inside the product).
 
 Do not silently replace visual editing with a plain Markdown textarea, replace inline feedback with page-level notes, fake saving in localStorage, or finish with only a static frontend. If a hard requirement is infeasible in the chosen editor, document it and make the best working end-to-end slice, then report the gap explicitly for review.
 
@@ -79,5 +79,6 @@ User feedback after hands-on review:
 - Embeds should size to their content, including after interactions and viewport changes, rather than leaving excessive fixed-height space. Preserve sandbox isolation.
 - Markdown source needs a usable full document workspace, not a small textarea.
 - Replace excessive text-label toolbars with appropriate consistent icons. Lucide React is already installed. Icon controls still need accessible names, visible focus, and discoverable tooltips; retain text where meaning would be unclear.
+- Follow-up refinements (2026-11-16): center the constrained reading column horizontally in the available document stage when Review is closed; preserve untouched Markdown blocks (such as unedited GFM tables) verbatim during Visual editing; provide primary `Done` plus text-label `Revert` scoped to the edit-entry snapshot (preserving pre-existing uncommitted changes and checking disk revisions); replace raw-diff-only commit modals with a safe, document-centric Rich Change Review (keeping raw diff as a secondary view); and preserve user-authored commit messages/identities without forced OpenBot attribution.
 
 Hold UI implementation until the design/review skill and automated review setup are selected. Current research recommendation (not yet adopted or installed): Impeccable for design direction and critique, Vercel Web Design Guidelines for code review, and repeatable browser workflow/layout/screenshot and axe accessibility checks. Research is not evidence that any candidate has been executed successfully in this project.

@@ -8,7 +8,8 @@ export interface ProjectConfig {
 
 export interface GitChangedFile {
   path: string;
-  status: string;
+  oldPath?: string;
+  status: 'modified' | 'added' | 'deleted' | 'renamed' | 'untracked' | string;
 }
 
 export interface GitRepoStatus {

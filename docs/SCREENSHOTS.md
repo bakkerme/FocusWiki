@@ -35,6 +35,10 @@ npm run capture -- list
 | `portrait-to-landscape-844x390` | Optional (`--all`) | `844x390` | `portrait-to-landscape-transition` | Booted at `390x844`, scrolled `220px`, and rotated live to `844x390` preserving scroll & left prose margin |
 | `phone-helios-inventory` | Optional (`--all`) | `390x844` | `phone-helios-table-contained` | `helios-lab` `docs/bench-inventory.md` at `390x844` showing scoped `.tableWrapper` horizontal scroll and unclipped prose |
 | `helios-lab-embed` | Optional (`--all`) | `1440x900` | `read-second-project-embed` | `helios-lab` inventory doc at `1440x900` with synthetic RFC 5737 table, content-fitted `power-sequencer` embed, and compact review thread |
+| `desktop-centered-review-closed` | Optional (`--all`) | `1440x900` | `desktop-nav-open-review-closed-centered` | Desktop `1440x900` Read mode with `Docs` open and `Review` closed, showing the constrained `67ch` prose column centered symmetrically inside `main.document-stage` |
+| `phone-visual-edit-revert` | Optional (`--all`) | `390x844` | `phone-visual-edit-revert-done` | Phone `390x844` Visual editor header showing compact `Visual editor` / `Markdown source` switcher alongside text-label `Revert` and primary `Done` |
+| `desktop-rich-change-review` | Optional (`--all`) | `1440x900` | `desktop-rich-change-review-modal` | Desktop `1440x900` Rich Change Review modal separating inline prose word additions (`'But maybe one day.'`) from `Formatting only` table pipe alignment |
+| `phone-rich-change-review` | Optional (`--all`) | `390x844` | `phone-rich-change-review-modal` | Phone `390x844` stacked Rich Change Review sheet with file list, inline prose diff, formatting-only table card, and commit footer |
 
 ## End-to-End Capture Workflow
 

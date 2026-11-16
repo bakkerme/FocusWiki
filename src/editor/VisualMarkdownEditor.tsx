@@ -128,6 +128,7 @@ export const VisualMarkdownEditor = forwardRef<VisualEditorHandle, Props>(
     const suppressUpdateRef = useRef<boolean>(false);
     const editableRef = useRef<boolean>(editable);
     const activeDocKeyRef = useRef<string>(docKey);
+    const baseMarkdownRef = useRef<string>(initialMarkdown);
     const sheetScrollRef = useRef<HTMLDivElement | null>(null);
     const proseContainerRef = useRef<HTMLDivElement | null>(null);
 
@@ -166,7 +167,7 @@ export const VisualMarkdownEditor = forwardRef<VisualEditorHandle, Props>(
       onUpdate({ editor: ed }) {
         if (suppressUpdateRef.current || !ed.isEditable) return;
         const json = ed.getJSON() as ProseMirrorNode;
-        const nextMd = proseMirrorToMarkdown(json);
+        const nextMd = proseMirrorToMarkdown(json, baseMarkdownRef.current);
         onMarkdownEdited(nextMd);
       },
       onFocus() {
@@ -228,6 +229,7 @@ export const VisualMarkdownEditor = forwardRef<VisualEditorHandle, Props>(
       if (!editor) return;
       if (activeDocKeyRef.current !== docKey) {
         activeDocKeyRef.current = docKey;
+        baseMarkdownRef.current = initialMarkdown;
         suppressUpdateRef.current = true;
         editor.commands.setContent(markdownToProseMirror(initialMarkdown) as JSONContent, false);
         suppressUpdateRef.current = false;
@@ -385,6 +387,7 @@ export const VisualMarkdownEditor = forwardRef<VisualEditorHandle, Props>(
       },
       replaceMarkdownFromExternal(markdown: string) {
         if (!editor) return;
+        baseMarkdownRef.current = markdown;
         suppressUpdateRef.current = true;
         editor.commands.setContent(markdownToProseMirror(markdown) as JSONContent, false);
         suppressUpdateRef.current = false;

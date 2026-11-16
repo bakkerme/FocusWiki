@@ -27,6 +27,7 @@ import {
   resolveSafeProjectPath
 } from './pathGuard.js';
 import {
+  WorkingTreeSnapshotMismatchError,
   commitWorkingTree,
   getGitRepoStatus,
   getGitWorkingDiff
@@ -619,19 +620,53 @@ export function createHubApp(options: {
     }
   });
 
-  // Deliberate local Git commit (never pushes)
+  // Deliberate local Git commit (never pushes; preserves user message & identity without forced attribution)
   app.post('/api/projects/:projectId/git/commit', async (req, res, next) => {
     try {
       const project = getProjectOrThrow(req.params.projectId);
       const message = String(req.body?.message ?? '').trim();
-      const authorName = String(req.body?.authorName ?? 'Workspace Author').trim() || 'Workspace Author';
+      const authorName =
+        typeof req.body?.authorName === 'string' && req.body.authorName.trim()
+          ? req.body.authorName.trim()
+          : undefined;
+      const authorEmail =
+        typeof req.body?.authorEmail === 'string' && req.body.authorEmail.trim()
+          ? req.body.authorEmail.trim()
+          : undefined;
+      const expectedSnapshotDigest =
+        typeof req.body?.expectedSnapshotDigest === 'string'
+          ? req.body.expectedSnapshotDigest.trim()
+          : undefined;
+
       if (!message) {
         res.status(400).json({ error: 'invalid_message', message: 'Commit message is required.' });
         return;
       }
-      const committed = await commitWorkingTree(project.rootPath, message, authorName);
+
+      const committed = await commitWorkingTree(
+        project.rootPath,
+        message,
+        authorName,
+        authorEmail,
+        expectedSnapshotDigest
+      );
       res.json(committed);
     } catch (err) {
+      if (err instanceof WorkingTreeSnapshotMismatchError) {
+        try {
+          const project = getProjectOrThrow(req.params.projectId);
+          const latestReview = await getGitWorkingDiff(project.rootPath);
+          res.status(409).json({
+            error: 'working_tree_changed',
+            message: err.message,
+            latestReview
+          });
+          return;
+        } catch (innerErr) {
+          next(innerErr);
+          return;
+        }
+      }
       next(err);
     }
   });
