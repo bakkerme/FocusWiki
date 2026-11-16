@@ -28,6 +28,12 @@ export type CaptureStep =
       viewMode?: 'rich' | 'raw-file';
       expandFirstFormattingPreview?: boolean;
     }
+  | {
+      kind: 'openReadingSettings';
+      textSize?: 'small' | 'standard' | 'large';
+      pageWidth?: 'narrow' | 'standard' | 'wide';
+      closeAfter?: boolean;
+    }
   | { kind: 'scrollContainerTop'; selector: string; top: number }
   | {
       kind: 'scrollElementIntoContainer';
@@ -753,6 +759,53 @@ export function buildInPageStepAndReadinessExpression(spec: InPageCaptureSpec): 
               const sum = det.querySelector("summary");
               if (sum) sum.click();
             }
+          }
+          await new Promise((r) => requestAnimationFrame(r));
+          continue;
+        }
+
+        if (s.kind === "openReadingSettings") {
+          const isNavVisible = () => {
+            const el = document.querySelector(".nav-sidebar");
+            if (!el) return false;
+            const r = el.getBoundingClientRect();
+            return r.width > 0 && r.height > 0;
+          };
+          if (!isNavVisible()) {
+            const navBtn =
+              document.querySelector(".nav-toggle-btn") ||
+              document.querySelector(".mobile-nav-btn");
+            if (!navBtn) throw new Error("Nav toggle button not found for openReadingSettings");
+            navBtn.click();
+            const navOk = await waitCond(() => isNavVisible(), 3000);
+            if (!navOk) throw new Error("Navigation drawer did not open");
+          }
+          const settingsBtn = document.querySelector(".sidebar-settings-btn");
+          if (!settingsBtn) throw new Error(".sidebar-settings-btn not found");
+          settingsBtn.click();
+          const dialogOk = await waitCond(
+            () => Boolean(document.querySelector(".reading-settings-modal")),
+            3000
+          );
+          if (!dialogOk) throw new Error("Reading settings modal did not open");
+          if (s.textSize) {
+            const btn = document.querySelector(
+              '.reading-preset-btn[data-pref-group="textSize"][data-pref-value="' + s.textSize + '"]'
+            );
+            if (!btn) throw new Error("Text size preset not found: " + s.textSize);
+            btn.click();
+          }
+          if (s.pageWidth) {
+            const btn = document.querySelector(
+              '.reading-preset-btn[data-pref-group="pageWidth"][data-pref-value="' + s.pageWidth + '"]'
+            );
+            if (!btn) throw new Error("Page width preset not found: " + s.pageWidth);
+            btn.click();
+          }
+          if (s.closeAfter) {
+            const doneBtn = document.querySelector(".reading-done-btn");
+            if (doneBtn) doneBtn.click();
+            await waitCond(() => !document.querySelector(".reading-settings-modal"), 3000);
           }
           await new Promise((r) => requestAnimationFrame(r));
           continue;

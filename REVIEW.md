@@ -3,41 +3,51 @@
 ## Service & Access Summary
 
 - **Private Tailscale Review URL:** `http://100.117.116.91:8088/`
-- **Localhost Review URL:** `http://127.0.0.1:8088/`
+- **Localhost Docker Review URL:** `http://127.0.0.1:8089/`
 - **Health Endpoint:** `http://100.117.116.91:8088/healthz` (`{"status":"ok","service":"cairn-wiki-hub","projectCount":2,...}`)
-- **Network Exposure:** Bound exclusively to `127.0.0.1:8088` and `100.117.116.91:8088` (not bound to `0.0.0.0` or LAN `192.168.88.227`; no public tunnels).
-- **Service Lifetime:** Running as a detached `openbot` production Node.js process managed by `/workspace/wiki-prototype/scripts/server-ctl.sh` (survives shell exits; restart after host reboot via `./scripts/server-ctl.sh start` or switch to `ubuntu`'s lingering rootless Docker daemon below).
+- **Network Exposure:** Bound exclusively to `127.0.0.1:8089` and `100.117.116.91:8088` (not bound to `0.0.0.0` or LAN `192.168.88.227`; no public tunnels). Distinct host ports avoid the verified rootless Docker conflict when publishing both addresses on the same port.
+- **Service Lifetime:** Running as detached Compose container `cairn-wiki-hub`, with `restart: unless-stopped`, using `ubuntu`'s existing rootless daemon. Container restart and recreation were verified; host reboot was not tested.
 
 ### Start / Stop / Status Commands
 
 ```bash
 cd /workspace/wiki-prototype
-./scripts/server-ctl.sh status
-./scripts/server-ctl.sh restart
-./scripts/server-ctl.sh stop
-./scripts/server-ctl.sh start
+export XDG_RUNTIME_DIR=/run/user/1000
+export DOCKER_HOST=unix:///run/user/1000/docker.sock
+docker compose ps
+docker compose restart
+docker compose down
+docker compose up -d --build --wait --wait-timeout 60
 ```
 
 ---
 
-## Rootless Docker Status & Account Boundary
+## Docker Verification — 2026-11-16
 
-- **Verified Daemon State on Host (`aio`):** Rootless Docker **is running** under account **`ubuntu` (uid `1000`)**:
-  - Verified live processes via `ps -ef`: `rootlesskit --state-dir=/run/user/1000/dockerd-rootless --net=slirp4netns ... /home/ubuntu/bin/dockerd-rootless.sh` (PID `20359`), `slirp4netns` (PID `20393`), and `dockerd` (PID `20402`).
-  - Verified `/etc/subuid` and `/etc/subgid` contain `ubuntu:100000:65536` (and no entry for `openbot`).
-- **Precise Privilege Boundary:** This builder runs as **`openbot` (uid `999`)**, which has no `sudo` rights, no subordinate UID/GID allocation, and no permission to traverse `/run/user/1000` (`0700` owned by `ubuntu`) or read `/home/ubuntu/bin/docker`. Consequently, `openbot` cannot directly invoke `ubuntu`'s `docker info` or `docker compose up` without crossing OS account permissions.
-- **Ready-to-Run Handoff for `ubuntu` (uid `1000`):** All files in `/workspace/wiki-prototype` preserve group/POSIX ACL `rwX` permissions (`0770`/`0660`) granting `ubuntu` full access, and `Dockerfile` + `compose.yaml` are configured for rootless UID mapping (container UID `0` maps to unprivileged host `ubuntu` UID `1000`). To switch port `8088` from the `openbot` Node server to the rootless Docker container:
-  ```bash
-  # 1. Stop the openbot host Node listener freeing port 8088 (as openbot or via server-ctl.sh):
-  /workspace/wiki-prototype/scripts/server-ctl.sh stop
+The Docker audit ran as `ubuntu` (uid `1000`) against the existing daemon on `aio`, through `unix:///run/user/1000/docker.sock`. `docker info --format '{{json .SecurityOptions}}'` returned `["name=seccomp,profile=builtin","name=rootless","name=cgroupns"]`. Docker Engine is `29.9.3`; Compose is `v2.35.1`. No administrator changes were required.
 
-  # 2. As ubuntu (uid 1000), verify rootless mode and launch Compose:
-  export XDG_RUNTIME_DIR=/run/user/1000
-  export DOCKER_HOST=unix:///run/user/1000/docker.sock
-  cd /workspace/wiki-prototype
-  /home/ubuntu/bin/docker info --format '{{json .SecurityOptions}}'
-  /home/ubuntu/bin/docker compose up -d --build
-  ```
+Three deployment failures were reproduced and fixed:
+
+- First startup failed with `Cannot find module '/app/dist/server/scripts/seed-repos.js'`. The Dockerfile now copies and compiles the seed script.
+- Publishing both private addresses on host port `8088` failed with `address already in use`, even with no pre-existing listener. Each address worked alone; loopback `8089` plus Tailscale `8088` worked together and was verified with HTTP requests and `ss -ltnp`.
+- Existing sample repositories appeared as `nobody` inside the rootless container, and Git's ownership check caused `/api/projects` to return `500`. The image now trusts exactly the two sample checkout paths in its system Git configuration. Host ownership and ACLs were retained.
+
+Commands and results:
+
+| Check | Current outcome |
+| --- | --- |
+| `docker compose config --quiet` | Passed |
+| `docker compose build --quiet` | Production image built successfully |
+| `docker compose up -d --wait --wait-timeout 60` | Healthy, detached service |
+| `node scripts/docker-smoke.mjs` | Fresh seeding, production client assets, Git status, document/comment/component writes, restart and container recreation passed using a disposable named volume; test resources removed |
+| HTTP checks on both private host URLs | Populated client, compiled JavaScript, health, projects, default documents and comments returned `200`; search and sandbox CSP verified |
+| Existing bind mounts and `docker compose restart` | Both sample mounts writable; all existing file hashes and Git status identical before and after restart |
+| Container inspection | `unless-stopped`, all capabilities dropped, `no-new-privileges`, read-only config, persistent sample mount, exact private ports and no Docker socket mount verified |
+| `npm run typecheck` and `npm run build` | Passed; Vite reports its existing large-bundle advisory |
+| `npx vitest run tests/anchorResolver.test.ts tests/changeReview.test.ts tests/markdownCodec.test.ts tests/readingPreferences.test.ts tests/apiIntegration.test.ts` | 5 files, 18 tests passed |
+| `npm test` | 22 tests passed, 1 capture test failed, 10 UI tests skipped due to their suite setup failure. Both browser failures report Chromium `No usable sandbox!`; AppArmor and browser sandbox protections were retained. Browser flows were not verified during this Docker audit. |
+
+The image build also reports that Git provenance could not be captured from the shared checkout's ownership; this does not prevent the build or application Git operations inside the container. No source commits or pushes were created. Existing sample document contents and history were preserved.
 
 ---
 
@@ -73,13 +83,15 @@ cd /workspace/wiki-prototype
 
 ---
 
-## Validation Commands Run & Outcomes
+## Prior Application Validation (Before the Docker Audit)
+
+The following results were recorded by earlier application work. Current deployment results and the browser sandbox blocker are documented in the Docker verification section above.
 
 | Command | Outcome |
 | :--- | :--- |
 | `npm run typecheck` | Passed (`tsc --noEmit`, 0 errors) |
 | `npm run build` | Passed (`dist/client` Vite bundle + self-hosted WOFF2 fonts; `dist/server` compiled Node ESM) |
-| `npm test` | Passed (`6` test files, `30/30` Vitest + Supertest + Playwright Chromium E2E tests covering Scenarios 1–9, block-preserving Markdown table/prose serialization, Rich Change Review comparators, capture pipeline validation, Read-mode IA + centered reading column with Review closed, edit-session `Done` + `Revert` across Visual/Source + autosave race/save-error/409 conflict, Rich Change Review UI + clean human commits without forced OpenBot trailers, and responsive drawers/tables) |
+| `npm test` | Passed (`7` test files, `33/33` Vitest + Supertest + Playwright Chromium E2E tests covering Scenarios 1–9, block-preserving Markdown table/prose serialization, Rich Change Review comparators, capture pipeline validation, Read-mode IA + centered reading column with Review closed, edit-session `Done` + `Revert` across Visual/Source + autosave race/save-error/409 conflict, Rich Change Review UI + clean human commits without forced OpenBot trailers, and responsive drawers/tables) |
 | `./scripts/server-ctl.sh restart && curl -fsS http://100.117.116.91:8088/healthz` | Passed (`{"status":"ok","service":"cairn-wiki-hub","projectCount":2,...}`; verified sockets exclusively on `127.0.0.1:8088` and `100.117.116.91:8088` via `ss -lntp`) |
 | `npm run capture -- run --packet review-pass-04 --all --base-url http://100.117.116.91:8088` | Passed (`20/20` screenshots captured & validated in `captures/packets/review-pass-04`, `valid: true`, `0` issues) |
 
@@ -87,12 +99,19 @@ cd /workspace/wiki-prototype
 
 ## Dependencies & Licenses
 
-- Runtime: `express` (MIT), `chokidar` (MIT), `react` / `react-dom` (MIT), `@tiptap/*` & `prosemirror-*` (MIT), `unified` / `remark-*` (MIT), `lucide-react` (ISC), `@fontsource/literata` / `@fontsource/plus-jakarta-sans` / `@fontsource/jetbrains-mono` (SIL OFL 1.1).
+- Runtime: `express` (MIT), `chokidar` (MIT), `react` / `react-dom` (MIT), `@tiptap/*` & `prosemirror-*` (MIT), `unified` / `remark-*` (MIT), `lucide-react` (ISC), `@fontsource/jetbrains-mono` (SIL OFL 1.1).
 - Build & Test: `typescript` (Apache-2.0), `vite` / `@vitejs/plugin-react` (MIT), `vitest` (MIT), `supertest` (MIT), `playwright` (Apache-2.0), `tsx` (MIT).
 
 ## Known Limitations
 
-1. **Container startup step:** `Dockerfile` and `compose.yaml` are complete, hardened, and ACL-ready, but starting the container on `/run/user/1000/docker.sock` requires running `docker compose up -d --build` as `ubuntu` (uid `1000`) after stopping `./scripts/server-ctl.sh stop`.
+1. **Current browser-test blocker:** Chromium launched by Playwright reports `No usable sandbox!` on this host. The Docker audit did not disable AppArmor or Chromium's sandbox. The non-browser tests and live HTTP/container checks passed, but UI browser flows need re-verification with an approved sandboxed browser installation.
 2. **Prose-only comments & block-level embeds:** As scoped in `SPEC.md`, inline comments anchor to document prose (not inside iframe widget internals or code blocks), and simultaneous edits use optimistic revision conflict recovery rather than CRDT realtime co-editing.
 3. **Table cell complexity:** Visual table cells edit single-paragraph inline formatting cleanly; multi-block content inside table cells is better authored in Markdown source mode or collapsible raw HTML blocks.
 4. **Capture pipeline scope & Safari/WebKit browser chrome:** `npm run capture` restricts automated Playwright runs to local/private Cairn URLs (`127.0.0.1`, `localhost`, `100.117.116.91`) using local Playwright Chromium (`159.0.8154.6`; Playwright WebKit is not installed on this Linux host). Switching Read/Visual modes to native root document scrolling enables standard mobile browser scroll mechanics, whereas Safari's own address/tab bar collapsing behavior remains controlled by iOS Safari on physical hardware rather than web-page CSS/JS.
+
+## Prior Reading Settings Refresh
+
+- Neutral white navigation and system sans-serif typography replace the editorial serif and tinted rails.
+- Reading settings provides 16/18/20px text and 640/760/960px maximum widths, clamped to the available stage. Preferences persist in this browser without repository writes.
+- Verified typecheck, production build, and 33 tests, including preset keyboard navigation, rapid preference changes, storage recovery, draft preservation, and responsive modal focus restoration.
+- Fresh screenshot packet: `captures/packets/review-pass-05-verified` (25 captures, validation passed). Physically testing Safari browser chrome remains outside these Chromium checks.

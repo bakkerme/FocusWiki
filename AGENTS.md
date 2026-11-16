@@ -1,6 +1,6 @@
 # Prototype instructions
 
-- Read SPEC.md and .agents/skills/frontend-design/SKILL.md before implementation.
+- Read SPEC.md and .agents/skills/cairn-product-design/SKILL.md before implementation. Use this project skill instead of the vendored Anthropic frontend-design skill for Cairn UI work.
 - Build the requested runnable prototype through tests and Docker deployment; report any genuine privilege or account blocker precisely.
 - Keep all example content fictional and distinct from the user's real RPG design and lab records.
 - Do not modify unrelated projects, push commits, create public services, or disable host security policies.

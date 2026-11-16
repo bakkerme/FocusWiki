@@ -22,7 +22,11 @@ npm test              # Runs Vitest unit + API integration suite
 
 ## Rootless Docker Packaging & Deployment (`ubuntu` uid 1000)
 
-`Dockerfile` and `compose.yaml` package the production build with persistent bind mounts for `./sample-repos` and `./config`, dropped Linux capabilities (`cap_drop: [ALL]`), `no-new-privileges`, a `/healthz` healthcheck, `restart: unless-stopped`, and host port bindings restricted to `127.0.0.1:8088` and `100.117.116.91:8088`.
+`Dockerfile` and `compose.yaml` package the production build with persistent bind mounts for `./sample-repos` and `./config` (read-only), dropped Linux capabilities (`cap_drop: [ALL]`), `no-new-privileges`, a `/healthz` healthcheck, and `restart: unless-stopped`.
+
+Docker URLs are **http://100.117.116.91:8088/** (private Tailscale) and **http://127.0.0.1:8089/** (loopback). This host's rootless Docker fails when publishing both addresses with the same host port; distinct host ports avoid that conflict. The container still listens on port `8088`. Nothing is published on the LAN address or a wildcard host address.
+
+The image includes the compiled seed script for first startup. Existing repositories are retained. Git trusts only `/app/sample-repos/cindervault-rpg` and `/app/sample-repos/helios-lab` in the container so the existing repositories owned by another host account work through the rootless UID mapping and project ACLs. Additional mounts with a different owner need their own explicit Git trust configuration; no wildcard trust is enabled.
 
 When deploying under the `ubuntu` account that owns the rootless Docker daemon (`/run/user/1000/docker.sock`), stop the standalone host Node listener on port `8088` first, then start Compose:
 
@@ -36,13 +40,21 @@ cd /workspace/wiki-prototype
 docker info --format '{{json .SecurityOptions}}'
 
 # Build and start container
-docker compose up -d --build
+docker compose up -d --build --wait --wait-timeout 60
 docker compose ps
+curl -fsS http://127.0.0.1:8089/healthz
+curl -fsS http://127.0.0.1:8089/api/projects
+
+# Test the built image using disposable repositories, without publishing ports.
+# Verifies first-run seeding, client assets, API writes, restart and recreation.
+node scripts/docker-smoke.mjs
 
 # Restart / stop
 docker compose restart
 docker compose down
 ```
+
+The smoke test requires the rootless daemon and removes only its own temporary container and named volume. It does not modify `sample-repos`. `docker compose down` retains the bind-mounted project files. The Compose service runs detached and restarts with the existing daemon; no separate host Node server is needed. See `REVIEW.md` for the latest Docker verification and browser-test limits.
 
 ## Embedding Project-Authored Components
 
@@ -107,7 +119,7 @@ Comments are stored in `<doc-without-.md>.comments.json` alongside each `.md` fi
 | `unified`, `remark-parse`, `remark-gfm`, `remark-frontmatter`, `remark-stringify` | Lossless Markdown AST parsing and serialization | MIT |
 | `express`, `chokidar` | Local HTTP API, sandboxed asset serving, and live file watching | MIT |
 | `lucide-react` | Minimal UI iconography | ISC |
-| `@fontsource/literata`, `@fontsource/plus-jakarta-sans`, `@fontsource/jetbrains-mono` | Self-hosted WOFF2 typography | OFL-1.1 |
+| `@fontsource/jetbrains-mono` | Self-hosted WOFF2 monospace code & source font | OFL-1.1 |
 | `typescript`, `vite`, `vitest`, `supertest`, `tsx` | Build, typecheck, and automated test toolchain | Apache-2.0 / MIT |
 | `playwright` | Local headless Chromium runner for repeatable review packet screenshots | Apache-2.0 |
 

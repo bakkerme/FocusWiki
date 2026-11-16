@@ -293,7 +293,7 @@
       "label": "Phone Portrait Closed Reading (390x844 Compact Header & Adjacent Edit + Review)",
       "defaultSelected": false,
       "actualAppState": "phone-read-closed-drawers",
-      "honestStateNote": "Phone portrait 390x844 closed reading: 48px compact sticky header keeps Docs, Git status, and side-by-side Edit + Review (1) without wrapping; page eyebrow + H1 + serif prose fill the full viewport width cleanly.",
+      "honestStateNote": "Phone portrait 390x844 closed reading: 48px compact sticky header keeps Docs, Git status, and side-by-side Edit + Review (1) without wrapping; page eyebrow + H1 + sans-serif prose fill the full viewport width cleanly.",
       "route": "/?project=cindervault-rpg&doc=docs%2Fvault-breach-action.md",
       "projectId": "cindervault-rpg",
       "docPath": "docs/vault-breach-action.md",
@@ -635,7 +635,7 @@
       "label": "Desktop Read with Docs Open & Review Closed (Centered in Document Stage)",
       "defaultSelected": false,
       "actualAppState": "desktop-nav-open-review-closed-centered",
-      "honestStateNote": "Desktop 1440x900 Read mode with left Docs navigation open and right Review rail closed: constrained 67ch prose column centers symmetrically inside main.document-stage (not underneath left nav).",
+      "honestStateNote": "Desktop 1440x900 Read mode with left Docs navigation open and right Review rail closed: width-preset-constrained prose column centers symmetrically inside main.document-stage (not underneath left nav).",
       "route": "/?project=cindervault-rpg&doc=docs%2Fvault-breach-action.md",
       "projectId": "cindervault-rpg",
       "docPath": "docs/vault-breach-action.md",
@@ -770,6 +770,189 @@
           ".rich-token-add",
           ".rich-change-card.is-formatting-only",
           ".change-commit-footer"
+        ],
+        "waitForFonts": true,
+        "waitForVisibleEmbeds": false,
+        "assertSavedState": true,
+        "timeoutMs": 12000
+      }
+    },
+    {
+      "id": "desktop-reading-settings-open",
+      "label": "Desktop Reading Settings Dialog Open (1440x900 — Text Size & Page Width Presets)",
+      "defaultSelected": false,
+      "actualAppState": "desktop-reading-settings-open",
+      "honestStateNote": "Desktop 1440x900 Read view with Reading settings modal open from the navigation sidebar, showing Small/Standard/Large text size and Narrow/Standard/Wide page width radio presets, live sample preview, and Reset defaults.",
+      "route": "/?project=cindervault-rpg&doc=docs%2Fvault-breach-action.md",
+      "projectId": "cindervault-rpg",
+      "docPath": "docs/vault-breach-action.md",
+      "captureScope": "viewport",
+      "viewport": {
+        "width": 1440,
+        "height": 900,
+        "deviceScaleFactor": 1,
+        "colorScheme": "light",
+        "reducedMotion": true
+      },
+      "steps": [
+        { "kind": "navigate" },
+        { "kind": "openReadingSettings" }
+      ],
+      "readiness": {
+        "requiredSelectors": [
+          ".reading-settings-modal[role=\"dialog\"]",
+          ".reading-preset-btn.is-selected",
+          ".reading-live-sample",
+          ".reading-reset-btn",
+          "main.document-stage[inert]"
+        ],
+        "waitForFonts": true,
+        "waitForVisibleEmbeds": false,
+        "assertSavedState": true,
+        "timeoutMs": 12000
+      }
+    },
+    {
+      "id": "desktop-prefs-large-wide",
+      "label": "Desktop Read with Large (20px) Text & Wide (960px) Page Width (Centered Stage)",
+      "defaultSelected": false,
+      "actualAppState": "desktop-prefs-large-wide-centered",
+      "honestStateNote": "Desktop 1440x900 Read mode after switching Reading settings to Large (20px) text size and Wide (960px) page width with Review closed: document prose scales up cleanly without enlarging header/nav controls and stays centered in the available stage.",
+      "route": "/?project=cindervault-rpg&doc=docs%2Fvault-breach-action.md",
+      "projectId": "cindervault-rpg",
+      "docPath": "docs/vault-breach-action.md",
+      "captureScope": "viewport",
+      "viewport": {
+        "width": 1440,
+        "height": 900,
+        "deviceScaleFactor": 1,
+        "colorScheme": "light",
+        "reducedMotion": true
+      },
+      "steps": [
+        { "kind": "navigate" },
+        { "kind": "ensureReviewSidebar", "open": false },
+        {
+          "kind": "openReadingSettings",
+          "textSize": "large",
+          "pageWidth": "wide",
+          "closeAfter": true
+        },
+        { "kind": "scrollContainerTop", "selector": ".sheet-scroll", "top": 0 }
+      ],
+      "readiness": {
+        "requiredSelectors": [
+          ".workbench[data-text-size=\"large\"][data-page-width=\"wide\"]",
+          ".nav-sidebar",
+          ".prose-container",
+          ".ProseMirror h1"
+        ],
+        "waitForFonts": true,
+        "waitForVisibleEmbeds": false,
+        "assertSavedState": true,
+        "timeoutMs": 12000
+      }
+    },
+    {
+      "id": "phone-reading-settings-open",
+      "label": "Phone Reading Settings Dialog Open (390x844 — Accessed via Docs Drawer)",
+      "defaultSelected": false,
+      "actualAppState": "phone-reading-settings-open",
+      "honestStateNote": "Phone portrait 390x844 with Reading settings opened via the Docs navigation drawer: drawer closes cleanly when dialog opens so overlays never stack or fight for focus.",
+      "route": "/?project=cindervault-rpg&doc=docs%2Fvault-breach-action.md",
+      "projectId": "cindervault-rpg",
+      "docPath": "docs/vault-breach-action.md",
+      "captureScope": "viewport",
+      "viewport": {
+        "width": 390,
+        "height": 844,
+        "deviceScaleFactor": 1,
+        "colorScheme": "light",
+        "reducedMotion": true
+      },
+      "steps": [
+        { "kind": "navigate" },
+        { "kind": "openReadingSettings" }
+      ],
+      "readiness": {
+        "requiredSelectors": [
+          ".reading-settings-modal[role=\"dialog\"]",
+          ".reading-preset-btn.is-selected",
+          ".reading-live-sample",
+          "main.document-stage[inert]"
+        ],
+        "waitForFonts": true,
+        "waitForVisibleEmbeds": false,
+        "assertSavedState": true,
+        "timeoutMs": 12000
+      }
+    },
+    {
+      "id": "phone-prefs-large-wide",
+      "label": "Phone Read with Large (20px) Text & Wide (960px -> Clamped) Without Overflow (390x844)",
+      "defaultSelected": false,
+      "actualAppState": "phone-prefs-large-wide-clamped",
+      "honestStateNote": "Phone portrait 390x844 after selecting Large (20px) text size and Wide (960px) width: text scales cleanly while width clamps to available phone viewport with zero horizontal overflow.",
+      "route": "/?project=cindervault-rpg&doc=docs%2Fvault-breach-action.md",
+      "projectId": "cindervault-rpg",
+      "docPath": "docs/vault-breach-action.md",
+      "captureScope": "viewport",
+      "viewport": {
+        "width": 390,
+        "height": 844,
+        "deviceScaleFactor": 1,
+        "colorScheme": "light",
+        "reducedMotion": true
+      },
+      "steps": [
+        { "kind": "navigate" },
+        {
+          "kind": "openReadingSettings",
+          "textSize": "large",
+          "pageWidth": "wide",
+          "closeAfter": true
+        },
+        { "kind": "scrollContainerTop", "selector": ".sheet-scroll", "top": 0 }
+      ],
+      "readiness": {
+        "requiredSelectors": [
+          ".workbench[data-text-size=\"large\"][data-page-width=\"wide\"]",
+          ".repo-topbar",
+          ".prose-container",
+          ".ProseMirror h1"
+        ],
+        "waitForFonts": true,
+        "waitForVisibleEmbeds": false,
+        "assertSavedState": true,
+        "timeoutMs": 12000
+      }
+    },
+    {
+      "id": "landscape-reading-settings-956x440",
+      "label": "Short Landscape Reading Settings Dialog Open (956x440)",
+      "defaultSelected": false,
+      "actualAppState": "landscape-956x440-reading-settings",
+      "honestStateNote": "956x440 short landscape with Reading settings modal opened cleanly from overlay navigation drawer, remaining scrollable and usable without stacked focus issues.",
+      "route": "/?project=cindervault-rpg&doc=docs%2Fvault-breach-action.md",
+      "projectId": "cindervault-rpg",
+      "docPath": "docs/vault-breach-action.md",
+      "captureScope": "viewport",
+      "viewport": {
+        "width": 956,
+        "height": 440,
+        "deviceScaleFactor": 1,
+        "colorScheme": "light",
+        "reducedMotion": true
+      },
+      "steps": [
+        { "kind": "navigate" },
+        { "kind": "openReadingSettings" }
+      ],
+      "readiness": {
+        "requiredSelectors": [
+          ".reading-settings-modal[role=\"dialog\"]",
+          ".reading-preset-btn.is-selected",
+          "main.document-stage[inert]"
         ],
         "waitForFonts": true,
         "waitForVisibleEmbeds": false,

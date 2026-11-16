@@ -13,10 +13,28 @@ const STARTER_COMPONENT_HTML = `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
+  <meta name="color-scheme" content="light dark" />
   <style>
-    body { font-family: system-ui, sans-serif; margin: 0; padding: 14px; background: #fafbf9; color: #162326; }
-    .box { border: 1px solid #cfd8d7; border-radius: 6px; padding: 12px; background: #fff; }
-    button { padding: 6px 10px; border-radius: 4px; border: 1px solid #1b6b63; background: #e1f0ee; font-weight: 600; cursor: pointer; }
+    :root {
+      color-scheme: light dark;
+      --bg: #ffffff;
+      --line: #e5e7eb;
+      --ink: #171717;
+      --accent: #1d4ed8;
+      --accent-soft: #eff6ff;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #141417;
+        --line: #27272d;
+        --ink: #f4f4f5;
+        --accent: #60a5fa;
+        --accent-soft: rgba(59, 130, 246, 0.16);
+      }
+    }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; margin: 0; padding: 14px; background: var(--bg); color: var(--ink); }
+    .box { border: 1px solid var(--line); border-radius: 6px; padding: 12px; background: var(--bg); }
+    button { padding: 6px 10px; border-radius: 5px; border: 1px solid var(--accent); background: var(--accent-soft); color: var(--accent); font-weight: 600; cursor: pointer; }
   </style>
 </head>
 <body>
@@ -183,7 +201,7 @@ export function InsertEmbedModal({
                 type="text"
                 value={title}
                 onChange={(e) => setTitle(e.target.value)}
-                style={{ width: '100%', padding: '7px 10px', border: '1px solid var(--line-border)', borderRadius: 5 }}
+                style={{ width: '100%', padding: '7px 10px', background: 'var(--surface-sheet)', color: 'var(--ink-primary)', border: '1px solid var(--line-border)', borderRadius: 5 }}
               />
             </div>
 
@@ -199,6 +217,8 @@ export function InsertEmbedModal({
                   width: '100%',
                   padding: '7px 10px',
                   fontFamily: 'var(--font-code)',
+                  background: 'var(--surface-sheet)',
+                  color: 'var(--ink-primary)',
                   border: '1px solid var(--line-border)',
                   borderRadius: 5
                 }}
@@ -226,6 +246,8 @@ export function InsertEmbedModal({
                     width: '100%',
                     padding: '7px 10px',
                     fontFamily: 'var(--font-code)',
+                    background: 'var(--surface-sheet)',
+                    color: 'var(--ink-primary)',
                     border: '1px solid var(--line-border)',
                     borderRadius: 5
                   }}
@@ -239,7 +261,7 @@ export function InsertEmbedModal({
                   type="text"
                   value={newTitle}
                   onChange={(e) => setNewTitle(e.target.value)}
-                  style={{ width: '100%', padding: '7px 10px', border: '1px solid var(--line-border)', borderRadius: 5 }}
+                  style={{ width: '100%', padding: '7px 10px', background: 'var(--surface-sheet)', color: 'var(--ink-primary)', border: '1px solid var(--line-border)', borderRadius: 5 }}
                 />
               </div>
             </div>
@@ -257,6 +279,8 @@ export function InsertEmbedModal({
                   fontFamily: 'var(--font-code)',
                   fontSize: 12,
                   padding: 10,
+                  background: 'var(--surface-sheet)',
+                  color: 'var(--ink-primary)',
                   border: '1px solid var(--line-border)',
                   borderRadius: 5
                 }}

@@ -3,24 +3,46 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="color-scheme" content="light dark" />
   <title>Encounter Step-Through Walkthrough</title>
   <style>
     :root {
-      --bg: #fbfcfa;
-      --panel: #eef2f1;
-      --ink: #142124;
-      --muted: #4a5d62;
-      --line: #cfd8d7;
-      --accent: #17635b;
-      --accent-soft: #e1f0ee;
-      --amber: #c27d18;
+      color-scheme: light dark;
+      --bg: #ffffff;
+      --surface: #ffffff;
+      --panel: #fafafa;
+      --panel-hover: #f4f4f5;
+      --ink: #171717;
+      --muted: #525252;
+      --line: #e5e7eb;
+      --divider: #e5e7eb;
+      --accent: #1d4ed8;
+      --accent-fill: #1d4ed8;
+      --accent-soft: #eff6ff;
+      --amber: #b45309;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #141417;
+        --surface: #1b1b20;
+        --panel: #1a1a1f;
+        --panel-hover: #27272d;
+        --ink: #f4f4f5;
+        --muted: #a1a1aa;
+        --line: #27272d;
+        --divider: #27272d;
+        --accent: #60a5fa;
+        --accent-fill: #2563eb;
+        --accent-soft: rgba(59, 130, 246, 0.16);
+        --amber: #f59e0b;
+      }
     }
     * { box-sizing: border-box; }
     html { height: auto; }
     body {
       margin: 0;
       padding: 14px 16px;
-      font-family: "Plus Jakarta Sans", system-ui, -apple-system, sans-serif;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
       background: var(--bg);
       color: var(--ink);
     }
@@ -43,12 +65,12 @@
       font-weight: 600;
     }
     .step-tab.active {
-      background: var(--accent);
-      border-color: var(--accent);
+      background: var(--accent-fill);
+      border-color: var(--accent-fill);
       color: #ffffff;
     }
     .card {
-      background: #ffffff;
+      background: var(--surface);
       border: 1px solid var(--line);
       border-radius: 6px;
       padding: 14px;
@@ -92,6 +114,7 @@
       border-radius: 4px;
       border: 1px solid var(--line);
       background: var(--panel);
+      color: var(--ink);
       cursor: pointer;
     }
     .choice-btn.selected {
@@ -110,7 +133,7 @@
       display: flex;
       justify-content: space-between;
       padding: 4px 0;
-      border-bottom: 1px solid #e0e7e6;
+      border-bottom: 1px solid var(--divider);
     }
     .meter-row:last-child { border-bottom: none; }
     .clock-pips {
@@ -141,8 +164,12 @@
       padding: 5px 12px;
       border-radius: 4px;
       border: 1px solid var(--line);
-      background: #ffffff;
+      background: var(--surface);
+      color: var(--ink);
       cursor: pointer;
+    }
+    .nav-btn:hover:not(:disabled) {
+      background: var(--panel-hover);
     }
     .nav-btn:disabled {
       opacity: 0.45;
@@ -163,7 +190,7 @@
       <h3 class="beat-title" id="beatTitle"></h3>
       <p class="narrative" id="beatNarrative"></p>
       <div id="consequenceBranch" style="display:none">
-        <div style="font-size:12px;font-weight:600;color:#4a5d62;margin-bottom:4px;">Select 7–9 consequence cost:</div>
+        <div style="font-size:12px;font-weight:600;color:var(--muted);margin-bottom:4px;">Select 7–9 consequence cost:</div>
         <div class="choice-row">
           <button type="button" class="choice-btn selected" id="optVent">Vent 1 extra Lantern Oil</button>
           <button type="button" class="choice-btn" id="optPatrol">Trigger Hallway Patrol Clock</button>

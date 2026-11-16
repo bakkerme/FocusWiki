@@ -39,6 +39,11 @@ npm run capture -- list
 | `phone-visual-edit-revert` | Optional (`--all`) | `390x844` | `phone-visual-edit-revert-done` | Phone `390x844` Visual editor header showing compact `Visual editor` / `Markdown source` switcher alongside text-label `Revert` and primary `Done` |
 | `desktop-rich-change-review` | Optional (`--all`) | `1440x900` | `desktop-rich-change-review-modal` | Desktop `1440x900` Rich Change Review modal separating inline prose word additions (`'But maybe one day.'`) from `Formatting only` table pipe alignment |
 | `phone-rich-change-review` | Optional (`--all`) | `390x844` | `phone-rich-change-review-modal` | Phone `390x844` stacked Rich Change Review sheet with file list, inline prose diff, formatting-only table card, and commit footer |
+| `desktop-reading-settings-open` | Optional (`--all`) | `1440x900` | `desktop-reading-settings-modal` | Desktop `1440x900` Reading settings modal showing Text size & Page width presets plus live preview on neutral white/cobalt surfaces |
+| `desktop-prefs-large-wide` | Optional (`--all`) | `1440x900` | `desktop-reading-prefs-large-wide` | Desktop `1440x900` Read mode with `Large` (`20px`) text size and `Wide` (`960px`) page width persisted and Review closed |
+| `phone-reading-settings-open` | Optional (`--all`) | `390x844` | `phone-reading-settings-modal` | Phone portrait `390x844` Reading settings modal opened cleanly from `Docs` without stacked overlay contention |
+| `phone-prefs-large-wide` | Optional (`--all`) | `390x844` | `phone-reading-prefs-large-wide` | Phone portrait `390x844` Read mode with `Large` + `Wide` active, clamped inside mobile viewport width with zero horizontal overflow |
+| `landscape-reading-settings-956x440` | Optional (`--all`) | `956x440` | `landscape-956x440-reading-settings` | Short landscape `956x440` Reading settings dialog fitted cleanly inside `--vvh` |
 
 ## End-to-End Capture Workflow
 

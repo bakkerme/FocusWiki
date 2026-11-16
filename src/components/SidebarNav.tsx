@@ -1,5 +1,5 @@
 import { useRef, useState, type RefObject } from 'react';
-import { Blocks, FileText, Plus, Search, X } from 'lucide-react';
+import { Blocks, FileText, Plus, Search, Settings, X } from 'lucide-react';
 import type { ProjectSummary, SearchResultItem } from '../../shared/types';
 import { useModalOverlayFocus } from '../utils/overlayModal';
 
@@ -10,6 +10,7 @@ interface Props {
   isEditing: boolean;
   isOverlay: boolean;
   restoreFocusRef?: RefObject<HTMLElement | null>;
+  settingsTriggerRef?: RefObject<HTMLButtonElement>;
   searchQuery: string;
   searchResults: SearchResultItem[];
   onChangeSearch: (q: string) => void;
@@ -17,6 +18,7 @@ interface Props {
   onSelectDoc: (projectId: string, docPath: string) => void;
   onCreateDoc: (relPath: string, title: string) => Promise<void>;
   onOpenEmbedModal: () => void;
+  onOpenReadingSettings: () => void;
   onClose: () => void;
 }
 
@@ -28,6 +30,7 @@ export function SidebarNav(props: Props) {
     isEditing,
     isOverlay,
     restoreFocusRef,
+    settingsTriggerRef,
     searchQuery,
     searchResults,
     onChangeSearch,
@@ -35,6 +38,7 @@ export function SidebarNav(props: Props) {
     onSelectDoc,
     onCreateDoc,
     onOpenEmbedModal,
+    onOpenReadingSettings,
     onClose
   } = props;
 
@@ -245,6 +249,20 @@ export function SidebarNav(props: Props) {
           </div>
         </nav>
       )}
+
+      <div className="sidebar-utility-footer">
+        <button
+          ref={settingsTriggerRef}
+          type="button"
+          className="sidebar-settings-btn"
+          onClick={onOpenReadingSettings}
+          aria-label="Reading settings"
+          title="Reading settings — text size and page width"
+        >
+          <Settings size={14} className="sidebar-settings-icon" aria-hidden="true" />
+          <span>Reading settings</span>
+        </button>
+      </div>
 
       {activeProject && activeProject.embeds.length > 0 && (
         <div className="sidebar-embeds-footer">

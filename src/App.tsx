@@ -27,7 +27,18 @@ import { ReviewMargin } from './components/ReviewMargin';
 import { GitDrawerModal } from './components/GitDrawerModal';
 import { ConflictModal } from './components/ConflictModal';
 import { InsertEmbedModal } from './components/InsertEmbedModal';
+import { ReadingSettingsModal } from './components/ReadingSettingsModal';
 import { useOverlayScrollLock } from './utils/overlayModal';
+import {
+  DEFAULT_READING_PREFERENCES,
+  getPageWidthSpec,
+  getTextSizeSpec,
+  loadReadingPreferences,
+  saveReadingPreferences,
+  type PageWidthPreset,
+  type ReadingPreferences,
+  type TextSizePreset
+} from './utils/readingPreferences';
 
 export type LayoutTier = 'overlay' | 'medium-desktop' | 'wide-desktop';
 
@@ -111,12 +122,17 @@ export function App() {
   const [embedReloadToken, setEmbedReloadToken] = useState<number>(0);
   const [gitModalOpen, setGitModalOpen] = useState<boolean>(false);
   const [embedModalOpen, setEmbedModalOpen] = useState<boolean>(false);
+  const [readingSettingsOpen, setReadingSettingsOpen] = useState<boolean>(false);
+  const [readingPreferences, setReadingPreferences] = useState<ReadingPreferences>(
+    loadReadingPreferences
+  );
   const [conflictData, setConflictData] = useState<ConflictErrorPayload | null>(null);
 
   const visualEditorRef = useRef<VisualEditorHandle | null>(null);
   const mainStageRef = useRef<HTMLElement | null>(null);
   const navTriggerRef = useRef<HTMLButtonElement | null>(null);
   const reviewTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const settingsTriggerRef = useRef<HTMLButtonElement | null>(null);
 
   const baseRevisionRef = useRef<string>('');
   const lastSavedMdRef = useRef<string>('');
@@ -147,19 +163,50 @@ export function App() {
   const effectiveNavVisible = isOverlayLayout ? overlayDrawer === 'nav' : desktopNavOpen;
   const effectiveReviewVisible = isOverlayLayout ? overlayDrawer === 'review' : desktopReviewOpen;
   const isOverlayModalOpen = isOverlayLayout && overlayDrawer !== null;
+  const anyDialogOpen =
+    readingSettingsOpen || gitModalOpen || embedModalOpen || Boolean(conflictData);
+  const lockDocumentScroll = isOverlayModalOpen || readingSettingsOpen;
+  const stageInert = isOverlayModalOpen || anyDialogOpen;
 
-  useOverlayScrollLock(isOverlayModalOpen);
+  useOverlayScrollLock(lockDocumentScroll);
 
-  // Set native HTML inert attribute on <main> while a modal overlay drawer is open
+  // Set native HTML inert attribute on <main> while an overlay drawer or modal dialog is open
   useEffect(() => {
     const stageEl = mainStageRef.current;
     if (!stageEl) return;
-    if (isOverlayModalOpen) {
+    if (stageInert) {
       stageEl.setAttribute('inert', '');
     } else {
       stageEl.removeAttribute('inert');
     }
-  }, [isOverlayModalOpen]);
+  }, [stageInert]);
+
+  function updateReadingPreferences(updater: (prev: ReadingPreferences) => ReadingPreferences) {
+    setReadingPreferences((prev) => {
+      const next = updater(prev);
+      saveReadingPreferences(next);
+      return next;
+    });
+  }
+
+  function handleChangeTextSize(textSize: TextSizePreset) {
+    updateReadingPreferences((prev) => ({ ...prev, textSize }));
+  }
+
+  function handleChangePageWidth(pageWidth: PageWidthPreset) {
+    updateReadingPreferences((prev) => ({ ...prev, pageWidth }));
+  }
+
+  function handleResetReadingPreferences() {
+    updateReadingPreferences(() => ({ ...DEFAULT_READING_PREFERENCES }));
+  }
+
+  function handleOpenReadingSettings() {
+    if (isOverlayLayout) {
+      setOverlayDrawer(null);
+    }
+    setReadingSettingsOpen(true);
+  }
 
   // Track responsive layout tiers + visualViewport height + prevent horizontal page pan
   useEffect(() => {
@@ -981,13 +1028,25 @@ export function App() {
   );
   const sessionBusy = sessionActionPending !== null;
 
+  const textSizeSpec = getTextSizeSpec(readingPreferences.textSize);
+  const pageWidthSpec = getPageWidthSpec(readingPreferences.pageWidth);
+  const workbenchStyle = {
+    '--cairn-prose-size': textSizeSpec.cssFontSize,
+    '--cairn-prose-line-height': textSizeSpec.cssLineHeight,
+    '--cairn-prose-max-width': pageWidthSpec.cssMaxWidth,
+    '--cairn-review-prose-size': textSizeSpec.cssReviewSize
+  } as React.CSSProperties;
+
   return (
     <EditorBridgeContext.Provider value={bridgeValue}>
       <div
         className={workbenchClasses}
+        style={workbenchStyle}
         data-workspace-mode={workspaceMode}
         data-save-state={saveState}
         data-layout-tier={layoutTier}
+        data-text-size={readingPreferences.textSize}
+        data-page-width={readingPreferences.pageWidth}
       >
         {isOverlayModalOpen && (
           <div
@@ -1005,6 +1064,7 @@ export function App() {
             isEditing={isEditing}
             isOverlay={isOverlayLayout}
             restoreFocusRef={navTriggerRef}
+            settingsTriggerRef={settingsTriggerRef}
             searchQuery={searchQuery}
             searchResults={searchResults}
             onChangeSearch={setSearchQuery}
@@ -1012,6 +1072,7 @@ export function App() {
             onSelectDoc={(projId, docPath) => void handleSelectDoc(projId, docPath)}
             onCreateDoc={handleCreateDoc}
             onOpenEmbedModal={() => setEmbedModalOpen(true)}
+            onOpenReadingSettings={handleOpenReadingSettings}
             onClose={closeNavPanel}
           />
         )}
@@ -1019,7 +1080,7 @@ export function App() {
         <main
           ref={mainStageRef}
           className="document-stage"
-          aria-hidden={isOverlayModalOpen ? 'true' : undefined}
+          aria-hidden={stageInert ? 'true' : undefined}
         >
           <header className={`repo-topbar ${isEditing ? 'is-editing-bar' : 'is-reading-bar'}`}>
             <div className="repo-meta-group">
@@ -1354,6 +1415,17 @@ export function App() {
           />
         )}
       </div>
+
+      {readingSettingsOpen && (
+        <ReadingSettingsModal
+          preferences={readingPreferences}
+          restoreFocusRef={isOverlayLayout ? navTriggerRef : settingsTriggerRef}
+          onChangeTextSize={handleChangeTextSize}
+          onChangePageWidth={handleChangePageWidth}
+          onResetDefaults={handleResetReadingPreferences}
+          onClose={() => setReadingSettingsOpen(false)}
+        />
+      )}
 
       {gitModalOpen && activeProject && (
         <GitDrawerModal

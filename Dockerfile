@@ -9,6 +9,7 @@ COPY tsconfig.json tsconfig.server.json vite.config.ts index.html ./
 COPY shared ./shared
 COPY server ./server
 COPY src ./src
+COPY scripts/seed-repos.ts ./scripts/seed-repos.ts
 RUN npm run build
 
 FROM node:22-bookworm-slim AS runtime
@@ -16,6 +17,11 @@ FROM node:22-bookworm-slim AS runtime
 RUN apt-get update \
   && apt-get install -y --no-install-recommends git ca-certificates curl \
   && rm -rf /var/lib/apt/lists/*
+
+# The existing samples belong to the host's builder account. Rootless UID
+# mapping presents that owner as nobody; trust only these two mounted checkouts.
+RUN git config --system --add safe.directory /app/sample-repos/cindervault-rpg \
+  && git config --system --add safe.directory /app/sample-repos/helios-lab
 
 WORKDIR /app
 ENV NODE_ENV=production

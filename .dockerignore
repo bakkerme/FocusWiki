@@ -5,3 +5,7 @@ sample-repos
 *.log
 .runtime
 captures/
+.aws
+.codex
+.env
+.env.*

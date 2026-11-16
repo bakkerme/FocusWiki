@@ -13,7 +13,7 @@ const FOCUSABLE_SELECTOR = [
 function getVisibleFocusableElements(root: HTMLElement): HTMLElement[] {
   const nodes = Array.from(root.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR));
   return nodes.filter((el) => {
-    if (el.hasAttribute('disabled') || el.getAttribute('aria-hidden') === 'true') {
+    if (el.tabIndex < 0 || el.hasAttribute('disabled') || el.getAttribute('aria-hidden') === 'true') {
       return false;
     }
     const style = window.getComputedStyle(el);

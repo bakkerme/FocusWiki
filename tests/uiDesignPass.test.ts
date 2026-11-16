@@ -558,8 +558,8 @@ describe('Council UI Design & Responsive IA Pass — Interactive Browser Verific
       const rightGutterNavOpen = navOpenGeom.stageRight - navOpenGeom.proseRight;
       expect(Math.abs(leftGutterNavOpen - rightGutterNavOpen)).toBeLessThanOrEqual(2);
       expect(leftGutterNavOpen).toBeGreaterThan(100);
-      // Constrained reading line length preserved
-      expect(navOpenGeom.proseWidth).toBeLessThanOrEqual(730);
+      // Constrained reading line length preserved (Standard 760px)
+      expect(navOpenGeom.proseWidth).toBeLessThanOrEqual(765);
       expect(navOpenGeom.proseWidth).toBeGreaterThanOrEqual(600);
 
       // 2. Also close Docs navigation -> centers symmetrically across full-width stage
@@ -582,7 +582,7 @@ describe('Council UI Design & Responsive IA Pass — Interactive Browser Verific
       const leftGutterBothClosed = bothClosedGeom.proseLeft - bothClosedGeom.stageLeft;
       const rightGutterBothClosed = bothClosedGeom.stageRight - bothClosedGeom.proseRight;
       expect(Math.abs(leftGutterBothClosed - rightGutterBothClosed)).toBeLessThanOrEqual(2);
-      expect(bothClosedGeom.proseWidth).toBeLessThanOrEqual(730);
+      expect(bothClosedGeom.proseWidth).toBeLessThanOrEqual(765);
     } finally {
       await context.close();
     }
@@ -837,4 +837,228 @@ describe('Council UI Design & Responsive IA Pass — Interactive Browser Verific
       await context.close();
     }
   }, 30000);
+
+  it('uses system sans-serif typography on neutral white surfaces and supports Reading settings presets, persistence, invalid-storage recovery, keyboard/focus composition, and draft survival without repo writes', async () => {
+    const context = await browser!.newContext({ viewport: { width: 1440, height: 900 } });
+    context.setDefaultTimeout(6000);
+    const page = await context.newPage();
+
+    try {
+      await page.goto(`${baseUrl}/?project=cindervault-rpg&doc=docs%2Fvault-breach-action.md`);
+      await page.waitForSelector('.ProseMirror h1');
+
+      const gitStatusBefore = execFileSync('git', ['status', '--porcelain'], {
+        cwd: repoRoot,
+        encoding: 'utf8'
+      });
+
+      // 1. Visual tokens: neutral white nav/review rails + system sans typography (no Literata / Plus Jakarta Sans)
+      const visualCheck = await page.evaluate(() => {
+        const nav = document.querySelector('.nav-sidebar')!;
+        const rev = document.querySelector('.review-sidebar')!;
+        const prose = document.querySelector('.prose-container')!;
+        const h1 = document.querySelector('.ProseMirror h1')!;
+        const topbarBtn = document.querySelector('.btn-edit-entry')!;
+        const codeEl = document.querySelector('.ProseMirror code')!;
+        return {
+          navBg: getComputedStyle(nav).backgroundColor,
+          revBg: getComputedStyle(rev).backgroundColor,
+          proseFont: getComputedStyle(prose).fontFamily,
+          h1Font: getComputedStyle(h1).fontFamily,
+          proseSize: parseFloat(getComputedStyle(prose).fontSize),
+          proseMaxWidth: getComputedStyle(document.querySelector('.workbench')!)
+            .getPropertyValue('--cairn-prose-max-width')
+            .trim(),
+          proseRectWidth: prose.getBoundingClientRect().width,
+          topbarBtnSize: parseFloat(getComputedStyle(topbarBtn).fontSize),
+          codeFont: getComputedStyle(codeEl).fontFamily
+        };
+      });
+
+      expect(visualCheck.navBg).toBe('rgb(255, 255, 255)');
+      expect(visualCheck.revBg).toBe('rgb(255, 255, 255)');
+      expect(visualCheck.proseFont).not.toContain('Literata');
+      expect(visualCheck.proseFont).not.toContain('Plus Jakarta Sans');
+      expect(visualCheck.h1Font).not.toContain('Literata');
+      expect(visualCheck.codeFont.toLowerCase()).toContain('mono');
+      expect(visualCheck.proseSize).toBeCloseTo(18, 1);
+      expect(visualCheck.proseMaxWidth).toBe('760px');
+      expect(visualCheck.proseRectWidth).toBeLessThanOrEqual(761);
+
+      const baselineBtnSize = visualCheck.topbarBtnSize;
+
+      // 2. Open Reading settings on desktop -> test all textSize & pageWidth presets + Reset defaults
+      await page.locator('.sidebar-settings-btn').click();
+      await page.waitForSelector('.reading-settings-modal[role="dialog"][aria-modal="true"]');
+      expect(await page.evaluate(() => document.querySelector('main.document-stage')?.hasAttribute('inert'))).toBe(true);
+
+      const expectedSizes: Record<'small' | 'standard' | 'large', number> = {
+        small: 16,
+        standard: 18,
+        large: 20
+      };
+      const expectedWidths: Record<'narrow' | 'standard' | 'wide', number> = {
+        narrow: 640,
+        standard: 760,
+        wide: 960
+      };
+
+      for (const sizeKey of ['small', 'large', 'standard'] as const) {
+        await page
+          .locator(`.reading-preset-btn[data-pref-group="textSize"][data-pref-value="${sizeKey}"]`)
+          .click();
+        const measured = await page.evaluate(() => ({
+          proseSize: parseFloat(getComputedStyle(document.querySelector('.prose-container')!).fontSize),
+          sampleSize: parseFloat(getComputedStyle(document.querySelector('.reading-sample-copy')!).fontSize),
+          btnSize: parseFloat(getComputedStyle(document.querySelector('.btn-edit-entry')!).fontSize)
+        }));
+        expect(measured.proseSize).toBeCloseTo(expectedSizes[sizeKey], 1);
+        expect(measured.sampleSize).toBeCloseTo(expectedSizes[sizeKey], 1);
+        expect(measured.btnSize).toBeCloseTo(baselineBtnSize, 1);
+      }
+
+      for (const widthKey of ['narrow', 'wide', 'standard'] as const) {
+        await page
+          .locator(`.reading-preset-btn[data-pref-group="pageWidth"][data-pref-value="${widthKey}"]`)
+          .click();
+        const maxW = await page.evaluate(() =>
+          getComputedStyle(document.querySelector('.workbench')!)
+            .getPropertyValue('--cairn-prose-max-width')
+            .trim()
+        );
+        expect(maxW).toBe(`${expectedWidths[widthKey]}px`);
+      }
+
+      // Radio groups use one Tab stop and arrow/Home/End keys to select presets.
+      const textGroup = page.getByRole('radiogroup', { name: 'Text size', exact: true });
+      await textGroup.getByRole('radio', { name: 'Standard 18px', exact: true }).focus();
+      await page.keyboard.press('ArrowRight');
+      expect(await page.getAttribute('.workbench', 'data-text-size')).toBe('large');
+      await page.keyboard.press('Home');
+      expect(await page.getAttribute('.workbench', 'data-text-size')).toBe('small');
+      await page.keyboard.press('End');
+      expect(await page.getAttribute('.workbench', 'data-text-size')).toBe('large');
+      expect(await textGroup.locator('[tabindex="0"]').count()).toBe(1);
+      await page.keyboard.press('Tab');
+      expect(await page.evaluate(() => (document.activeElement as HTMLElement)?.dataset.prefGroup)).toBe('pageWidth');
+
+      // Reset defaults works and disables when back at defaults
+      await page.locator('.reading-preset-btn[data-pref-value="large"][data-pref-group="textSize"]').click();
+      await page.locator('.reading-preset-btn[data-pref-value="narrow"][data-pref-group="pageWidth"]').click();
+      await page.locator('.reading-reset-btn').click();
+      expect(await page.locator('.reading-reset-btn').isDisabled()).toBe(true);
+      expect(await page.getAttribute('.workbench', 'data-text-size')).toBe('standard');
+      expect(await page.getAttribute('.workbench', 'data-page-width')).toBe('standard');
+
+      // Apply Large + Narrow, focus trap + Escape closes and restores focus to .sidebar-settings-btn
+      await page.locator('.reading-preset-btn[data-pref-group="textSize"][data-pref-value="large"]').click();
+      await page.locator('.reading-preset-btn[data-pref-group="pageWidth"][data-pref-value="narrow"]').click();
+      for (let i = 0; i < 10; i++) {
+        await page.keyboard.press('Tab');
+        const insideModal = await page.evaluate(() =>
+          Boolean(document.activeElement?.closest('.reading-settings-modal'))
+        );
+        expect(insideModal).toBe(true);
+      }
+      await page.keyboard.press('Escape');
+      await page.waitForFunction(() => !document.querySelector('.reading-settings-modal'));
+      await page.waitForFunction(() => document.activeElement?.classList.contains('sidebar-settings-btn'));
+
+      // 3. Preserves centering with Review closed (and open) even under Narrow/Wide presets
+      await page.locator('.review-sidebar .panel-close-btn').click();
+      await page.waitForFunction(() => !document.querySelector('.review-sidebar'));
+      const centeredNarrow = await page.evaluate(() => {
+        const stage = document.querySelector('main.document-stage')!.getBoundingClientRect();
+        const prose = document.querySelector('.prose-container')!.getBoundingClientRect();
+        return {
+          width: prose.width,
+          leftGutter: prose.left - stage.left,
+          rightGutter: stage.right - prose.right
+        };
+      });
+      expect(centeredNarrow.width).toBeCloseTo(640, 1);
+      expect(Math.abs(centeredNarrow.leftGutter - centeredNarrow.rightGutter)).toBeLessThanOrEqual(2);
+
+      // 4. Persist across reload & project switch without affecting Markdown source font size or repo files
+      await page.reload();
+      await page.waitForSelector('.workbench[data-text-size="large"][data-page-width="narrow"]');
+
+      await page.locator('#projectSelect').selectOption('helios-lab');
+      await page.waitForSelector('.doc-page-eyebrow:has-text("Helios Lab")');
+      expect(await page.getAttribute('.workbench', 'data-text-size')).toBe('large');
+      expect(await page.getAttribute('.workbench', 'data-page-width')).toBe('narrow');
+
+      // Switch to Source mode -> source editor textarea keeps crisp 13px monospace regardless of Large preset
+      await page.locator('.btn-edit-entry').click();
+      await page.locator('.mode-switch button:has-text("Markdown source")').click();
+      await page.waitForSelector('textarea.markdown-source-editor');
+      const sourceFontSize = await page.evaluate(() =>
+        parseFloat(getComputedStyle(document.querySelector('textarea.markdown-source-editor')!).fontSize)
+      );
+      expect(sourceFontSize).toBeCloseTo(13, 1);
+
+      // Draft edit + comment draft survive opening/modifying/closing Reading settings
+      const ta = page.locator('textarea.markdown-source-editor');
+      const origSource = await ta.inputValue();
+      const draftWithUnsaved = `${origSource}\nTemporary unsaved edit across settings.\n`;
+      await ta.fill(draftWithUnsaved);
+
+      await page.locator('.sidebar-settings-btn').click();
+      await page.waitForSelector('.reading-settings-modal');
+      await page.locator('.reading-preset-btn[data-pref-group="pageWidth"][data-pref-value="wide"]').click();
+      await page.locator('.reading-done-btn').click();
+      await page.waitForFunction(() => !document.querySelector('.reading-settings-modal'));
+      expect(await ta.inputValue()).toBe(draftWithUnsaved);
+
+      // Revert source draft cleanly so repo remains untouched
+      await page.locator('.btn-revert-session').click();
+      await page.waitForSelector('.workbench[data-workspace-mode="read"]');
+
+      // No Markdown/comment/Git mutations resulted from changing display preferences
+      const gitStatusAfter = execFileSync('git', ['status', '--porcelain'], {
+        cwd: repoRoot,
+        encoding: 'utf8'
+      });
+      expect(gitStatusAfter).toBe(gitStatusBefore);
+
+      // 5. Phone (390x844) & Short Landscape (956x440): open from Docs drawer, clamp Wide (960px) cleanly with zero horizontal overflow, no stacked focus fights
+      for (const vp of [
+        { width: 390, height: 844 },
+        { width: 956, height: 440 }
+      ]) {
+        await page.setViewportSize(vp);
+        await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+
+        await page.locator('.nav-toggle-btn').click();
+        await page.waitForSelector('.nav-sidebar.is-overlay-open');
+        await page.locator('.sidebar-settings-btn').click();
+        await page.waitForSelector('.reading-settings-modal');
+        // Docs drawer closed automatically so no stacked focus fight occurs
+        expect(await page.locator('.nav-sidebar.is-overlay-open').count()).toBe(0);
+
+        await page.locator('.reading-preset-btn[data-pref-group="pageWidth"][data-pref-value="wide"]').click();
+        await page.keyboard.press('Escape');
+        await page.waitForFunction(() => !document.querySelector('.reading-settings-modal'));
+        await page.waitForFunction(() => document.activeElement?.classList.contains('nav-toggle-btn'));
+
+        const mobileMetrics = await page.evaluate(() => ({
+          overflowX: document.documentElement.scrollWidth - window.innerWidth,
+          proseRight: document.querySelector('.prose-container')!.getBoundingClientRect().right,
+          proseLeft: document.querySelector('.prose-container')!.getBoundingClientRect().left
+        }));
+        expect(mobileMetrics.overflowX).toBeLessThanOrEqual(1);
+        expect(mobileMetrics.proseLeft).toBeGreaterThanOrEqual(12);
+        expect(mobileMetrics.proseRight).toBeLessThanOrEqual(vp.width);
+      }
+
+      // 6. Invalid/corrupt localStorage recovery in live browser
+      await page.evaluate(() => {
+        window.localStorage.setItem('cairn:reading-preferences:v1', '{"version":1,"textSize":"giant","pageWidth":"invalid"}');
+      });
+      await page.reload();
+      await page.waitForSelector('.workbench[data-text-size="standard"][data-page-width="standard"]');
+    } finally {
+      await context.close();
+    }
+  }, 35000);
 });
