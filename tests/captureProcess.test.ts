@@ -1,9 +1,12 @@
 import fs from 'node:fs';
+import http from 'node:http';
+import type { AddressInfo } from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import zlib from 'node:zlib';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
+  type CaptureManifest,
   buildBrowserRunScript,
   createCapturePlan,
   importCompetitorPng,
@@ -14,6 +17,7 @@ import {
   selectCaptureTargets,
   validateCapturePacket
 } from '../scripts/captureLib';
+import { assertLocalCairnBaseUrl, runPlaywrightCapture } from '../scripts/captureRunner';
 
 const PROJECT_ROOT = path.resolve(__dirname, '..');
 const MANIFEST_PATH = path.join(PROJECT_ROOT, 'config', 'capture-manifest.json');
@@ -84,7 +88,8 @@ describe('Screenshot capture manifest & packet workflow', () => {
 
     const defaults = selectCaptureTargets(manifest, {});
     expect(defaults.map((t) => t.id)).toEqual([
-      'doc-initial-edit',
+      'doc-initial-read',
+      'doc-visual-edit',
       'source-editing',
       'review-thread-open',
       'embed-visible',
@@ -107,7 +112,7 @@ describe('Screenshot capture manifest & packet workflow', () => {
         new Function('return async (navigate, waitFor, evaluate) => {\n' + code + '\n}');
       }).not.toThrow();
       expect(code).toContain('document.fonts.ready');
-      expect(code).toContain('.save-badge.saved');
+      expect(code).toContain('assertSavedState');
     }
   });
 
@@ -117,7 +122,7 @@ describe('Screenshot capture manifest & packet workflow', () => {
       projectRoot: tmpProj,
       manifestPath: 'config/capture-manifest.json',
       packetId: 'unit-packet',
-      targetIds: ['doc-initial-edit', 'narrow-viewport'],
+      targetIds: ['doc-initial-read', 'narrow-viewport'],
       skipLiveProbe: true
     });
 
@@ -129,7 +134,7 @@ describe('Screenshot capture manifest & packet workflow', () => {
       packetIdOrDir: 'unit-packet'
     });
     expect(beforeRecord.valid).toBe(false);
-    expect(beforeRecord.issues.some((i) => i.includes('doc-initial-edit'))).toBe(true);
+    expect(beforeRecord.issues.some((i) => i.includes('doc-initial-read'))).toBe(true);
 
     const desktopPng = path.join(tmpProj, 'raw-desktop.png');
     const narrowPng = path.join(tmpProj, 'raw-narrow.png');
@@ -141,7 +146,7 @@ describe('Screenshot capture manifest & packet workflow', () => {
       recordTargetCapture({
         projectRoot: tmpProj,
         packetIdOrDir: 'unit-packet',
-        targetId: 'doc-initial-edit',
+        targetId: 'doc-initial-read',
         sourceImagePath: narrowPng
       })
     ).toThrow(/PNG pixel dimension mismatch/);
@@ -150,16 +155,17 @@ describe('Screenshot capture manifest & packet workflow', () => {
     const rec1 = recordTargetCapture({
       projectRoot: tmpProj,
       packetIdOrDir: 'unit-packet',
-      targetId: 'doc-initial-edit',
+      targetId: 'doc-initial-read',
       sourceImagePath: desktopPng,
       telemetry: {
         status: 'ready',
-        targetId: 'doc-initial-edit',
+        targetId: 'doc-initial-read',
         url: 'http://127.0.0.1:8088/?project=cindervault-rpg&doc=docs%2Fvault-breach-action.md',
         elapsedMs: 920
       }
     });
     expect(rec1.viewport.pngPixels).toEqual({ width: 1440, height: 900 });
+    expect(rec1.replacesTargetId).toBe('doc-initial-edit');
 
     recordTargetCapture({
       projectRoot: tmpProj,
@@ -224,7 +230,7 @@ describe('Screenshot capture manifest & packet workflow', () => {
       projectRoot: tmpProj,
       manifestPath: 'config/capture-manifest.json',
       packetId: 'ref-packet',
-      targetIds: ['doc-initial-edit'],
+      targetIds: ['doc-initial-read'],
       skipLiveProbe: true
     });
 
@@ -273,5 +279,174 @@ describe('Screenshot capture manifest & packet workflow', () => {
     });
     expect(partialCheck.valid).toBe(true);
     expect(partialCheck.checkedReferences).toBe(1);
+
+    const unknownMetadata = importCompetitorPng({
+      projectRoot: tmpProj,
+      sourceImagePath: compPng,
+      product: 'ExampleWiki',
+      screen: 'unknown-origin',
+      task: 'reading',
+      source: 'User-supplied image; original capture details unavailable'
+    });
+    expect(unknownMetadata.entry.capturedDate).toBeNull();
+    expect(unknownMetadata.entry.declaredViewport).toBeNull();
+    expect(unknownMetadata.entry.pngPixels).toEqual({ width: 1440, height: 900 });
+    expect(unknownMetadata.entry.importedAt).toBeTruthy();
   });
+
+  it('enforces local/private base-url scope and fails cleanly on unavailable service or partial readiness failure', async () => {
+    expect(() => assertLocalCairnBaseUrl('http://127.0.0.1:8088')).not.toThrow();
+    expect(() => assertLocalCairnBaseUrl('http://100.117.116.91:8088')).not.toThrow();
+    expect(() => assertLocalCairnBaseUrl('https://example.com')).toThrow(/Refusing non-local/);
+    expect(() => assertLocalCairnBaseUrl('file:///etc/passwd')).toThrow(/Unsupported protocol/);
+
+    const tmpProj = makeTempProject();
+
+    // Unknown target throws immediately before launching a browser
+    await expect(
+      runPlaywrightCapture({
+        projectRoot: tmpProj,
+        manifestPath: 'config/capture-manifest.json',
+        packetId: 'bad-target',
+        targetIds: ['missing-state-id'],
+        baseUrl: 'http://127.0.0.1:18099'
+      })
+    ).rejects.toThrow(/Unknown capture target/);
+
+    // Unavailable service returns ok:false and records failure so partial validation cannot pass
+    const downRes = await runPlaywrightCapture({
+      projectRoot: tmpProj,
+      manifestPath: 'config/capture-manifest.json',
+      packetId: 'service-down',
+      targetIds: ['doc-initial-read'],
+      baseUrl: 'http://127.0.0.1:18099'
+    });
+    expect(downRes.ok).toBe(false);
+    expect(downRes.validation.valid).toBe(false);
+    expect(downRes.failures).toHaveLength(1);
+    expect(downRes.failures[0].failedStep).toBe('live-server-probe');
+
+    // Ephemeral local test HTTP server to verify headless Playwright capture + partial packet failure
+    const server = http.createServer((req, res) => {
+      if (req.url === '/healthz') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ status: 'ok', service: 'cairn-test' }));
+        return;
+      }
+      if (req.url === '/api/projects') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ projects: [] }));
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end(`<!doctype html>
+<html>
+  <body style="margin:0;padding:24px;font-family:sans-serif">
+    <div class="workbench">
+      <button class="git-status-btn">clean</button>
+      <span class="save-badge saved">Saved to disk</span>
+      <div class="ProseMirror"><h1>Fixture Ready</h1></div>
+    </div>
+  </body>
+</html>`);
+    });
+
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
+    const port = (server.address() as AddressInfo).port;
+    const baseUrl = `http://127.0.0.1:${port}`;
+
+    try {
+      const testManifest: CaptureManifest = {
+        schemaVersion: 1,
+        appName: 'Cairn Test Fixture',
+        defaultBaseUrl: baseUrl,
+        targets: [
+          {
+            id: 'ready-state',
+            label: 'Ready State',
+            defaultSelected: true,
+            actualAppState: 'fixture-ready',
+            honestStateNote: 'Test fixture state',
+            route: '/?doc=ok',
+            projectId: 'fixture',
+            docPath: 'docs/ok.md',
+            captureScope: 'viewport',
+            viewport: {
+              width: 800,
+              height: 600,
+              deviceScaleFactor: 1,
+              colorScheme: 'light',
+              reducedMotion: true
+            },
+            steps: [{ kind: 'navigate' }],
+            readiness: {
+              requiredSelectors: ['.workbench', '.ProseMirror h1', '.save-badge.saved'],
+              waitForFonts: true,
+              waitForVisibleEmbeds: false,
+              assertSavedState: true,
+              timeoutMs: 4000
+            }
+          },
+          {
+            id: 'missing-selector-state',
+            label: 'Missing Selector State',
+            defaultSelected: true,
+            actualAppState: 'fixture-broken',
+            honestStateNote: 'Intentionally missing selector',
+            route: '/?doc=broken',
+            projectId: 'fixture',
+            docPath: 'docs/broken.md',
+            captureScope: 'viewport',
+            viewport: {
+              width: 800,
+              height: 600,
+              deviceScaleFactor: 1,
+              colorScheme: 'light',
+              reducedMotion: true
+            },
+            steps: [{ kind: 'navigate' }],
+            readiness: {
+              requiredSelectors: ['.workbench', '.selector-that-never-renders'],
+              waitForFonts: true,
+              waitForVisibleEmbeds: false,
+              assertSavedState: true,
+              timeoutMs: 600
+            }
+          }
+        ]
+      };
+
+      const customManifestPath = path.join(tmpProj, 'config', 'test-manifest.json');
+      fs.writeFileSync(customManifestPath, JSON.stringify(testManifest, null, 2));
+
+      // Single valid target succeeds end-to-end
+      const singleOk = await runPlaywrightCapture({
+        projectRoot: tmpProj,
+        manifestPath: 'config/test-manifest.json',
+        packetId: 'pw-valid',
+        targetIds: ['ready-state'],
+        baseUrl
+      });
+      expect(singleOk.ok).toBe(true);
+      expect(singleOk.validation.valid).toBe(true);
+      expect(singleOk.captured).toHaveLength(1);
+      expect(singleOk.captured[0].viewport.pngPixels).toEqual({ width: 800, height: 600 });
+
+      // Partial run (1 ready + 1 missing selector) must NEVER report ok:true
+      const partialFail = await runPlaywrightCapture({
+        projectRoot: tmpProj,
+        manifestPath: 'config/test-manifest.json',
+        packetId: 'pw-partial-fail',
+        all: true,
+        baseUrl
+      });
+      expect(partialFail.ok).toBe(false);
+      expect(partialFail.captured).toHaveLength(1);
+      expect(partialFail.failures).toHaveLength(1);
+      expect(partialFail.failures[0].targetId).toBe('missing-selector-state');
+      expect(partialFail.validation.valid).toBe(false);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  }, 30000);
 });

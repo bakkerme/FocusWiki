@@ -1,4 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  Check,
+  GitBranch,
+  MessageSquare,
+  PanelLeft,
+  Pencil
+} from 'lucide-react';
 import type {
   CommentAnchor,
   ConflictErrorPayload,
@@ -8,16 +15,43 @@ import type {
   ResolvedCommentThread,
   SearchResultItem
 } from '../shared/types';
-import { EditorBridgeContext } from './editor/EmbedContext';
+import { EditorBridgeContext, type WorkspaceMode } from './editor/EmbedContext';
 import {
   VisualMarkdownEditor,
   type VisualEditorHandle
 } from './editor/VisualMarkdownEditor';
 import { SidebarNav } from './components/SidebarNav';
+import { MarkdownSourceWorkspace } from './components/MarkdownSourceWorkspace';
 import { ReviewMargin } from './components/ReviewMargin';
 import { GitDrawerModal } from './components/GitDrawerModal';
 import { ConflictModal } from './components/ConflictModal';
 import { InsertEmbedModal } from './components/InsertEmbedModal';
+import { useOverlayScrollLock } from './utils/overlayModal';
+
+export type LayoutTier = 'overlay' | 'medium-desktop' | 'wide-desktop';
+
+const OVERLAY_MEDIA_QUERY = '(max-width: 1024px), (max-height: 540px)';
+const WIDE_DESKTOP_MEDIA_QUERY = '(min-width: 1320px) and (min-height: 541px)';
+
+function readInitialModeFromUrl(): WorkspaceMode {
+  if (typeof window === 'undefined') return 'read';
+  const raw = new URLSearchParams(window.location.search).get('mode');
+  if (raw === 'visual' || raw === 'source' || raw === 'read') {
+    return raw;
+  }
+  return 'read';
+}
+
+function detectLayoutTier(): LayoutTier {
+  if (typeof window === 'undefined') return 'wide-desktop';
+  if (window.matchMedia(OVERLAY_MEDIA_QUERY).matches) {
+    return 'overlay';
+  }
+  if (window.matchMedia(WIDE_DESKTOP_MEDIA_QUERY).matches) {
+    return 'wide-desktop';
+  }
+  return 'medium-desktop';
+}
 
 export function App() {
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
@@ -27,7 +61,7 @@ export function App() {
 
   const [initialDocMarkdown, setInitialDocMarkdown] = useState<string>('');
   const [liveMarkdown, setLiveMarkdown] = useState<string>('');
-  const [editorMode, setEditorMode] = useState<'visual' | 'source'>('visual');
+  const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>(readInitialModeFromUrl);
   const [saveState, setSaveState] = useState<'saved' | 'dirty' | 'saving' | 'conflict' | 'error'>('saved');
   const [statusNotice, setStatusNotice] = useState<string | null>(null);
 
@@ -36,7 +70,20 @@ export function App() {
   const [showResolvedComments, setShowResolvedComments] = useState<boolean>(false);
   const [pendingAnchor, setPendingAnchor] = useState<CommentAnchor | null>(null);
   const [composerOpen, setComposerOpen] = useState<boolean>(false);
-  const [reviewOpen, setReviewOpen] = useState<boolean>(true);
+
+  // Lifted review draft & author state so dismissing/rotating drawers never discards drafts
+  const [authorName, setAuthorName] = useState<string>('Reviewer');
+  const [commentDraft, setCommentDraft] = useState<string>('');
+  const [replyDrafts, setReplyDrafts] = useState<Record<string, string>>({});
+  const [expandedHistory, setExpandedHistory] = useState<Record<string, boolean>>({});
+
+  const [layoutTier, setLayoutTier] = useState<LayoutTier>(detectLayoutTier);
+  const [desktopNavOpen, setDesktopNavOpen] = useState<boolean>(true);
+  const [desktopReviewOpen, setDesktopReviewOpen] = useState<boolean>(() => {
+    const initialTier = detectLayoutTier();
+    return initialTier === 'wide-desktop' && readInitialModeFromUrl() !== 'source';
+  });
+  const [overlayDrawer, setOverlayDrawer] = useState<'nav' | 'review' | null>(null);
 
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [searchResults, setSearchResults] = useState<SearchResultItem[]>([]);
@@ -47,20 +94,102 @@ export function App() {
   const [conflictData, setConflictData] = useState<ConflictErrorPayload | null>(null);
 
   const visualEditorRef = useRef<VisualEditorHandle | null>(null);
+  const mainStageRef = useRef<HTMLElement | null>(null);
+  const navTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const reviewTriggerRef = useRef<HTMLButtonElement | null>(null);
+
   const baseRevisionRef = useRef<string>('');
   const lastSavedMdRef = useRef<string>('');
   const liveMdRef = useRef<string>('');
   const activeProjectIdRef = useRef<string>('');
   const activeDocPathRef = useRef<string>('');
+  const composerOpenRef = useRef<boolean>(false);
+  const commentDraftRef = useRef<string>('');
+  const reviewOpenBeforeSourceRef = useRef<boolean>(true);
   const saveTimerRef = useRef<number | null>(null);
 
   activeProjectIdRef.current = activeProjectId;
   activeDocPathRef.current = activeDocPath;
   liveMdRef.current = liveMarkdown;
+  composerOpenRef.current = composerOpen;
+  commentDraftRef.current = commentDraft;
+
+  const isOverlayLayout = layoutTier === 'overlay';
+  const effectiveNavVisible = isOverlayLayout ? overlayDrawer === 'nav' : desktopNavOpen;
+  const effectiveReviewVisible = isOverlayLayout ? overlayDrawer === 'review' : desktopReviewOpen;
+  const isOverlayModalOpen = isOverlayLayout && overlayDrawer !== null;
+
+  useOverlayScrollLock(isOverlayModalOpen);
+
+  // Set native HTML inert attribute on <main> while a modal overlay drawer is open
+  useEffect(() => {
+    const stageEl = mainStageRef.current;
+    if (!stageEl) return;
+    if (isOverlayModalOpen) {
+      stageEl.setAttribute('inert', '');
+    } else {
+      stageEl.removeAttribute('inert');
+    }
+  }, [isOverlayModalOpen]);
+
+  // Track responsive layout tiers + visualViewport height + prevent horizontal page pan
+  useEffect(() => {
+    const syncViewportMetrics = () => {
+      const vv = window.visualViewport;
+      const heightPx = Math.round(vv ? vv.height : window.innerHeight);
+      document.documentElement.style.setProperty('--vvh', `${heightPx}px`);
+      if (window.scrollX !== 0 && !document.body.dataset.overlayLocked) {
+        window.scrollTo(0, window.scrollY);
+      }
+
+      const nextTier = detectLayoutTier();
+      setLayoutTier((prevTier) => {
+        if (prevTier !== nextTier) {
+          if (nextTier !== 'overlay') {
+            setOverlayDrawer(null);
+          }
+          if (nextTier === 'medium-desktop') {
+            // Avoid dual-sidebar squeeze on medium widths
+            setDesktopReviewOpen((revOpen) => {
+              if (revOpen && (composerOpenRef.current || commentDraftRef.current.trim())) {
+                setDesktopNavOpen(false);
+                return true;
+              }
+              return false;
+            });
+          }
+        }
+        return nextTier;
+      });
+    };
+
+    syncViewportMetrics();
+
+    const overlayMq = window.matchMedia(OVERLAY_MEDIA_QUERY);
+    const wideMq = window.matchMedia(WIDE_DESKTOP_MEDIA_QUERY);
+    overlayMq.addEventListener('change', syncViewportMetrics);
+    wideMq.addEventListener('change', syncViewportMetrics);
+    window.addEventListener('resize', syncViewportMetrics, { passive: true });
+    window.addEventListener('orientationchange', syncViewportMetrics, { passive: true });
+    window.visualViewport?.addEventListener('resize', syncViewportMetrics, { passive: true });
+
+    return () => {
+      overlayMq.removeEventListener('change', syncViewportMetrics);
+      wideMq.removeEventListener('change', syncViewportMetrics);
+      window.removeEventListener('resize', syncViewportMetrics);
+      window.removeEventListener('orientationchange', syncViewportMetrics);
+      window.visualViewport?.removeEventListener('resize', syncViewportMetrics);
+    };
+  }, []);
 
   const activeProject = useMemo(
     () => projects.find((p) => p.id === activeProjectId) ?? null,
     [projects, activeProjectId]
+  );
+
+  const openThreadCount = useMemo(
+    () => threads.filter((t) => t.status === 'open').length,
+    [threads]
   );
 
   const refreshProjects = useCallback(async (): Promise<ProjectSummary[]> => {
@@ -71,42 +200,67 @@ export function App() {
     return data.projects;
   }, []);
 
-  const loadDocument = useCallback(async (projectId: string, docPath: string) => {
-    if (saveTimerRef.current !== null) {
-      window.clearTimeout(saveTimerRef.current);
-      saveTimerRef.current = null;
-    }
-
-    const res = await fetch(
-      `/api/projects/${encodeURIComponent(projectId)}/doc?path=${encodeURIComponent(docPath)}`
-    );
-    if (!res.ok) {
-      setStatusNotice(`Could not open ${docPath} (${res.status})`);
-      return;
-    }
-
-    const payload = (await res.json()) as DocumentPayload;
-    baseRevisionRef.current = payload.revision;
-    lastSavedMdRef.current = payload.markdown;
-    liveMdRef.current = payload.markdown;
-
-    setActiveProjectId(projectId);
-    setActiveDocPath(payload.path);
-    setInitialDocMarkdown(payload.markdown);
-    setLiveMarkdown(payload.markdown);
-    setThreads(payload.comments);
-    setSaveState('saved');
-    setConflictData(null);
-    setPendingAnchor(null);
-    setComposerOpen(false);
-    setActiveThreadId(null);
-    setDocSessionNonce((n) => n + 1);
-
+  const syncUrlParams = useCallback((projectId: string, docPath: string, mode: WorkspaceMode) => {
     const url = new URL(window.location.href);
     url.searchParams.set('project', projectId);
-    url.searchParams.set('doc', payload.path);
+    url.searchParams.set('doc', docPath);
+    if (mode === 'read') {
+      url.searchParams.delete('mode');
+    } else {
+      url.searchParams.set('mode', mode);
+    }
     window.history.replaceState({}, '', url.toString());
   }, []);
+
+  const loadDocument = useCallback(
+    async (projectId: string, docPath: string) => {
+      if (saveTimerRef.current !== null) {
+        window.clearTimeout(saveTimerRef.current);
+        saveTimerRef.current = null;
+      }
+
+      const isDifferentDoc =
+        projectId !== activeProjectIdRef.current || docPath !== activeDocPathRef.current;
+
+      const res = await fetch(
+        `/api/projects/${encodeURIComponent(projectId)}/doc?path=${encodeURIComponent(docPath)}`
+      );
+      if (!res.ok) {
+        setStatusNotice(`Could not open ${docPath} (${res.status})`);
+        return;
+      }
+
+      const payload = (await res.json()) as DocumentPayload;
+      baseRevisionRef.current = payload.revision;
+      lastSavedMdRef.current = payload.markdown;
+      liveMdRef.current = payload.markdown;
+
+      setActiveProjectId(projectId);
+      setActiveDocPath(payload.path);
+      setInitialDocMarkdown(payload.markdown);
+      setLiveMarkdown(payload.markdown);
+      setThreads(payload.comments);
+      setSaveState('saved');
+      setConflictData(null);
+      if (isDifferentDoc) {
+        setPendingAnchor(null);
+        setComposerOpen(false);
+        setCommentDraft('');
+        setReplyDrafts({});
+        setExpandedHistory({});
+        setActiveThreadId(null);
+      }
+      setDocSessionNonce((n) => n + 1);
+
+      const currentUrlMode = readInitialModeFromUrl();
+      syncUrlParams(projectId, payload.path, currentUrlMode);
+
+      if (isDifferentDoc && typeof window !== 'undefined' && !document.body.dataset.overlayLocked) {
+        window.scrollTo(0, 0);
+      }
+    },
+    [syncUrlParams]
+  );
 
   // Initial load from URL params or default project
   useEffect(() => {
@@ -260,7 +414,7 @@ export function App() {
             if (!res.ok) return;
             const diskDoc = (await res.json()) as DocumentPayload;
             if (diskDoc.revision === baseRevisionRef.current) {
-              return; // Our own save echoed back
+              return;
             }
 
             const hasLocalUnsaved = liveMdRef.current !== lastSavedMdRef.current;
@@ -324,7 +478,13 @@ export function App() {
       window.clearTimeout(saveTimerRef.current);
       await performSave(liveMdRef.current, false);
     }
+    if (isOverlayLayout) {
+      setOverlayDrawer(null);
+    }
     await loadDocument(projectId, docPath);
+    window.requestAnimationFrame(() => {
+      window.scrollTo(0, 0);
+    });
   }
 
   async function handleCreateDoc(relPath: string, title: string) {
@@ -341,11 +501,11 @@ export function App() {
     const created = (await res.json()) as { path: string };
     await refreshProjects();
     await loadDocument(activeProject.id, created.path);
+    handleSwitchWorkspaceMode('visual');
   }
 
   async function handleCreateComment(author: string, body: string) {
     if (!activeProjectId || !activeDocPath || !pendingAnchor) return;
-    // Flush any pending prose save first so disk matches selection
     if (liveMdRef.current !== lastSavedMdRef.current) {
       await performSave(liveMdRef.current, false);
     }
@@ -366,6 +526,8 @@ export function App() {
       setActiveThreadId(thread.id);
       setPendingAnchor(null);
       setComposerOpen(false);
+      setCommentDraft('');
+      window.getSelection()?.removeAllRanges();
       void refreshProjects();
     }
   }
@@ -388,6 +550,7 @@ export function App() {
     if (res.ok) {
       const { thread } = (await res.json()) as { thread: ResolvedCommentThread };
       setThreads((prev) => prev.map((t) => (t.id === thread.id ? thread : t)));
+      setReplyDrafts((prev) => ({ ...prev, [threadId]: '' }));
     }
   }
 
@@ -413,21 +576,75 @@ export function App() {
     if (res.ok) {
       const { thread } = (await res.json()) as { thread: ResolvedCommentThread };
       setThreads((prev) => prev.map((t) => (t.id === thread.id ? thread : t)));
+      if (status === 'resolved' && !showResolvedComments && activeThreadId === threadId) {
+        setActiveThreadId(null);
+      }
       void refreshProjects();
     }
   }
 
-  function handleSwitchEditorMode(nextMode: 'visual' | 'source') {
-    if (nextMode === editorMode) return;
-    if (nextMode === 'visual') {
+  function handleSwitchWorkspaceMode(nextMode: WorkspaceMode) {
+    if (nextMode === workspaceMode) return;
+    const leavingSource = workspaceMode === 'source' && nextMode !== 'source';
+    const enteringSource = workspaceMode !== 'source' && nextMode === 'source';
+
+    if (leavingSource) {
       setInitialDocMarkdown(liveMarkdown);
       setDocSessionNonce((n) => n + 1);
+      if (!isOverlayLayout) {
+        setDesktopReviewOpen(
+          layoutTier === 'medium-desktop' && desktopNavOpen
+            ? false
+            : reviewOpenBeforeSourceRef.current
+        );
+      }
+    } else if (enteringSource) {
+      reviewOpenBeforeSourceRef.current = desktopReviewOpen;
+      setDesktopReviewOpen(false);
+      if (overlayDrawer === 'review') {
+        setOverlayDrawer(null);
+      }
     }
-    setEditorMode(nextMode);
+
+    setWorkspaceMode(nextMode);
+    if (activeProjectId && activeDocPath) {
+      syncUrlParams(activeProjectId, activeDocPath, nextMode);
+    }
+  }
+
+  function handleLocateThreadInRead(threadId: string) {
+    if (workspaceMode === 'source') {
+      setInitialDocMarkdown(liveMarkdown);
+      setDocSessionNonce((n) => n + 1);
+      setWorkspaceMode('read');
+      if (activeProjectId && activeDocPath) {
+        syncUrlParams(activeProjectId, activeDocPath, 'read');
+      }
+    }
+    setActiveThreadId(threadId);
+    if (isOverlayLayout) {
+      // Return directly to the document in overlay mode and scroll to the anchored prose
+      setOverlayDrawer(null);
+    } else {
+      setDesktopReviewOpen(true);
+      if (layoutTier === 'medium-desktop') {
+        setDesktopNavOpen(false);
+      }
+    }
+    window.setTimeout(() => {
+      visualEditorRef.current?.scrollToThreadAnchor(threadId);
+    }, 80);
   }
 
   function handleInsertEmbed(desc: EmbedDescriptor) {
-    if (editorMode === 'visual' && visualEditorRef.current) {
+    if (workspaceMode === 'read') {
+      handleSwitchWorkspaceMode('visual');
+      window.setTimeout(() => {
+        visualEditorRef.current?.insertEmbedBlock(desc);
+      }, 60);
+      return;
+    }
+    if (workspaceMode === 'visual' && visualEditorRef.current) {
       visualEditorRef.current.insertEmbedBlock(desc);
     } else {
       const snippet = `\n\`\`\`embed\nsrc: ${desc.src}\ntitle: ${desc.title}\nheight: ${desc.height}\nprops: ${JSON.stringify(desc.props)}\n\`\`\`\n`;
@@ -435,66 +652,198 @@ export function App() {
     }
   }
 
+  function toggleNavPanel() {
+    if (isOverlayLayout) {
+      setOverlayDrawer((prev) => (prev === 'nav' ? null : 'nav'));
+    } else {
+      setDesktopNavOpen((prev) => {
+        const next = !prev;
+        if (next && layoutTier === 'medium-desktop') {
+          setDesktopReviewOpen(false);
+        }
+        return next;
+      });
+    }
+  }
+
+  function closeNavPanel() {
+    if (isOverlayLayout) {
+      setOverlayDrawer((prev) => (prev === 'nav' ? null : prev));
+    } else {
+      setDesktopNavOpen(false);
+    }
+  }
+
+  function openReviewPanel() {
+    if (isOverlayLayout) {
+      setOverlayDrawer('review');
+    } else {
+      setDesktopReviewOpen(true);
+      if (layoutTier === 'medium-desktop') {
+        setDesktopNavOpen(false);
+      }
+    }
+  }
+
+  function toggleReviewPanel() {
+    if (isOverlayLayout) {
+      setOverlayDrawer((prev) => (prev === 'review' ? null : 'review'));
+    } else {
+      setDesktopReviewOpen((prev) => {
+        const next = !prev;
+        if (next && layoutTier === 'medium-desktop') {
+          setDesktopNavOpen(false);
+        }
+        return next;
+      });
+    }
+  }
+
+  function closeReviewPanel() {
+    if (isOverlayLayout) {
+      setOverlayDrawer((prev) => (prev === 'review' ? null : prev));
+    } else {
+      setDesktopReviewOpen(false);
+    }
+  }
+
+  const isEditing = workspaceMode !== 'read';
+
   const bridgeValue = useMemo(
     () => ({
       projectId: activeProjectId,
       embedReloadToken,
+      workspaceMode,
+      isEditing,
       onNavigateDoc: (docPath: string) => {
         if (activeProjectId) {
           void handleSelectDoc(activeProjectId, docPath);
         }
       }
     }),
-    [activeProjectId, embedReloadToken]
+    [activeProjectId, embedReloadToken, workspaceMode, isEditing]
   );
+
+  const workbenchClasses = [
+    'workbench',
+    isOverlayLayout ? 'is-overlay-layout' : 'is-desktop-layout',
+    !isOverlayLayout ? (desktopNavOpen ? 'nav-open' : 'nav-closed') : '',
+    !isOverlayLayout ? (desktopReviewOpen ? 'review-open' : 'review-closed') : ''
+  ]
+    .filter(Boolean)
+    .join(' ');
 
   return (
     <EditorBridgeContext.Provider value={bridgeValue}>
-      <div className={`workbench ${reviewOpen ? '' : 'review-closed'}`}>
-        <SidebarNav
-          projects={projects}
-          activeProject={activeProject}
-          activeDocPath={activeDocPath}
-          searchQuery={searchQuery}
-          searchResults={searchResults}
-          onChangeSearch={setSearchQuery}
-          onSelectProject={(id) => void handleSelectProject(id)}
-          onSelectDoc={(projId, docPath) => void handleSelectDoc(projId, docPath)}
-          onCreateDoc={handleCreateDoc}
-          onOpenEmbedModal={() => setEmbedModalOpen(true)}
-        />
+      <div
+        className={workbenchClasses}
+        data-workspace-mode={workspaceMode}
+        data-save-state={saveState}
+        data-layout-tier={layoutTier}
+      >
+        {isOverlayModalOpen && (
+          <div
+            className="drawer-backdrop"
+            aria-hidden="true"
+            onClick={() => setOverlayDrawer(null)}
+          />
+        )}
 
-        <main className="document-stage">
-          <header className="repo-topbar">
+        {effectiveNavVisible && (
+          <SidebarNav
+            projects={projects}
+            activeProject={activeProject}
+            activeDocPath={activeDocPath}
+            isEditing={isEditing}
+            isOverlay={isOverlayLayout}
+            restoreFocusRef={navTriggerRef}
+            searchQuery={searchQuery}
+            searchResults={searchResults}
+            onChangeSearch={setSearchQuery}
+            onSelectProject={(id) => void handleSelectProject(id)}
+            onSelectDoc={(projId, docPath) => void handleSelectDoc(projId, docPath)}
+            onCreateDoc={handleCreateDoc}
+            onOpenEmbedModal={() => setEmbedModalOpen(true)}
+            onClose={closeNavPanel}
+          />
+        )}
+
+        <main
+          ref={mainStageRef}
+          className="document-stage"
+          aria-hidden={isOverlayModalOpen ? 'true' : undefined}
+        >
+          <header className={`repo-topbar ${isEditing ? 'is-editing-bar' : 'is-reading-bar'}`}>
             <div className="repo-meta-group">
+              {(isOverlayLayout || !effectiveNavVisible) && (
+                <button
+                  ref={navTriggerRef}
+                  type="button"
+                  className={`btn btn-compact nav-toggle-btn mobile-nav-btn ${effectiveNavVisible ? 'is-active-btn' : ''}`}
+                  onClick={toggleNavPanel}
+                  aria-expanded={effectiveNavVisible}
+                  aria-controls="cairn-nav-panel"
+                  aria-label={effectiveNavVisible ? 'Close navigation' : 'Open navigation'}
+                  title={effectiveNavVisible ? 'Hide pages navigation' : 'Open pages navigation'}
+                >
+                  <PanelLeft size={15} aria-hidden="true" />
+                  <span className="nav-btn-label">Docs</span>
+                </button>
+              )}
+
               {activeProject && (
                 <>
-                  <span className="code-chip" title="Explicit local repository working copy">
-                    {activeProject.rootPath}
-                  </span>
-                  <span className="code-chip" title="Current Git branch">
-                    branch: {activeProject.git.branch}
-                  </span>
+                  {(isOverlayLayout || !effectiveNavVisible) && (
+                    <span
+                      className="topbar-project-name"
+                      title={`${activeProject.name} — ${activeDocPath}`}
+                    >
+                      {activeProject.name}
+                    </span>
+                  )}
+
                   <button
                     type="button"
-                    className={`git-status-btn ${activeProject.git.isClean ? '' : 'dirty'}`}
+                    className={`git-status-btn ${activeProject.git.isClean ? 'is-clean' : 'dirty'}`}
                     onClick={() => setGitModalOpen(true)}
+                    aria-label={`Repository ${activeProject.name} on branch ${activeProject.git.branch}, ${
+                      activeProject.git.isClean
+                        ? 'working tree clean'
+                        : `${activeProject.git.changedFiles.length} uncommitted ${
+                            activeProject.git.changedFiles.length === 1 ? 'file' : 'files'
+                          }`
+                    }. Inspect Git status and checkout path.`}
+                    title={`Checkout: ${activeProject.rootPath} (${activeProject.git.branch}) — Inspect diff & commit`}
                   >
-                    {activeProject.git.isClean
-                      ? 'Working tree clean'
-                      : `${activeProject.git.changedFiles.length} uncommitted ${
-                          activeProject.git.changedFiles.length === 1 ? 'file' : 'files'
-                        }`}
+                    <GitBranch size={12} aria-hidden="true" />
+                    <span className="git-branch-name">{activeProject.git.branch}</span>
+                    {!activeProject.git.isClean ? (
+                      <>
+                        <span className="git-dirty-count">
+                          {activeProject.git.changedFiles.length}
+                        </span>
+                        <span className="git-status-word">uncommitted</span>
+                      </>
+                    ) : (
+                      <span className="git-status-word">clean</span>
+                    )}
                   </button>
                 </>
               )}
             </div>
 
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              {saveState === 'saved' && <span className="save-badge saved">Saved to disk</span>}
+            <div className="topbar-actions">
+              {isEditing && saveState === 'saved' && (
+                <span
+                  className="save-badge saved"
+                  title="Working file saved on disk (uncommitted until explicit Git commit)"
+                >
+                  Saved
+                </span>
+              )}
               {(saveState === 'dirty' || saveState === 'saving') && (
                 <span className="save-badge saving">
-                  {saveState === 'saving' ? 'Saving…' : 'Unsaved changes'}
+                  {saveState === 'saving' ? 'Saving…' : 'Unsaved'}
                 </span>
               )}
               {saveState === 'conflict' && conflictData && (
@@ -503,46 +852,101 @@ export function App() {
                   className="save-badge conflict"
                   onClick={() => setConflictData({ ...conflictData })}
                 >
-                  Conflict — resolve versions
+                  Conflict — resolve
                 </button>
               )}
               {saveState === 'error' && (
                 <span className="save-badge conflict">Save error</span>
               )}
 
-              <button
-                type="button"
-                className="btn btn-compact"
-                onClick={() => void performSave(liveMdRef.current, false)}
-                disabled={saveState === 'saved' || saveState === 'saving'}
-              >
-                Save now
-              </button>
-
-              <div className="mode-switch" role="group" aria-label="Editor view mode">
+              {isEditing && saveState === 'dirty' && (
                 <button
                   type="button"
-                  className={editorMode === 'visual' ? 'active' : ''}
-                  onClick={() => handleSwitchEditorMode('visual')}
+                  className="btn btn-compact save-now-btn"
+                  onClick={() => void performSave(liveMdRef.current, false)}
                 >
-                  Visual
+                  Save now
                 </button>
-                <button
-                  type="button"
-                  className={editorMode === 'source' ? 'active' : ''}
-                  onClick={() => handleSwitchEditorMode('source')}
-                >
-                  Markdown source
-                </button>
-              </div>
+              )}
 
-              <button
-                type="button"
-                className="btn btn-compact"
-                onClick={() => setReviewOpen((v) => !v)}
-              >
-                {reviewOpen ? 'Hide review' : `Review (${threads.filter((t) => t.status === 'open').length})`}
-              </button>
+              {workspaceMode === 'read' ? (
+                <div className="primary-action-pair" role="group" aria-label="Document actions">
+                  <button
+                    type="button"
+                    className="btn btn-compact btn-edit-entry"
+                    onClick={() => handleSwitchWorkspaceMode('visual')}
+                    title="Enter authoring mode (Visual editor or Markdown source)"
+                  >
+                    <Pencil size={13} aria-hidden="true" />
+                    <span>Edit</span>
+                  </button>
+
+                  <button
+                    ref={reviewTriggerRef}
+                    type="button"
+                    className={`btn btn-compact review-toggle-btn ${effectiveReviewVisible ? 'is-active-btn' : ''}`}
+                    onClick={toggleReviewPanel}
+                    aria-expanded={effectiveReviewVisible}
+                    aria-controls="cairn-review-panel"
+                    title={effectiveReviewVisible ? 'Close review panel' : 'Open review threads'}
+                  >
+                    <MessageSquare size={13} aria-hidden="true" />
+                    <span>Review</span>
+                    {openThreadCount > 0 && (
+                      <span className="topbar-count-pill">{openThreadCount}</span>
+                    )}
+                  </button>
+                </div>
+              ) : (
+                <div className="authoring-action-cluster">
+                  <div className="mode-switch" role="group" aria-label="Authoring format">
+                    <button
+                      type="button"
+                      data-mode="visual"
+                      className={workspaceMode === 'visual' ? 'active' : ''}
+                      onClick={() => handleSwitchWorkspaceMode('visual')}
+                    >
+                      Visual editor
+                    </button>
+                    <button
+                      type="button"
+                      data-mode="source"
+                      className={workspaceMode === 'source' ? 'active' : ''}
+                      onClick={() => handleSwitchWorkspaceMode('source')}
+                    >
+                      Markdown source
+                    </button>
+                  </div>
+
+                  <div className="primary-action-pair">
+                    <button
+                      type="button"
+                      className="btn btn-compact btn-primary btn-done-editing"
+                      onClick={() => handleSwitchWorkspaceMode('read')}
+                      title="Finish editing and return to Read mode"
+                    >
+                      <Check size={13} aria-hidden="true" />
+                      <span>Done</span>
+                    </button>
+
+                    <button
+                      ref={reviewTriggerRef}
+                      type="button"
+                      className={`btn btn-compact review-toggle-btn ${effectiveReviewVisible ? 'is-active-btn' : ''}`}
+                      onClick={toggleReviewPanel}
+                      aria-expanded={effectiveReviewVisible}
+                      aria-controls="cairn-review-panel"
+                      title={effectiveReviewVisible ? 'Close review panel' : 'Open review threads'}
+                    >
+                      <MessageSquare size={13} aria-hidden="true" />
+                      <span className="review-editing-label">Review</span>
+                      {openThreadCount > 0 && (
+                        <span className="topbar-count-pill">{openThreadCount}</span>
+                      )}
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
           </header>
 
@@ -559,20 +963,29 @@ export function App() {
             </div>
           )}
 
-          {editorMode === 'visual' && activeProjectId && activeDocPath ? (
+          {workspaceMode !== 'source' && activeProjectId && activeDocPath ? (
             <VisualMarkdownEditor
               key={`${activeProjectId}:${activeDocPath}:${docSessionNonce}`}
               ref={visualEditorRef}
               docKey={`${activeProjectId}:${activeDocPath}:${docSessionNonce}`}
+              projectName={activeProject?.name}
+              docPath={activeDocPath}
+              editable={workspaceMode === 'visual'}
               initialMarkdown={initialDocMarkdown}
               threads={threads}
               activeThreadId={activeThreadId}
               showResolvedComments={showResolvedComments}
               onMarkdownEdited={scheduleAutosave}
-              onSelectionAnchorChange={(anc) => setPendingAnchor(anc)}
+              onSelectionAnchorChange={(anc) => {
+                if (anc !== null) {
+                  setPendingAnchor(anc);
+                } else if (!composerOpenRef.current && !commentDraftRef.current.trim()) {
+                  setPendingAnchor(null);
+                }
+              }}
               onStartCommentWithAnchor={(anc) => {
                 const chosen = anc ?? pendingAnchor;
-                setReviewOpen(true);
+                openReviewPanel();
                 if (chosen) {
                   setPendingAnchor(chosen);
                   setComposerOpen(true);
@@ -582,9 +995,10 @@ export function App() {
               }}
               onSelectThread={(tid) => {
                 setActiveThreadId(tid);
-                setReviewOpen(true);
+                openReviewPanel();
               }}
               onOpenInsertEmbedModal={() => setEmbedModalOpen(true)}
+              onOpenRepoDetails={() => setGitModalOpen(true)}
               onNavigateDoc={(targetPath) => {
                 if (activeProjectId) {
                   void handleSelectDoc(activeProjectId, targetPath);
@@ -592,48 +1006,66 @@ export function App() {
               }}
               onTriggerImmediateSave={() => void performSave(liveMdRef.current, false)}
             />
+          ) : workspaceMode === 'source' && activeDocPath ? (
+            <MarkdownSourceWorkspace
+              docPath={activeDocPath}
+              markdown={liveMarkdown}
+              threads={threads}
+              onChangeMarkdown={scheduleAutosave}
+              onOpenInsertEmbedModal={() => setEmbedModalOpen(true)}
+              onTriggerImmediateSave={() => void performSave(liveMdRef.current, false)}
+              onLocateThreadInRead={handleLocateThreadInRead}
+            />
           ) : (
-            <div className="sheet-scroll">
-              <div style={{ maxWidth: '78ch', margin: '0 auto 10px auto', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <span style={{ fontSize: 12.5, color: 'var(--ink-secondary)' }}>
-                  Authoritative Markdown file: <span className="code-chip">{activeDocPath}</span>
-                </span>
-                <button
-                  type="button"
-                  className="btn btn-compact"
-                  onClick={() => setEmbedModalOpen(true)}
-                >
-                  Insert embed syntax
-                </button>
-              </div>
-              <div style={{ display: 'flex', justifyContent: 'center' }}>
-                <textarea
-                  className="markdown-source-editor"
-                  aria-label="Markdown source editor"
-                  value={liveMarkdown}
-                  onChange={(e) => scheduleAutosave(e.target.value)}
-                />
-              </div>
-            </div>
+            <div className="sheet-scroll">Loading workspace…</div>
           )}
         </main>
 
-        {reviewOpen && (
+        {effectiveReviewVisible && (
           <ReviewMargin
             threads={threads}
             pendingAnchor={pendingAnchor}
             composerOpen={composerOpen}
             activeThreadId={activeThreadId}
             showResolved={showResolvedComments}
+            workspaceMode={workspaceMode}
+            isOverlay={isOverlayLayout}
+            restoreFocusRef={reviewTriggerRef}
+            authorName={authorName}
+            onChangeAuthorName={setAuthorName}
+            commentDraft={commentDraft}
+            onChangeCommentDraft={setCommentDraft}
+            replyDrafts={replyDrafts}
+            onChangeReplyDraft={(tid, next) =>
+              setReplyDrafts((prev) => ({ ...prev, [tid]: next }))
+            }
+            expandedHistory={expandedHistory}
+            onToggleHistory={(tid) =>
+              setExpandedHistory((prev) => ({ ...prev, [tid]: !prev[tid] }))
+            }
             onToggleShowResolved={setShowResolvedComments}
-            onSelectThread={setActiveThreadId}
+            onSelectThread={(tid) => {
+              setActiveThreadId(tid);
+              if (tid && workspaceMode !== 'source' && !isOverlayLayout) {
+                visualEditorRef.current?.scrollToThreadAnchor(tid);
+              }
+            }}
+            onLocateInRead={handleLocateThreadInRead}
+            onOpenComposer={() => {
+              if (pendingAnchor) {
+                setComposerOpen(true);
+              }
+            }}
             onCancelComposer={() => {
               setComposerOpen(false);
+              setCommentDraft('');
               setPendingAnchor(null);
+              window.getSelection()?.removeAllRanges();
             }}
             onCreateComment={handleCreateComment}
             onReplyComment={handleReplyComment}
             onChangeThreadStatus={handleChangeThreadStatus}
+            onClose={closeReviewPanel}
           />
         )}
       </div>

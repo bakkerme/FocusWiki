@@ -4,10 +4,10 @@ Repeatable, manifest-driven screenshot workflow for generating visual review pac
 
 ## Design & Safety Invariants
 
-- **Read-only UI staging:** Named states navigate via URL query params (`?project=...&doc=...`), switch view modes, toggle review history, and scroll containers without editing prose or writing to `.comments.json`. Every target asserts `.save-badge.saved`.
+- **Read-only UI staging:** Named states navigate via URL query params (`?project=...&doc=...`), switch view modes, open/collapse panels, toggle review history, and scroll containers/window without saving prose edits or writing to `.comments.json`. Every target asserts saved state (`.workbench[data-save-state="saved"]` in clean Read mode or `.save-badge.saved` in authoring modes).
 - **Preserves user working trees:** Never resets or re-seeds `/workspace/wiki-prototype/sample-repos/*`. When a clean seeded baseline is explicitly needed, `npm run capture -- isolated-fixture --port 8089` serves fresh temporary copies in `/tmp` bound only to `127.0.0.1`.
-- **Honest state labels:** Current app states are labeled as they actually behave today (for example `visual-edit-default` because Cairn currently opens directly in TipTap edit mode rather than a viewer-first mode).
-- **OpenBot embedded browser boundary:** Browser automation runs through OpenBot's MCP embedded browser (`openbot_browser`) rather than installing or invoking an unauthorized Playwright/Puppeteer/Chromium binary.
+- **Honest state labels:** App states are labeled as they actually behave (`read-default` for the default Read entry state, `visual-edit-explicit` for explicit Visual editor entry, `markdown-source-workspace` for full-workspace source editing), carrying `replacesTargetId` metadata when a redesigned state supersedes an earlier baseline ID.
+- **Local/private Playwright scope & sandboxing:** Unattended shell captures (`npm run capture -- run ...`) use a project-local headless Playwright Chromium binary (`.runtime/ms-playwright`, installed via `PLAYWRIGHT_BROWSERS_PATH=/workspace/wiki-prototype/.runtime/ms-playwright npx playwright install chromium`) with full browser sandboxing intact and an explicit host guard restricting `--base-url` to loopback/private/Tailscale Cairn listeners (`127.0.0.1`, `localhost`, RFC 1918, `100.64.0.0/10`). Interactive manual inspection remains optionally available through OpenBot's embedded browser (`openbot_browser`) using `plan` + `record`.
 
 ## Named States (`config/capture-manifest.json`)
 
@@ -19,61 +19,89 @@ npm run capture -- list
 
 | Target ID | Default | Viewport | Actual App State | What It Captures |
 | :--- | :--- | :--- | :--- | :--- |
-| `doc-initial-edit` | Yes | `1440x900` | `visual-edit-default` | Initial load in current TipTap visual edit mode with text-label toolbar, repo sidebar, prose/table, and open review margin |
-| `source-editing` | Yes | `1440x900` | `markdown-source-textarea` | Header `Markdown source` toggle showing the current centered `78ch` `<textarea>` inside `.sheet-scroll` |
-| `review-thread-open` | Yes | `1440x900` | `visual-edit-review-thread-open` | Active inline comment thread, expanded thread history log, resolved thread comparison, and ochre prose anchor highlights |
-| `embed-visible` | Yes | `1440x900` | `visual-edit-embed-visible` | Scrolled to the sandboxed `state-explorer` iframe (`sandbox="allow-scripts"`) showing embed header chrome and iframe height framing |
-| `narrow-viewport` | Yes | `768x960` | `narrow-single-column-visual-edit` | Single-column `<=880px` layout showing stacked sidebar transition, wrapping toolbar buttons, and narrow prose legibility |
-| `helios-lab-embed` | Optional (`--all`) | `1440x900` | `visual-edit-second-project-embed` | `helios-lab` inventory doc with synthetic RFC 5737 table, `power-sequencer` embed, and open review thread |
+| `doc-initial-read` | Yes | `1440x900` | `read-default` | Default Read mode entry (replaces `doc-initial-edit`): clean sidebar IA, page eyebrow above `<h1>`, compact sticky header with adjacent `Edit` + `Review`, no noisy `Saved locally` badge |
+| `doc-visual-edit` | Yes | `1440x900` | `visual-edit-explicit` | Explicit `Visual editor` mode with sticky icon formatting toolbar, authoring `Saved` badge, `Visual` / `Source` switcher, `Done` button, and embed inventory |
+| `source-editing` | Yes | `1440x900` | `markdown-source-workspace` | Full-workspace `Markdown source` editor with synchronized line gutter, comment-line indicator, unwrapped GFM table scroll (`Wrap lines` toggle), and auto-collapsed Review rail |
+| `review-thread-open` | Yes | `1440x900` | `read-review-thread-focused` | Focused review thread (expanded messages, audit history, reply input) alongside compact resolved summary and distinct open/selected/resolved prose highlights |
+| `embed-visible` | Yes | `1440x900` | `read-embed-visible` | Read mode scrolled via native root scroll to `state-explorer` (`sandbox="allow-scripts"`) showing quiet reader chrome and content-fitted height |
+| `narrow-viewport` | Yes | `768x960` | `tablet-read-closed-drawers` | Tablet `768x960` closed reading with `Docs`, `Git`, and non-wrapping `Edit` + `Review` controls |
+| `desktop-panels-collapsed` | Optional (`--all`) | `1440x900` | `desktop-both-panels-collapsed` | Desktop `1440x900` distraction-free reading with both `Docs` and `Review` panels collapsed and header reopen buttons visible |
+| `narrow-phone` | Optional (`--all`) | `390x844` | `phone-read-closed-drawers` | Phone portrait `390x844` closed reading with compact header and adjacent `Edit` + `Review` pair |
+| `phone-nav-open` | Optional (`--all`) | `390x844` | `phone-modal-nav-open` | Phone portrait `390x844` modal `Docs` drawer open (`role="dialog"`, `<main inert>`) |
+| `phone-review-open` | Optional (`--all`) | `390x844` | `phone-modal-review-selection-draft` | Phone portrait `390x844` modal `Review` drawer open from active prose selection with draft note |
+| `landscape-short-844x390` | Optional (`--all`) | `844x390` | `landscape-short-844x390-read` | Representative short landscape `844x390` closed reading (overlay tier; zero dual-sidebar squeeze) |
+| `landscape-above880-956x440` | Optional (`--all`) | `956x440` | `landscape-above880-956x440-read` | Short landscape `956x440` above former `880px` threshold using overlay drawer tier |
+| `landscape-review-open-956x440` | Optional (`--all`) | `956x440` | `landscape-956x440-review-open` | Short landscape `956x440` with modal `Review` drawer open over `inert` main stage |
+| `portrait-to-landscape-844x390` | Optional (`--all`) | `844x390` | `portrait-to-landscape-transition` | Booted at `390x844`, scrolled `220px`, and rotated live to `844x390` preserving scroll & left prose margin |
+| `phone-helios-inventory` | Optional (`--all`) | `390x844` | `phone-helios-table-contained` | `helios-lab` `docs/bench-inventory.md` at `390x844` showing scoped `.tableWrapper` horizontal scroll and unclipped prose |
+| `helios-lab-embed` | Optional (`--all`) | `1440x900` | `read-second-project-embed` | `helios-lab` inventory doc at `1440x900` with synthetic RFC 5737 table, content-fitted `power-sequencer` embed, and compact review thread |
 
 ## End-to-End Capture Workflow
 
-### 1. Plan a Packet (Preflight + Per-Target Browser Scripts)
+### 1. Primary Unattended Playwright Capture (`run`)
+
+Run a complete review packet in a single command (no agent-in-the-loop step execution):
 
 ```bash
-# Default 5 representative targets
-npm run capture -- plan --packet review-run-01
+# Default 6 representative targets against http://127.0.0.1:8088
+npm run capture -- run --packet review-run-01
 
-# Specific subset or all targets (optionally against private Tailscale URL)
-npm run capture -- plan --packet review-run-01 --targets doc-initial-edit,review-thread-open,narrow-viewport
-npm run capture -- plan --packet review-run-01 --all --base-url http://100.117.116.91:8088
+# All 8 targets against the private Tailscale listener
+npm run capture -- run --packet review-run-01 --all --base-url http://100.117.116.91:8088
+
+# Specific subset of named states
+npm run capture -- run --packet review-subset-01 --targets doc-initial-read,narrow-viewport
 ```
 
-`plan` verifies `/healthz`, snapshots both the Cairn app Git revision and each content repository's Git `headSha`/dirty status, and writes ready-to-run `openbot_browser.run_script` files under `captures/packets/<packet-id>/scripts/`.
+`run` performs the full pipeline and exits `0` **only** when every selected target passes readiness and `validateCapturePacket` succeeds:
 
-### 2. Drive OpenBot Embedded Browser & Save Viewport PNGs
+1. Verifies `/healthz` and snapshots both the Cairn app Git revision and each content repository's Git `headSha`/dirty state (exiting `1` and recording a `live-server-probe` failure if unreachable).
+2. Launches local headless Chromium with Chromium sandboxing explicitly enabled (`chromiumSandbox: true`) and creates an isolated `BrowserContext` per target (`width`, `height`, `deviceScaleFactor`, `colorScheme`, `reducedMotion`).
+3. Navigates to each route, waits for app boot, executes the shared read-only UI steps (`CAIRN_APP_BOOT_CHECK_EXPRESSION` + `buildInPageStepAndReadinessExpression` in `scripts/captureLib.ts`), awaits `document.fonts.ready`, verifies visible `iframe.embed-sandbox-iframe` child frames (`contentFrame().waitForLoadState('load')`), and asserts `.save-badge.saved`.
+4. Saves full-resolution PNGs (`animations: 'disabled'`), writes per-screen `.meta.json`, `packet.json`, and `SUMMARY.md`, and runs `validateCapturePacket`. Any missing state, failing selector, or partial packet exits `1`.
 
-For each planned target in `captures/packets/<packet-id>/packet.json`, an OpenBot agent executes:
+If Playwright's Chromium binary is not yet present in `.runtime/ms-playwright`:
+
+```bash
+PLAYWRIGHT_BROWSERS_PATH=/workspace/wiki-prototype/.runtime/ms-playwright npx playwright install chromium
+```
+
+### 2. Optional Interactive Embedded-Browser Inspection (`plan` + `openbot_browser` + `record`)
+
+When an OpenBot agent wants to interactively inspect a live tab while reusing the exact same manifest steps:
+
+```bash
+npm run capture -- plan --packet inspect-01 --targets doc-initial-edit,review-thread-open
+```
 
 1. `openbot_browser.open` (`url`: `http://127.0.0.1:8088/`) -> obtain `tabId`.
 2. `openbot_browser.set_environment` (`tabId`, `preset: "custom"`, `width`, `height`, `deviceScaleFactor`, `colorScheme: "light"`, `reducedMotion: true`).
 3. `openbot_browser.run_script` (`tabId`, `finalSnapshot: false`, `script`: contents of `captures/packets/<packet-id>/scripts/<nn>-<target-id>.run-script.js`).
-   - Waits for app boot, applies read-only UI steps, awaits `document.fonts.ready`, checks required visible selectors and visible embed bounds with bounded timeouts (no unbounded sleeps), and returns structured JSON telemetry (`status: "ready" | "failed"`).
-4. If `status === "ready"`, call `openbot_browser.screenshot` (`tabId`, `save: true`) to write the viewport PNG, then close temporary tabs with `openbot_browser.close_tab`.
-
-### 3. Record Captures (or Failures) & Validate Packet
+4. If `status === "ready"`, call `openbot_browser.screenshot` (`tabId`, `save: true`), close temporary tabs with `openbot_browser.close_tab`, then record and validate:
 
 ```bash
 # Record a verified screenshot + browser readiness telemetry
 npm run capture -- record \
-  --packet review-run-01 \
+  --packet inspect-01 \
   --target doc-initial-edit \
   --image /path/to/saved-screenshot.png \
   --telemetry '{"status":"ready","targetId":"doc-initial-edit","url":"http://127.0.0.1:8088/?project=cindervault-rpg&doc=docs%2Fvault-breach-action.md","elapsedMs":2400}'
 
 # Record a structured failure if a target fails readiness assertions
 npm run capture -- record-failure \
-  --packet review-run-01 \
+  --packet inspect-01 \
   --target embed-visible \
   --reason "Missing visible iframe.embed-sandbox-iframe"
 
 # Validate PNG headers, pixel dimensions, SHA-256 hashes, sidecar metadata, and zero failures
-npm run capture -- validate --packet review-run-01
+npm run capture -- validate --packet inspect-01
 ```
 
 ## Importing External Competitor PNG References
 
 Import user-supplied local PNG screenshots into `captures/competitors/` (and optionally attach them to a review packet's `references/` directory and `packet.json`) without fetching remote URLs or bypassing sign-ins:
+
+Omit `--viewport` and `--date` when the original capture details are unknown. Both remain `null`; PNG pixel dimensions and the import timestamp are recorded separately. Do not infer a CSS viewport from image dimensions. This importer currently accepts PNG only; keep WebP/GIF originals separately until they are supported, and review animation as a sequence rather than a single still.
 
 ```bash
 npm run capture -- import-reference \
@@ -101,5 +129,6 @@ Each packet in `captures/packets/<packet-id>/` is self-contained for independent
 
 ## Known Limitations
 
-- **Single-command shell browser execution:** Because OpenBot browser rules prohibit introducing Playwright, Puppeteer, or headless Chromium without explicit user authorization, `npm run capture -- run` generates the packet plan and exits with code `2` instructing the caller to run the generated scripts via `openbot_browser` MCP tools. If the user later authorizes a standalone Playwright driver, `scripts/capture.ts` `run` can execute those same `scripts/*.run-script.js` steps directly from bash.
-- **Viewport vs full-page:** `openbot_browser.screenshot` captures the visible viewport (or a specific element ref), which is preferred for judging real reading/toolbar legibility at `1440x900` and `768x960`; stitched full-page scroll captures are not enabled.
+- **Local/private host scope only:** `npm run capture -- run` intentionally rejects public/external domains (`assertLocalCairnBaseUrl`) because Playwright is authorized strictly for local/private Cairn capture automation, not general browsing or authenticated third-party sites.
+- **PNG-only reference importer:** `import-reference` validates and imports PNG files (`IHDR` + SHA-256); external WebP or animated GIF reference assets remain separate original files.
+- **Viewport-focused targets:** All 6 manifest targets use `captureScope: "viewport"` (`1440x900` desktop and `768x960` narrow) with explicit container/window scroll offsets rather than stitched full-document captures, matching real reader/toolbar viewport proportions (`.sheet-scroll` scrolls internally in desktop mode).

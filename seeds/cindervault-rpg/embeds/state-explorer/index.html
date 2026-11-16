@@ -6,22 +6,21 @@
   <title>Ward-Breach State Explorer</title>
   <style>
     :root {
-      --bg: #fafbf9;
-      --panel: #f2f4f3;
-      --ink: #162326;
-      --muted: #4e6166;
+      --bg: #fbfcfa;
+      --panel: #eef2f1;
+      --ink: #142124;
+      --muted: #4a5d62;
       --line: #cfd8d7;
-      --accent: #1b6b63;
+      --accent: #17635b;
       --accent-soft: #e1f0ee;
       --warn: #b8741a;
-      --warn-soft: #fdf3dc;
       --danger: #a63429;
-      --danger-soft: #fae8e6;
     }
     * { box-sizing: border-box; }
+    html { height: auto; }
     body {
       margin: 0;
-      padding: 16px;
+      padding: 14px 16px;
       font-family: "Plus Jakarta Sans", system-ui, -apple-system, sans-serif;
       background: var(--bg);
       color: var(--ink);
@@ -29,11 +28,11 @@
     }
     .layout {
       display: grid;
-      grid-template-columns: 1.35fr 1fr;
-      gap: 16px;
+      grid-template-columns: 1.38fr 1fr;
+      gap: 14px;
       align-items: start;
     }
-    @media (max-width: 680px) {
+    @media (max-width: 660px) {
       .layout { grid-template-columns: 1fr; }
     }
     .diagram-box {
@@ -51,10 +50,14 @@
       cursor: pointer;
       transition: opacity 120ms ease;
     }
+    .state-node:focus-visible rect {
+      stroke-width: 2.5;
+      stroke: var(--ink);
+    }
     .state-node rect {
       fill: #ffffff;
-      stroke: #9ab0ae;
-      stroke-width: 1.5;
+      stroke: #94aaa8;
+      stroke-width: 1.6;
       rx: 6;
     }
     .state-node.is-valid rect {
@@ -75,7 +78,7 @@
       stroke: var(--danger);
     }
     .state-node text {
-      font-size: 12px;
+      font-size: 13.5px;
       font-weight: 600;
       fill: var(--ink);
       pointer-events: none;
@@ -84,18 +87,18 @@
       fill: #ffffff;
     }
     .edge {
-      stroke: #b5c4c2;
-      stroke-width: 1.6;
+      stroke: #afc0be;
+      stroke-width: 1.7;
       fill: none;
     }
     .edge.is-available {
       stroke: var(--accent);
-      stroke-width: 2.2;
+      stroke-width: 2.3;
     }
     .inspector {
       border: 1px solid var(--line);
       border-radius: 6px;
-      padding: 14px;
+      padding: 13px 14px;
       background: #ffffff;
     }
     .state-header {
@@ -106,40 +109,41 @@
       margin-bottom: 6px;
     }
     .state-title {
-      font-size: 16px;
+      font-size: 15.5px;
       font-weight: 700;
       margin: 0;
     }
     .owner-pill {
-      font-size: 12px;
-      padding: 2px 8px;
+      font-size: 11.5px;
+      padding: 2px 7px;
       border-radius: 4px;
       background: var(--accent-soft);
       color: var(--accent);
       font-weight: 600;
+      white-space: nowrap;
     }
     .desc {
-      font-size: 13px;
+      font-size: 12.8px;
       color: var(--muted);
-      margin: 0 0 12px 0;
+      margin: 0 0 10px 0;
     }
     .triggers-label {
-      font-size: 12px;
+      font-size: 11.5px;
       font-weight: 600;
       color: var(--muted);
-      margin-bottom: 6px;
+      margin-bottom: 5px;
     }
     .triggers {
       display: flex;
       flex-wrap: wrap;
       gap: 6px;
-      margin-bottom: 12px;
+      margin-bottom: 10px;
     }
     button.trigger-btn {
       font: inherit;
-      font-size: 12.5px;
+      font-size: 12px;
       font-weight: 600;
-      padding: 6px 10px;
+      padding: 5px 10px;
       border-radius: 4px;
       border: 1px solid var(--accent);
       background: var(--accent-soft);
@@ -160,9 +164,10 @@
     }
     pre.payload {
       margin: 0;
-      padding: 10px;
+      padding: 9px 10px;
       font-family: "JetBrains Mono", ui-monospace, monospace;
       font-size: 11.5px;
+      line-height: 1.45;
       background: var(--panel);
       border-radius: 4px;
       border: 1px solid var(--line);
@@ -179,50 +184,50 @@
 <body>
   <div class="layout">
     <div class="diagram-box">
-      <svg viewBox="0 0 440 300" role="img" aria-label="Ward-Breach state machine graph">
+      <svg viewBox="0 0 424 228" role="img" aria-label="Ward-Breach state machine graph">
         <defs>
           <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-            <path d="M 0 1 L 10 5 L 0 9 z" fill="#8ea3a1" />
+            <path d="M 0 1 L 10 5 L 0 9 z" fill="#7c9391" />
           </marker>
         </defs>
-        <path id="edge-idle-intent" class="edge" d="M 105 55 L 155 55" marker-end="url(#arrow)" />
-        <path id="edge-intent-stakes" class="edge" d="M 285 55 L 320 55" marker-end="url(#arrow)" />
-        <path id="edge-intent-idle" class="edge" d="M 220 75 C 200 105, 85 105, 65 75" marker-end="url(#arrow)" />
-        <path id="edge-stakes-roll" class="edge" d="M 375 75 L 265 140" marker-end="url(#arrow)" />
-        <path id="edge-roll-clean" class="edge" d="M 190 165 L 95 225" marker-end="url(#arrow)" />
-        <path id="edge-roll-strained" class="edge" d="M 220 180 L 220 225" marker-end="url(#arrow)" />
-        <path id="edge-roll-backlash" class="edge" d="M 250 165 L 345 225" marker-end="url(#arrow)" />
+        <path id="edge-idle-intent" class="edge" d="M 96 34 L 138 34" marker-end="url(#arrow)" />
+        <path id="edge-intent-stakes" class="edge" d="M 274 34 L 302 34" marker-end="url(#arrow)" />
+        <path id="edge-intent-idle" class="edge" d="M 206 54 C 190 80, 76 80, 54 54" marker-end="url(#arrow)" />
+        <path id="edge-stakes-roll" class="edge" d="M 358 54 L 256 104" marker-end="url(#arrow)" />
+        <path id="edge-roll-clean" class="edge" d="M 180 144 L 88 180" marker-end="url(#arrow)" />
+        <path id="edge-roll-strained" class="edge" d="M 212 144 L 212 180" marker-end="url(#arrow)" />
+        <path id="edge-roll-backlash" class="edge" d="M 244 144 L 336 180" marker-end="url(#arrow)" />
 
         <g class="state-node" data-state="idle" tabindex="0" role="button" aria-label="Idle state">
-          <rect x="20" y="34" width="85" height="42" />
-          <text x="62" y="59" text-anchor="middle">Idle</text>
+          <rect x="12" y="14" width="84" height="40" />
+          <text x="54" y="39" text-anchor="middle">Idle</text>
         </g>
         <g class="state-node" data-state="declare_intent" tabindex="0" role="button" aria-label="Intent Declared state">
-          <rect x="155" y="34" width="130" height="42" />
-          <text x="220" y="59" text-anchor="middle">Intent Declared</text>
+          <rect x="138" y="14" width="136" height="40" />
+          <text x="206" y="39" text-anchor="middle">Intent Declared</text>
         </g>
         <g class="state-node" data-state="stakes_locked" tabindex="0" role="button" aria-label="Stakes Locked state">
-          <rect x="320" y="34" width="105" height="42" />
-          <text x="372" y="59" text-anchor="middle">Stakes Locked</text>
+          <rect x="302" y="14" width="110" height="40" />
+          <text x="357" y="39" text-anchor="middle">Stakes Locked</text>
         </g>
         <g class="state-node" data-state="resolving_roll" tabindex="0" role="button" aria-label="Resolving Check state">
-          <rect x="155" y="138" width="130" height="42" />
-          <text x="220" y="163" text-anchor="middle">Resolving Check</text>
+          <rect x="142" y="104" width="140" height="40" />
+          <text x="212" y="129" text-anchor="middle">Resolving Check</text>
         </g>
         <g class="state-node" data-state="clean_breach" tabindex="0" role="button" aria-label="Clean Breach outcome">
-          <rect x="20" y="228" width="120" height="44" />
-          <text x="80" y="254" text-anchor="middle">Clean Breach</text>
+          <rect x="10" y="180" width="126" height="40" />
+          <text x="73" y="205" text-anchor="middle">Clean Breach</text>
         </g>
         <g class="state-node kind-warn" data-state="strained_entry" tabindex="0" role="button" aria-label="Strained Entry outcome">
-          <rect x="160" y="228" width="120" height="44" />
-          <text x="220" y="254" text-anchor="middle">Strained Entry</text>
+          <rect x="149" y="180" width="126" height="40" />
+          <text x="212" y="205" text-anchor="middle">Strained Entry</text>
         </g>
         <g class="state-node kind-danger" data-state="ward_backlash" tabindex="0" role="button" aria-label="Ward Backlash outcome">
-          <rect x="300" y="228" width="120" height="44" />
-          <text x="360" y="254" text-anchor="middle">Ward Backlash</text>
+          <rect x="288" y="180" width="126" height="40" />
+          <text x="351" y="205" text-anchor="middle">Ward Backlash</text>
         </g>
       </svg>
-      <div class="hint">Click any highlighted state node or trigger button to step transitions. Illustrative prototype state machine.</div>
+      <div class="hint">Select any highlighted state node or transition button to step the state machine.</div>
     </div>
 
     <div class="inspector">
@@ -232,7 +237,7 @@
       </div>
       <p class="desc" id="stateDesc"></p>
 
-      <div class="triggers-label">Valid transitions from current state</div>
+      <div class="triggers-label">Valid transitions</div>
       <div class="triggers" id="triggerButtons"></div>
 
       <div class="triggers-label">Engine state snapshot</div>
@@ -304,12 +309,19 @@
       }
     };
 
+    let instanceId = new URLSearchParams(window.location.search).get('instance') || undefined;
     let currentState = 'declare_intent';
     let transitionCount = 0;
 
-    function reportHeight() {
-      const h = Math.max(260, document.documentElement.scrollHeight);
-      window.parent.postMessage({ type: 'cairn:embed:resize', height: h }, '*');
+    function measureIntrinsicHeight() {
+      return Math.max(140, Math.ceil(document.body.getBoundingClientRect().height));
+    }
+
+    function reportHeight(msgType = 'cairn:embed:resize') {
+      window.parent.postMessage(
+        { type: msgType, instanceId, height: measureIntrinsicHeight() },
+        '*'
+      );
     }
 
     function setState(nextState) {
@@ -320,6 +332,7 @@
       window.parent.postMessage(
         {
           type: 'cairn:embed:telemetry',
+          instanceId,
           summary: `State: ${STATES[currentState].title} (${transitionCount} steps)`
         },
         '*'
@@ -357,7 +370,7 @@
         btnContainer.appendChild(btn);
       });
 
-      reportHeight();
+      reportHeight('cairn:embed:resize');
     }
 
     document.querySelectorAll('.state-node').forEach((el) => {
@@ -373,17 +386,26 @@
 
     window.addEventListener('message', (event) => {
       const data = event.data;
-      if (data && data.type === 'cairn:embed:init' && data.props) {
-        if (typeof data.props.initialState === 'string' && STATES[data.props.initialState]) {
+      if (data && data.type === 'cairn:embed:init') {
+        if (typeof data.instanceId === 'string') {
+          instanceId = data.instanceId;
+        }
+        if (data.props && typeof data.props.initialState === 'string' && STATES[data.props.initialState]) {
           currentState = data.props.initialState;
           render();
+        } else {
+          reportHeight('cairn:embed:resize');
         }
       }
     });
 
-    window.addEventListener('resize', reportHeight);
+    if (typeof ResizeObserver !== 'undefined') {
+      new ResizeObserver(() => reportHeight('cairn:embed:resize')).observe(document.body);
+    }
+    window.addEventListener('resize', () => reportHeight('cairn:embed:resize'));
+
     render();
-    window.parent.postMessage({ type: 'cairn:embed:ready', height: document.documentElement.scrollHeight }, '*');
+    reportHeight('cairn:embed:ready');
   </script>
 </body>
 </html>

@@ -1,4 +1,11 @@
-import { useEffect, useImperativeHandle, forwardRef, useRef } from 'react';
+import {
+  forwardRef,
+  useCallback,
+  useEffect,
+  useImperativeHandle,
+  useRef,
+  useState
+} from 'react';
 import { EditorContent, useEditor, type JSONContent } from '@tiptap/react';
 import StarterKit from '@tiptap/starter-kit';
 import Link from '@tiptap/extension-link';
@@ -9,6 +16,24 @@ import TableHeader from '@tiptap/extension-table-header';
 import TableCell from '@tiptap/extension-table-cell';
 import TaskList from '@tiptap/extension-task-list';
 import TaskItem from '@tiptap/extension-task-item';
+import {
+  Blocks,
+  Bold,
+  Code,
+  ExternalLink,
+  Heading1,
+  Heading2,
+  Heading3,
+  Italic,
+  Link2,
+  List,
+  ListOrdered,
+  ListTodo,
+  MessageSquarePlus,
+  Quote,
+  SquareCode,
+  Table as TableIcon
+} from 'lucide-react';
 import type {
   CommentAnchor,
   EmbedDescriptor,
@@ -24,6 +49,7 @@ import {
 import {
   CommentHighlightExtension,
   commentHighlightPluginKey,
+  extractAnchorFromRange,
   extractAnchorFromSelection,
   extractLiveProseBlocks
 } from './CommentHighlightExtension';
@@ -50,10 +76,14 @@ const AlignedTableCell = TableCell.extend({
 export interface VisualEditorHandle {
   insertEmbedBlock: (desc: EmbedDescriptor) => void;
   replaceMarkdownFromExternal: (markdown: string) => void;
+  scrollToThreadAnchor: (threadId: string) => void;
 }
 
 interface Props {
   docKey: string;
+  projectName?: string;
+  docPath?: string;
+  editable: boolean;
   initialMarkdown: string;
   threads: ResolvedCommentThread[];
   activeThreadId: string | null;
@@ -63,14 +93,24 @@ interface Props {
   onStartCommentWithAnchor: (anchor: CommentAnchor | null) => void;
   onSelectThread: (threadId: string) => void;
   onOpenInsertEmbedModal: () => void;
+  onOpenRepoDetails?: () => void;
   onNavigateDoc: (docPath: string) => void;
   onTriggerImmediateSave: () => void;
+}
+
+interface FloatingSelectionState {
+  anchor: CommentAnchor;
+  top: number;
+  left: number;
 }
 
 export const VisualMarkdownEditor = forwardRef<VisualEditorHandle, Props>(
   function VisualMarkdownEditor(props, ref) {
     const {
       docKey,
+      projectName,
+      docPath,
+      editable,
       initialMarkdown,
       threads,
       activeThreadId,
@@ -80,14 +120,24 @@ export const VisualMarkdownEditor = forwardRef<VisualEditorHandle, Props>(
       onStartCommentWithAnchor,
       onSelectThread,
       onOpenInsertEmbedModal,
+      onOpenRepoDetails,
       onNavigateDoc,
       onTriggerImmediateSave
     } = props;
 
     const suppressUpdateRef = useRef<boolean>(false);
+    const editableRef = useRef<boolean>(editable);
     const activeDocKeyRef = useRef<string>(docKey);
+    const sheetScrollRef = useRef<HTMLDivElement | null>(null);
+    const proseContainerRef = useRef<HTMLDivElement | null>(null);
+
+    const [selectionPopover, setSelectionPopover] = useState<FloatingSelectionState | null>(null);
+    const [, forceToolbarTick] = useState<number>(0);
+
+    editableRef.current = editable;
 
     const editor = useEditor({
+      editable,
       extensions: [
         StarterKit.configure({
           heading: { levels: [1, 2, 3, 4] }
@@ -99,7 +149,7 @@ export const VisualMarkdownEditor = forwardRef<VisualEditorHandle, Props>(
         Placeholder.configure({
           placeholder: 'Write documentation prose or insert a project embed…'
         }),
-        Table.configure({ resizable: false }),
+        Table.configure({ resizable: false, renderWrapper: true }),
         TableRow,
         AlignedTableHeader,
         AlignedTableCell,
@@ -114,14 +164,16 @@ export const VisualMarkdownEditor = forwardRef<VisualEditorHandle, Props>(
       ],
       content: markdownToProseMirror(initialMarkdown) as JSONContent,
       onUpdate({ editor: ed }) {
-        if (suppressUpdateRef.current) return;
+        if (suppressUpdateRef.current || !ed.isEditable) return;
         const json = ed.getJSON() as ProseMirrorNode;
         const nextMd = proseMirrorToMarkdown(json);
         onMarkdownEdited(nextMd);
       },
-      onSelectionUpdate({ editor: ed }) {
-        const anchor = extractAnchorFromSelection(ed.state);
-        onSelectionAnchorChange(anchor);
+      onFocus() {
+        forceToolbarTick((n) => n + 1);
+      },
+      onBlur() {
+        forceToolbarTick((n) => n + 1);
       },
       editorProps: {
         handleKeyDown(_view, event) {
@@ -141,9 +193,13 @@ export const VisualMarkdownEditor = forwardRef<VisualEditorHandle, Props>(
         },
         handleClick(_view, _pos, event) {
           const target = event.target as HTMLElement | null;
+          if (!editableRef.current && target?.closest?.('input[type="checkbox"]')) {
+            event.preventDefault();
+            return true;
+          }
           const anchorEl = target?.closest?.('a') as HTMLAnchorElement | null;
           const href = anchorEl?.getAttribute('href');
-          if (href && (event.metaKey || event.ctrlKey)) {
+          if (href && (!editableRef.current || event.metaKey || event.ctrlKey)) {
             event.preventDefault();
             if (href.startsWith('http://') || href.startsWith('https://')) {
               window.open(href, '_blank', 'noopener,noreferrer');
@@ -157,6 +213,16 @@ export const VisualMarkdownEditor = forwardRef<VisualEditorHandle, Props>(
       }
     });
 
+    // Keep editable state synced cleanly without emitting synthetic document updates
+    useEffect(() => {
+      if (!editor) return;
+      if (editor.isEditable !== editable) {
+        suppressUpdateRef.current = true;
+        editor.setEditable(editable, false);
+        suppressUpdateRef.current = false;
+      }
+    }, [editor, editable]);
+
     // Reload content cleanly when switching documents
     useEffect(() => {
       if (!editor) return;
@@ -165,6 +231,7 @@ export const VisualMarkdownEditor = forwardRef<VisualEditorHandle, Props>(
         suppressUpdateRef.current = true;
         editor.commands.setContent(markdownToProseMirror(initialMarkdown) as JSONContent, false);
         suppressUpdateRef.current = false;
+        setSelectionPopover(null);
         onSelectionAnchorChange(null);
       }
     }, [docKey, initialMarkdown, editor, onSelectionAnchorChange]);
@@ -179,6 +246,125 @@ export const VisualMarkdownEditor = forwardRef<VisualEditorHandle, Props>(
       });
       editor.view.dispatch(tr);
     }, [editor, threads, activeThreadId, showResolvedComments]);
+
+    const readCurrentDomOrEditorAnchor = useCallback((): {
+      anchor: CommentAnchor | null;
+      rect: DOMRect | null;
+    } => {
+      if (!editor || !proseContainerRef.current) {
+        return { anchor: null, rect: null };
+      }
+
+      const sel = window.getSelection();
+      if (!sel || sel.rangeCount === 0 || sel.isCollapsed) {
+        return { anchor: null, rect: null };
+      }
+
+      const range = sel.getRangeAt(0);
+      const container = proseContainerRef.current;
+      if (!container.contains(range.startContainer) || !container.contains(range.endContainer)) {
+        return { anchor: null, rect: null };
+      }
+
+      const startElem =
+        range.startContainer.nodeType === Node.ELEMENT_NODE
+          ? (range.startContainer as HTMLElement)
+          : range.startContainer.parentElement;
+      if (
+        startElem?.closest(
+          '.embed-frame-wrapper, .preserved-raw-block, .selection-comment-popover, .cairn-anchor-marker'
+        )
+      ) {
+        return { anchor: null, rect: null };
+      }
+
+      const rawText = sel.toString().trim();
+      if (!rawText) {
+        return { anchor: null, rect: null };
+      }
+
+      let anchor: CommentAnchor | null = null;
+      if (editor.isEditable) {
+        anchor = extractAnchorFromSelection(editor.state);
+      }
+
+      if (!anchor) {
+        try {
+          const p1 = editor.view.posAtDOM(range.startContainer, range.startOffset);
+          const p2 = editor.view.posAtDOM(range.endContainer, range.endOffset);
+          const from = Math.min(p1, p2);
+          const to = Math.max(p1, p2);
+          if (to > from) {
+            anchor = extractAnchorFromRange(editor.state.doc, from, to);
+          }
+        } catch {
+          anchor = null;
+        }
+      }
+
+      if (!anchor) {
+        const blocks = extractLiveProseBlocks(editor.state.doc);
+        const matching = blocks.filter((b) => b.text.includes(rawText));
+        if (matching.length === 1) {
+          const idx = matching[0].text.indexOf(rawText);
+          anchor = buildAnchorFromBlockSelection(matching[0], idx, idx + rawText.length);
+        } else {
+          anchor = { quote: rawText, prefix: '', suffix: '' };
+        }
+      }
+
+      const clientRects = range.getClientRects();
+      const firstRect = clientRects.length > 0 ? clientRects[0] : range.getBoundingClientRect();
+      return { anchor, rect: firstRect.width > 0 || firstRect.height > 0 ? firstRect : null };
+    }, [editor]);
+
+    // Track prose text selection in both Read mode and Visual Editor mode
+    useEffect(() => {
+      if (!editor) return;
+      let rafId = 0;
+
+      const syncSelection = () => {
+        window.cancelAnimationFrame(rafId);
+        rafId = window.requestAnimationFrame(() => {
+          const sheetEl = sheetScrollRef.current;
+          const { anchor, rect } = readCurrentDomOrEditorAnchor();
+          onSelectionAnchorChange(anchor);
+          if (!anchor || !rect || !sheetEl) {
+            setSelectionPopover(null);
+            return;
+          }
+          const sheetRect = sheetEl.getBoundingClientRect();
+          const sheetStyle = window.getComputedStyle(sheetEl);
+          const isSheetScrollable =
+            (sheetStyle.overflowY === 'auto' || sheetStyle.overflowY === 'scroll') &&
+            sheetEl.scrollHeight > sheetEl.clientHeight + 2;
+          const scrollOffset = isSheetScrollable ? sheetEl.scrollTop : 0;
+          const stickyBottom = Math.max(
+            document.querySelector('.repo-topbar')?.getBoundingClientRect().bottom ?? 0,
+            document.querySelector('.editor-toolbar')?.getBoundingClientRect().bottom ?? 0
+          );
+          const minTopInSheet = scrollOffset + (stickyBottom - sheetRect.top) + 8;
+          const placeBelow = rect.top < stickyBottom + 48;
+          const rawTop = placeBelow
+            ? scrollOffset + (rect.bottom - sheetRect.top) + 8
+            : scrollOffset + (rect.top - sheetRect.top) - 40;
+          const top = Math.max(8, minTopInSheet, rawTop);
+          const centeredLeft =
+            rect.left - sheetRect.left + Math.min(rect.width, 240) / 2 - 54;
+          const left = Math.min(
+            Math.max(12, centeredLeft),
+            Math.max(12, sheetEl.clientWidth - 124)
+          );
+          setSelectionPopover({ anchor, top, left });
+        });
+      };
+
+      document.addEventListener('selectionchange', syncSelection);
+      return () => {
+        window.cancelAnimationFrame(rafId);
+        document.removeEventListener('selectionchange', syncSelection);
+      };
+    }, [editor, onSelectionAnchorChange, readCurrentDomOrEditorAnchor]);
 
     useImperativeHandle(ref, () => ({
       insertEmbedBlock(desc: EmbedDescriptor) {
@@ -202,21 +388,50 @@ export const VisualMarkdownEditor = forwardRef<VisualEditorHandle, Props>(
         suppressUpdateRef.current = true;
         editor.commands.setContent(markdownToProseMirror(markdown) as JSONContent, false);
         suppressUpdateRef.current = false;
+      },
+      scrollToThreadAnchor(threadId: string) {
+        const sheetEl = sheetScrollRef.current;
+        if (!sheetEl) return;
+        const target = sheetEl.querySelector(
+          `.cairn-comment-highlight[data-thread-id="${CSS.escape(threadId)}"]`
+        ) as HTMLElement | null;
+        if (!target) return;
+        const targetRect = target.getBoundingClientRect();
+        const sheetStyle = window.getComputedStyle(sheetEl);
+        const isSheetScrollable =
+          (sheetStyle.overflowY === 'auto' || sheetStyle.overflowY === 'scroll') &&
+          sheetEl.scrollHeight > sheetEl.clientHeight + 2;
+        if (isSheetScrollable) {
+          const sheetRect = sheetEl.getBoundingClientRect();
+          const nextTop = Math.max(0, sheetEl.scrollTop + (targetRect.top - sheetRect.top) - 120);
+          sheetEl.scrollTo({ top: nextTop, behavior: 'smooth' });
+        } else {
+          const nextWindowTop = Math.max(0, window.scrollY + targetRect.top - 110);
+          window.scrollTo({ top: nextWindowTop, behavior: 'smooth' });
+        }
       }
     }));
 
     if (!editor) {
-      return <div className="sheet-scroll">Loading editor…</div>;
+      return <div className="sheet-scroll">Loading document…</div>;
     }
 
-    const activeLinkHref = editor.isActive('link')
-      ? String(editor.getAttributes('link').href ?? '')
-      : '';
+    const isFocused = editor.isFocused;
+    const activeOnFocus = (name: string, attrs?: Record<string, unknown>) =>
+      isFocused && editor.isActive(name, attrs);
+
+    const activeLinkHref =
+      isFocused && editor.isActive('link')
+        ? String(editor.getAttributes('link').href ?? '')
+        : '';
 
     function promptForLink() {
       if (!editor) return;
       const previousUrl = String(editor.getAttributes('link').href ?? '');
-      const url = window.prompt('Link URL or relative document path (leave empty to remove):', previousUrl);
+      const url = window.prompt(
+        'Link URL or relative document path (leave empty to remove):',
+        previousUrl
+      );
       if (url === null) return;
       if (url.trim() === '') {
         editor.chain().focus().extendMarkRange('link').unsetLink().run();
@@ -225,162 +440,260 @@ export const VisualMarkdownEditor = forwardRef<VisualEditorHandle, Props>(
       editor.chain().focus().extendMarkRange('link').setLink({ href: url.trim() }).run();
     }
 
-    function handleCommentButtonClick() {
-      if (!editor) return;
-      let anchor = extractAnchorFromSelection(editor.state);
-      if (!anchor) {
-        const domQuote = window.getSelection()?.toString().trim() ?? '';
-        if (domQuote) {
-          const blocks = extractLiveProseBlocks(editor.state.doc);
-          const matching = blocks.filter((b) => b.text.includes(domQuote));
-          if (matching.length === 1) {
-            const idx = matching[0].text.indexOf(domQuote);
-            anchor = buildAnchorFromBlockSelection(matching[0], idx, idx + domQuote.length);
-          } else {
-            anchor = { quote: domQuote, prefix: '', suffix: '' };
-          }
-        }
+    function triggerCommentFromCurrentSelection() {
+      const { anchor } = readCurrentDomOrEditorAnchor();
+      const chosen = anchor ?? selectionPopover?.anchor ?? null;
+      onSelectionAnchorChange(chosen);
+      onStartCommentWithAnchor(chosen);
+      if (chosen) {
+        setSelectionPopover(null);
       }
-      onSelectionAnchorChange(anchor);
-      onStartCommentWithAnchor(anchor);
     }
 
     return (
       <>
+        {editable && (
+          <div
+            className="editor-toolbar"
+            role="toolbar"
+            aria-label="Document formatting controls"
+            onMouseDown={(e) => {
+              if ((e.target as HTMLElement).closest('button')) {
+                e.preventDefault();
+              }
+            }}
+          >
+            <div className="toolbar-group" role="group" aria-label="Headings">
+              <button
+                type="button"
+                className={`tool-btn ${activeOnFocus('heading', { level: 1 }) ? 'is-active' : ''}`}
+                aria-label="Heading 1"
+                aria-pressed={activeOnFocus('heading', { level: 1 })}
+                title="Heading 1"
+                onClick={() => editor.chain().focus().toggleHeading({ level: 1 }).run()}
+              >
+                <Heading1 size={15} />
+              </button>
+              <button
+                type="button"
+                className={`tool-btn ${activeOnFocus('heading', { level: 2 }) ? 'is-active' : ''}`}
+                aria-label="Heading 2"
+                aria-pressed={activeOnFocus('heading', { level: 2 })}
+                title="Heading 2"
+                onClick={() => editor.chain().focus().toggleHeading({ level: 2 }).run()}
+              >
+                <Heading2 size={15} />
+              </button>
+              <button
+                type="button"
+                className={`tool-btn ${activeOnFocus('heading', { level: 3 }) ? 'is-active' : ''}`}
+                aria-label="Heading 3"
+                aria-pressed={activeOnFocus('heading', { level: 3 })}
+                title="Heading 3"
+                onClick={() => editor.chain().focus().toggleHeading({ level: 3 }).run()}
+              >
+                <Heading3 size={15} />
+              </button>
+            </div>
+
+            <div className="tool-divider" />
+
+            <div className="toolbar-group" role="group" aria-label="Inline formatting">
+              <button
+                type="button"
+                className={`tool-btn ${activeOnFocus('bold') ? 'is-active' : ''}`}
+                aria-label="Bold"
+                aria-pressed={activeOnFocus('bold')}
+                title="Bold (Ctrl+B)"
+                onClick={() => editor.chain().focus().toggleBold().run()}
+              >
+                <Bold size={15} />
+              </button>
+              <button
+                type="button"
+                className={`tool-btn ${activeOnFocus('italic') ? 'is-active' : ''}`}
+                aria-label="Italic"
+                aria-pressed={activeOnFocus('italic')}
+                title="Italic (Ctrl+I)"
+                onClick={() => editor.chain().focus().toggleItalic().run()}
+              >
+                <Italic size={15} />
+              </button>
+              <button
+                type="button"
+                className={`tool-btn ${activeOnFocus('code') ? 'is-active' : ''}`}
+                aria-label="Inline code"
+                aria-pressed={activeOnFocus('code')}
+                title="Inline code (Ctrl+E)"
+                onClick={() => editor.chain().focus().toggleCode().run()}
+              >
+                <Code size={15} />
+              </button>
+              <button
+                type="button"
+                className={`tool-btn ${activeOnFocus('link') ? 'is-active' : ''}`}
+                aria-label="Insert or edit link"
+                aria-pressed={activeOnFocus('link')}
+                title="Insert or edit link"
+                onClick={promptForLink}
+              >
+                <Link2 size={15} />
+              </button>
+              {activeLinkHref && activeLinkHref.endsWith('.md') && (
+                <button
+                  type="button"
+                  className="btn btn-compact"
+                  onClick={() => onNavigateDoc(activeLinkHref)}
+                  title={`Open linked document ${activeLinkHref}`}
+                >
+                  <ExternalLink size={12} />
+                  <span>Open {activeLinkHref}</span>
+                </button>
+              )}
+            </div>
+
+            <div className="tool-divider" />
+
+            <div className="toolbar-group" role="group" aria-label="Lists and blocks">
+              <button
+                type="button"
+                className={`tool-btn ${activeOnFocus('bulletList') ? 'is-active' : ''}`}
+                aria-label="Bullet list"
+                aria-pressed={activeOnFocus('bulletList')}
+                title="Bullet list"
+                onClick={() => editor.chain().focus().toggleBulletList().run()}
+              >
+                <List size={15} />
+              </button>
+              <button
+                type="button"
+                className={`tool-btn ${activeOnFocus('orderedList') ? 'is-active' : ''}`}
+                aria-label="Numbered list"
+                aria-pressed={activeOnFocus('orderedList')}
+                title="Numbered list"
+                onClick={() => editor.chain().focus().toggleOrderedList().run()}
+              >
+                <ListOrdered size={15} />
+              </button>
+              <button
+                type="button"
+                className={`tool-btn ${activeOnFocus('taskList') ? 'is-active' : ''}`}
+                aria-label="Task checklist"
+                aria-pressed={activeOnFocus('taskList')}
+                title="Task checklist"
+                onClick={() => editor.chain().focus().toggleTaskList().run()}
+              >
+                <ListTodo size={15} />
+              </button>
+              <button
+                type="button"
+                className={`tool-btn ${activeOnFocus('blockquote') ? 'is-active' : ''}`}
+                aria-label="Blockquote"
+                aria-pressed={activeOnFocus('blockquote')}
+                title="Blockquote"
+                onClick={() => editor.chain().focus().toggleBlockquote().run()}
+              >
+                <Quote size={15} />
+              </button>
+              <button
+                type="button"
+                className={`tool-btn ${activeOnFocus('codeBlock') ? 'is-active' : ''}`}
+                aria-label="Code block"
+                aria-pressed={activeOnFocus('codeBlock')}
+                title="Fenced code block"
+                onClick={() => editor.chain().focus().toggleCodeBlock().run()}
+              >
+                <SquareCode size={15} />
+              </button>
+              <button
+                type="button"
+                className="tool-btn"
+                aria-label="Insert 3 by 3 Markdown table"
+                title="Insert Markdown table"
+                onClick={() =>
+                  editor.chain().focus().insertTable({ rows: 3, cols: 3, withHeaderRow: true }).run()
+                }
+              >
+                <TableIcon size={15} />
+              </button>
+            </div>
+
+            <div className="tool-divider" />
+
+            <div className="toolbar-actions-right">
+              <button
+                type="button"
+                className="btn btn-compact"
+                onClick={onOpenInsertEmbedModal}
+              >
+                <Blocks size={13} />
+                <span>Insert embed</span>
+              </button>
+              <button
+                type="button"
+                className="btn btn-compact"
+                onClick={triggerCommentFromCurrentSelection}
+                title="Anchor a review comment on selected prose (Alt+C)"
+              >
+                <MessageSquarePlus size={13} />
+                <span>Comment</span>
+              </button>
+            </div>
+          </div>
+        )}
+
         <div
-          className="editor-toolbar"
-          role="toolbar"
-          aria-label="Document formatting controls"
-          onMouseDown={(e) => {
-            if ((e.target as HTMLElement).closest('button')) {
+          ref={sheetScrollRef}
+          className={`sheet-scroll ${editable ? 'is-editing' : 'is-reading'}`}
+          onKeyDown={(e) => {
+            if (e.altKey && e.key.toLowerCase() === 'c') {
               e.preventDefault();
+              triggerCommentFromCurrentSelection();
             }
           }}
         >
-          <button
-            type="button"
-            className={`tool-btn ${editor.isActive('heading', { level: 1 }) ? 'is-active' : ''}`}
-            onClick={() => editor.chain().focus().toggleHeading({ level: 1 }).run()}
-          >
-            H1
-          </button>
-          <button
-            type="button"
-            className={`tool-btn ${editor.isActive('heading', { level: 2 }) ? 'is-active' : ''}`}
-            onClick={() => editor.chain().focus().toggleHeading({ level: 2 }).run()}
-          >
-            H2
-          </button>
-          <button
-            type="button"
-            className={`tool-btn ${editor.isActive('heading', { level: 3 }) ? 'is-active' : ''}`}
-            onClick={() => editor.chain().focus().toggleHeading({ level: 3 }).run()}
-          >
-            H3
-          </button>
-          <div className="tool-divider" />
-          <button
-            type="button"
-            className={`tool-btn ${editor.isActive('bold') ? 'is-active' : ''}`}
-            onClick={() => editor.chain().focus().toggleBold().run()}
-          >
-            Bold
-          </button>
-          <button
-            type="button"
-            className={`tool-btn ${editor.isActive('italic') ? 'is-active' : ''}`}
-            onClick={() => editor.chain().focus().toggleItalic().run()}
-          >
-            Italic
-          </button>
-          <button
-            type="button"
-            className={`tool-btn ${editor.isActive('code') ? 'is-active' : ''}`}
-            onClick={() => editor.chain().focus().toggleCode().run()}
-          >
-            Code
-          </button>
-          <button
-            type="button"
-            className={`tool-btn ${editor.isActive('link') ? 'is-active' : ''}`}
-            onClick={promptForLink}
-          >
-            Link
-          </button>
-          {activeLinkHref && activeLinkHref.endsWith('.md') && (
+          {selectionPopover && (
             <button
               type="button"
-              className="btn btn-compact"
-              onClick={() => onNavigateDoc(activeLinkHref)}
+              className="selection-comment-popover"
+              style={{
+                top: `${selectionPopover.top}px`,
+                left: `${selectionPopover.left}px`
+              }}
+              onMouseDown={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+              }}
+              onClick={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                triggerCommentFromCurrentSelection();
+              }}
+              aria-label="Add inline comment on selected text"
             >
-              Open {activeLinkHref}
+              <MessageSquarePlus size={14} aria-hidden="true" />
+              <span>Comment</span>
             </button>
           )}
-          <div className="tool-divider" />
-          <button
-            type="button"
-            className={`tool-btn ${editor.isActive('bulletList') ? 'is-active' : ''}`}
-            onClick={() => editor.chain().focus().toggleBulletList().run()}
-          >
-            Bullets
-          </button>
-          <button
-            type="button"
-            className={`tool-btn ${editor.isActive('orderedList') ? 'is-active' : ''}`}
-            onClick={() => editor.chain().focus().toggleOrderedList().run()}
-          >
-            Numbered
-          </button>
-          <button
-            type="button"
-            className={`tool-btn ${editor.isActive('taskList') ? 'is-active' : ''}`}
-            onClick={() => editor.chain().focus().toggleTaskList().run()}
-          >
-            Checklist
-          </button>
-          <button
-            type="button"
-            className={`tool-btn ${editor.isActive('blockquote') ? 'is-active' : ''}`}
-            onClick={() => editor.chain().focus().toggleBlockquote().run()}
-          >
-            Quote
-          </button>
-          <button
-            type="button"
-            className={`tool-btn ${editor.isActive('codeBlock') ? 'is-active' : ''}`}
-            onClick={() => editor.chain().focus().toggleCodeBlock().run()}
-          >
-            Code block
-          </button>
-          <button
-            type="button"
-            className="tool-btn"
-            onClick={() =>
-              editor.chain().focus().insertTable({ rows: 3, cols: 3, withHeaderRow: true }).run()
-            }
-          >
-            Table
-          </button>
-          <div className="tool-divider" />
-          <button
-            type="button"
-            className="btn btn-compact"
-            onClick={onOpenInsertEmbedModal}
-          >
-            Insert embed
-          </button>
-          <button
-            type="button"
-            className="btn btn-compact btn-primary"
-            onClick={handleCommentButtonClick}
-            title="Comment on selected prose (Alt+C)"
-          >
-            Comment on selection
-          </button>
-        </div>
 
-        <div className="sheet-scroll">
-          <div className="prose-container">
+          <div
+            ref={proseContainerRef}
+            className={`prose-container ${editable ? 'is-editable' : 'is-readonly'}`}
+          >
+            {projectName && docPath && (
+              <div className="doc-page-eyebrow">
+                <button
+                  type="button"
+                  className="doc-eyebrow-btn"
+                  onClick={onOpenRepoDetails}
+                  title="Inspect repository path, branch, and working-tree diff"
+                >
+                  <span className="eyebrow-project">{projectName}</span>
+                  <span className="eyebrow-sep" aria-hidden="true">/</span>
+                  <span className="eyebrow-path">{docPath}</span>
+                </button>
+              </div>
+            )}
             <EditorContent editor={editor} />
           </div>
         </div>

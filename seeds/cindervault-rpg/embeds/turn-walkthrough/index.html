@@ -6,19 +6,20 @@
   <title>Encounter Step-Through Walkthrough</title>
   <style>
     :root {
-      --bg: #fafbf9;
-      --panel: #f2f4f3;
-      --ink: #162326;
-      --muted: #4e6166;
+      --bg: #fbfcfa;
+      --panel: #eef2f1;
+      --ink: #142124;
+      --muted: #4a5d62;
       --line: #cfd8d7;
-      --accent: #1b6b63;
+      --accent: #17635b;
       --accent-soft: #e1f0ee;
       --amber: #c27d18;
     }
     * { box-sizing: border-box; }
+    html { height: auto; }
     body {
       margin: 0;
-      padding: 16px;
+      padding: 14px 16px;
       font-family: "Plus Jakarta Sans", system-ui, -apple-system, sans-serif;
       background: var(--bg);
       color: var(--ink);
@@ -27,12 +28,12 @@
       display: grid;
       grid-template-columns: repeat(5, 1fr);
       gap: 6px;
-      margin-bottom: 14px;
+      margin-bottom: 12px;
     }
     .step-tab {
       font: inherit;
       font-size: 12px;
-      padding: 8px 6px;
+      padding: 7px 6px;
       border-radius: 5px;
       border: 1px solid var(--line);
       background: var(--panel);
@@ -53,7 +54,8 @@
       padding: 14px;
       display: grid;
       grid-template-columns: 1.5fr 1fr;
-      gap: 16px;
+      gap: 14px;
+      align-items: start;
     }
     @media (max-width: 640px) {
       .stepper { grid-template-columns: 1fr 1fr; }
@@ -61,20 +63,20 @@
     }
     .beat-title {
       margin: 0 0 6px 0;
-      font-size: 16px;
+      font-size: 15.5px;
       font-weight: 700;
     }
     .actor-line {
-      font-size: 12.5px;
+      font-size: 12px;
       font-weight: 600;
       color: var(--accent);
-      margin-bottom: 8px;
+      margin-bottom: 6px;
     }
     .narrative {
-      font-size: 13.5px;
-      line-height: 1.55;
+      font-size: 13.2px;
+      line-height: 1.52;
       color: var(--ink);
-      margin: 0 0 12px 0;
+      margin: 0 0 10px 0;
     }
     .choice-row {
       display: flex;
@@ -101,13 +103,13 @@
       background: var(--panel);
       border: 1px solid var(--line);
       border-radius: 5px;
-      padding: 12px;
+      padding: 11px 12px;
       font-size: 12.5px;
     }
     .meter-row {
       display: flex;
       justify-content: space-between;
-      padding: 5px 0;
+      padding: 4px 0;
       border-bottom: 1px solid #e0e7e6;
     }
     .meter-row:last-child { border-bottom: none; }
@@ -127,7 +129,7 @@
       background: var(--amber);
     }
     .controls {
-      margin-top: 12px;
+      margin-top: 10px;
       display: flex;
       justify-content: space-between;
       align-items: center;
@@ -136,7 +138,7 @@
       font: inherit;
       font-size: 12.5px;
       font-weight: 600;
-      padding: 6px 12px;
+      padding: 5px 12px;
       border-radius: 4px;
       border: 1px solid var(--line);
       background: #ffffff;
@@ -161,7 +163,7 @@
       <h3 class="beat-title" id="beatTitle"></h3>
       <p class="narrative" id="beatNarrative"></p>
       <div id="consequenceBranch" style="display:none">
-        <div style="font-size:12px;font-weight:600;color:#4e6166;margin-bottom:4px;">Select 7–9 consequence cost:</div>
+        <div style="font-size:12px;font-weight:600;color:#4a5d62;margin-bottom:4px;">Select 7–9 consequence cost:</div>
         <div class="choice-row">
           <button type="button" class="choice-btn selected" id="optVent">Vent 1 extra Lantern Oil</button>
           <button type="button" class="choice-btn" id="optPatrol">Trigger Hallway Patrol Clock</button>
@@ -204,7 +206,7 @@
     const BEATS = [
       {
         short: '1. Inspect',
-        actor: 'Player -> Engine Query',
+        actor: 'Player · Engine Query',
         title: 'Sable inspects the Sunken Reliquary seal',
         narrative: 'Sable examines the copper ward-filament on the Reliquary door. The engine exposes Tier II Ward resistance (-1) and her Rigging +2 rating before any resource is spent.',
         door: 'Sealed (Tier II)',
@@ -215,7 +217,7 @@
       },
       {
         short: '2. Lock Stakes',
-        actor: 'Player -> Rules Engine',
+        actor: 'Player · Rules Engine',
         title: 'Commit 1 Lantern Oil for stabilized arc-tongs',
         narrative: 'Sable commits 1 Lantern Oil (+1 bonus), bringing her net modifier to +2. The engine deducts oil from 4 to 3 and locks the action against free rollback.',
         door: 'Stakes Locked',
@@ -242,13 +244,13 @@
         narrative: 'As copper filaments snap, the Encounter Model advances the room Ward Resonance clock to 2/4 and prompts Sable to choose how the team absorbs the remaining feedback.',
         door: 'Ajar (Arcing)',
         oil: 3,
-        roll: '8 -> Strained',
+        roll: '8 · Strained',
         resonance: 2,
         alert: 'Pending choice'
       },
       {
         short: '5. Aftermath',
-        actor: 'Player Choice -> Model Commit',
+        actor: 'Player Choice · Model Commit',
         title: 'Team resolves the Strained Entry cost',
         narrative: '',
         door: 'Open',
@@ -259,11 +261,19 @@
       }
     ];
 
+    let instanceId = new URLSearchParams(window.location.search).get('instance') || undefined;
     let index = 0;
-    let costChoice = 'vent'; // 'vent' | 'patrol'
+    let costChoice = 'vent';
 
-    function reportHeight() {
-      window.parent.postMessage({ type: 'cairn:embed:resize', height: Math.max(250, document.documentElement.scrollHeight) }, '*');
+    function measureIntrinsicHeight() {
+      return Math.max(140, Math.ceil(document.body.getBoundingClientRect().height));
+    }
+
+    function reportHeight(msgType = 'cairn:embed:resize') {
+      window.parent.postMessage(
+        { type: msgType, instanceId, height: measureIntrinsicHeight() },
+        '*'
+      );
     }
 
     function render() {
@@ -324,10 +334,10 @@
       document.getElementById('stepCounter').textContent = `Beat ${index + 1} of ${BEATS.length} (fictional trace)`;
 
       window.parent.postMessage(
-        { type: 'cairn:embed:telemetry', summary: `Beat ${index + 1}/${BEATS.length}: ${beat.short}` },
+        { type: 'cairn:embed:telemetry', instanceId, summary: `Beat ${index + 1}/${BEATS.length}: ${beat.short}` },
         '*'
       );
-      reportHeight();
+      reportHeight('cairn:embed:resize');
     }
 
     document.getElementById('prevBtn').addEventListener('click', () => {
@@ -346,18 +356,29 @@
     });
 
     window.addEventListener('message', (event) => {
-      if (event.data && event.data.type === 'cairn:embed:init' && event.data.props) {
-        const step = Number(event.data.props.initialBeat);
-        if (Number.isInteger(step) && step >= 0 && step < BEATS.length) {
-          index = step;
-          render();
+      if (event.data && event.data.type === 'cairn:embed:init') {
+        if (typeof event.data.instanceId === 'string') {
+          instanceId = event.data.instanceId;
         }
+        if (event.data.props) {
+          const step = Number(event.data.props.initialBeat);
+          if (Number.isInteger(step) && step >= 0 && step < BEATS.length) {
+            index = step;
+            render();
+            return;
+          }
+        }
+        reportHeight('cairn:embed:resize');
       }
     });
 
-    window.addEventListener('resize', reportHeight);
+    if (typeof ResizeObserver !== 'undefined') {
+      new ResizeObserver(() => reportHeight('cairn:embed:resize')).observe(document.body);
+    }
+    window.addEventListener('resize', () => reportHeight('cairn:embed:resize'));
+
     render();
-    window.parent.postMessage({ type: 'cairn:embed:ready', height: document.documentElement.scrollHeight }, '*');
+    reportHeight('cairn:embed:ready');
   </script>
 </body>
 </html>

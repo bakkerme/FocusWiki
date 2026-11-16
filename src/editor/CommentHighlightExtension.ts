@@ -91,11 +91,14 @@ export function extractLiveProseBlocks(doc: PmNode): LiveProseBlock[] {
   return blocks;
 }
 
-export function extractAnchorFromSelection(state: EditorState): CommentAnchor | null {
-  const { from, to, empty } = state.selection;
-  if (empty || to <= from) return null;
+export function extractAnchorFromRange(
+  doc: PmNode,
+  from: number,
+  to: number
+): CommentAnchor | null {
+  if (to <= from) return null;
 
-  const liveBlocks = extractLiveProseBlocks(state.doc);
+  const liveBlocks = extractLiveProseBlocks(doc);
   for (const blk of liveBlocks) {
     if (blk.charToPos.length < 2) continue;
     const blockStart = blk.charToPos[0];
@@ -117,14 +120,23 @@ export function extractAnchorFromSelection(state: EditorState): CommentAnchor | 
     }
   }
 
-  // Fallback across blocks if user selected prose spanning two paragraphs
-  const rawQuote = state.doc.textBetween(from, to, '\n').trim();
+  // Fallback across blocks if user selected prose spanning two paragraphs or table cells
+  const clampedFrom = Math.max(0, Math.min(from, doc.content.size));
+  const clampedTo = Math.max(clampedFrom, Math.min(to, doc.content.size));
+  if (clampedTo <= clampedFrom) return null;
+  const rawQuote = doc.textBetween(clampedFrom, clampedTo, '\n').trim();
   if (!rawQuote) return null;
   return {
     quote: rawQuote,
     prefix: '',
     suffix: ''
   };
+}
+
+export function extractAnchorFromSelection(state: EditorState): CommentAnchor | null {
+  const { from, to, empty } = state.selection;
+  if (empty || to <= from) return null;
+  return extractAnchorFromRange(state.doc, from, to);
 }
 
 export const commentHighlightPluginKey = new PluginKey<{
@@ -174,7 +186,10 @@ export const CommentHighlightExtension = Extension.create<{
             }
 
             const visibleThreads = pluginState.threads.filter(
-              (t) => t.status === 'open' || pluginState.showResolved || t.id === pluginState.activeThreadId
+              (t) =>
+                t.status === 'open' ||
+                pluginState.showResolved ||
+                t.id === pluginState.activeThreadId
             );
             if (visibleThreads.length === 0) return DecorationSet.empty;
 
@@ -200,14 +215,48 @@ export const CommentHighlightExtension = Extension.create<{
 
                 if (typeof fromPos === 'number' && typeof toPos === 'number' && toPos > fromPos) {
                   const isSelected = thread.id === pluginState.activeThreadId;
+                  const isResolved = thread.status === 'resolved';
+                  const author = thread.messages[0]?.author ?? 'Reviewer';
+                  const stateClasses = [
+                    'cairn-comment-highlight',
+                    isResolved ? 'is-resolved' : 'is-open',
+                    isSelected ? 'is-selected active' : ''
+                  ]
+                    .filter(Boolean)
+                    .join(' ');
+
                   decos.push(
                     Decoration.inline(fromPos, toPos, {
-                      class: isSelected
-                        ? 'cairn-comment-highlight is-selected'
-                        : 'cairn-comment-highlight',
+                      class: stateClasses,
                       'data-thread-id': thread.id,
-                      title: `Comment by ${thread.messages[0]?.author ?? 'Reviewer'}`
+                      'data-thread-status': thread.status,
+                      title: `${isResolved ? 'Resolved comment' : 'Open comment'} by ${author} — click to focus`
                     })
+                  );
+
+                  decos.push(
+                    Decoration.widget(
+                      toPos,
+                      () => {
+                        const badge = document.createElement('button');
+                        badge.type = 'button';
+                        badge.className = [
+                          'cairn-anchor-marker',
+                          isResolved ? 'is-resolved' : 'is-open',
+                          isSelected ? 'is-selected' : ''
+                        ]
+                          .filter(Boolean)
+                          .join(' ');
+                        badge.setAttribute('data-thread-id', thread.id);
+                        badge.setAttribute(
+                          'aria-label',
+                          `${isResolved ? 'Resolved' : 'Open'} comment thread by ${author} (${thread.messages.length} ${thread.messages.length === 1 ? 'message' : 'messages'})`
+                        );
+                        badge.textContent = isResolved ? '✓' : String(thread.messages.length);
+                        return badge;
+                      },
+                      { side: 1, key: `marker-${thread.id}-${isSelected ? '1' : '0'}-${thread.status}-${thread.messages.length}` }
+                    )
                   );
                 }
               }

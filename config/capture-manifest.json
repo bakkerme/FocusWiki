@@ -7,11 +7,52 @@
   ],
   "targets": [
     {
-      "id": "doc-initial-edit",
-      "label": "Document Initial View (Current Visual Edit Default)",
+      "id": "doc-initial-read",
+      "replacesTargetId": "doc-initial-edit",
+      "label": "Desktop Read Default (Clean IA, Page Eyebrow & Compact Sticky Header)",
       "defaultSelected": true,
-      "actualAppState": "visual-edit-default",
-      "honestStateNote": "App currently opens directly in TipTap visual edit mode with text-label formatting toolbar, left repository/document sidebar, and open right review margin. Proposed read-first viewer mode is not yet implemented.",
+      "actualAppState": "read-default",
+      "honestStateNote": "Desktop 1440x900 Read mode default: sidebar owns repository switcher, search, and clean human page titles; page eyebrow above H1 carries Project / relative path; sticky header keeps Git status and adjacent Edit + Review buttons without noisy Saved locally text.",
+      "route": "/?project=cindervault-rpg&doc=docs%2Fvault-breach-action.md",
+      "projectId": "cindervault-rpg",
+      "docPath": "docs/vault-breach-action.md",
+      "captureScope": "viewport",
+      "viewport": {
+        "width": 1440,
+        "height": 900,
+        "deviceScaleFactor": 1,
+        "colorScheme": "light",
+        "reducedMotion": true
+      },
+      "steps": [
+        { "kind": "navigate" },
+        { "kind": "ensureReviewSidebar", "open": true, "showResolved": false },
+        { "kind": "scrollContainerTop", "selector": ".sheet-scroll", "top": 0 }
+      ],
+      "readiness": {
+        "requiredSelectors": [
+          ".workbench[data-workspace-mode=\"read\"]",
+          ".nav-sidebar",
+          ".repo-topbar",
+          ".primary-action-pair",
+          ".btn-edit-entry",
+          ".doc-page-eyebrow",
+          ".ProseMirror h1",
+          ".ProseMirror .tableWrapper table",
+          ".review-sidebar"
+        ],
+        "waitForFonts": true,
+        "waitForVisibleEmbeds": false,
+        "assertSavedState": true,
+        "timeoutMs": 12000
+      }
+    },
+    {
+      "id": "doc-visual-edit",
+      "label": "Explicit Visual Editor Mode (Icon Toolbar & Authoring Save Status)",
+      "defaultSelected": true,
+      "actualAppState": "visual-edit-explicit",
+      "honestStateNote": "Entered explicitly via Edit into Visual editor mode: shows sticky formatting toolbar, authoring Save status badge (Saved), Visual / Source switcher, Done button, and expanded Project embeds inventory.",
       "route": "/?project=cindervault-rpg&doc=docs%2Fvault-breach-action.md",
       "projectId": "cindervault-rpg",
       "docPath": "docs/vault-breach-action.md",
@@ -31,12 +72,13 @@
       ],
       "readiness": {
         "requiredSelectors": [
-          ".workbench",
+          ".workbench[data-workspace-mode=\"visual\"]",
           ".nav-sidebar",
           ".repo-topbar",
+          ".mode-switch",
           ".editor-toolbar",
           ".ProseMirror h1",
-          ".ProseMirror table",
+          ".ProseMirror .tableWrapper table",
           ".review-sidebar",
           ".save-badge.saved"
         ],
@@ -48,10 +90,10 @@
     },
     {
       "id": "source-editing",
-      "label": "Markdown Source Mode (Current Centered Textarea)",
+      "label": "Full-Workspace Markdown Source Editor (Line Gutter & Aligned Table)",
       "defaultSelected": true,
-      "actualAppState": "markdown-source-textarea",
-      "honestStateNote": "Switched via the header 'Markdown source' toggle. Currently renders a centered 78ch <textarea> inside .sheet-scroll rather than a full-workspace code editor; switching modes does not modify disk content.",
+      "actualAppState": "markdown-source-workspace",
+      "honestStateNote": "Entered via Edit -> Markdown source: bounded full-stage workspace with synchronized line-number gutter, anchored-comment line dot, unwrapped horizontal-scroll GFM table alignment, and auto-collapsed right Review rail.",
       "route": "/?project=cindervault-rpg&doc=docs%2Fvault-breach-action.md",
       "projectId": "cindervault-rpg",
       "docPath": "docs/vault-breach-action.md",
@@ -66,12 +108,14 @@
       "steps": [
         { "kind": "navigate" },
         { "kind": "ensureMode", "mode": "source" },
-        { "kind": "scrollContainerTop", "selector": ".sheet-scroll", "top": 0 }
+        { "kind": "scrollContainerTop", "selector": "textarea.markdown-source-editor", "top": 0 }
       ],
       "readiness": {
         "requiredSelectors": [
-          ".workbench",
+          ".workbench[data-workspace-mode=\"source\"]",
           ".repo-topbar",
+          ".source-workspace",
+          ".source-line-gutter",
           "textarea.markdown-source-editor",
           ".save-badge.saved"
         ],
@@ -84,10 +128,10 @@
     },
     {
       "id": "review-thread-open",
-      "label": "Inline Review Thread Focused with Anchored Highlight & History",
+      "label": "Focused Review Thread with Distinct Open, Selected & Resolved Anchors",
       "defaultSelected": true,
-      "actualAppState": "visual-edit-review-thread-open",
-      "honestStateNote": "Visual edit mode with the open inline comment thread selected, resolved threads shown for comparison, thread audit history expanded, and the anchored prose highlight scrolled into view. Pure UI state; does not write to .comments.json.",
+      "actualAppState": "read-review-thread-focused",
+      "honestStateNote": "Read mode with Resolved toggle enabled, open thread focused (expanded messages, audit history log, and reply input) while the resolved thread stays compact, and native document scroll positioned on prose highlights.",
       "route": "/?project=cindervault-rpg&doc=docs%2Fvault-breach-action.md",
       "projectId": "cindervault-rpg",
       "docPath": "docs/vault-breach-action.md",
@@ -101,23 +145,24 @@
       },
       "steps": [
         { "kind": "navigate" },
-        { "kind": "ensureMode", "mode": "visual" },
+        { "kind": "ensureMode", "mode": "read" },
         { "kind": "ensureReviewSidebar", "open": true, "showResolved": true },
         { "kind": "selectThread", "index": 0, "expandHistory": true },
         {
           "kind": "scrollElementIntoContainer",
           "container": ".sheet-scroll",
           "target": ".cairn-comment-highlight.active, .cairn-comment-highlight",
-          "offsetTop": 160
+          "offsetTop": 120
         }
       ],
       "readiness": {
         "requiredSelectors": [
-          ".workbench",
+          ".workbench[data-workspace-mode=\"read\"]",
           ".review-sidebar",
-          ".thread-card.active",
-          ".cairn-comment-highlight",
-          ".save-badge.saved"
+          ".thread-card.active.is-expanded",
+          ".thread-card.is-compact",
+          ".cairn-comment-highlight.is-selected",
+          ".cairn-comment-highlight.is-resolved"
         ],
         "waitForFonts": true,
         "waitForVisibleEmbeds": false,
@@ -127,10 +172,10 @@
     },
     {
       "id": "embed-visible",
-      "label": "Sandboxed Interactive Embed Visible in Document Flow",
+      "label": "Sandboxed Interactive Embed in Read Mode (Content-Fitted & Legible)",
       "defaultSelected": true,
-      "actualAppState": "visual-edit-embed-visible",
-      "honestStateNote": "Visual edit mode scrolled to the first sandboxed project component (embeds/state-explorer/index.html), showing the block action header, iframe height container, and surrounding prose.",
+      "actualAppState": "read-embed-visible",
+      "honestStateNote": "Read mode scrolled via native root scroll to embeds/state-explorer/index.html, showing quiet reader chrome (Component info + Reload only) and content-fitted sandboxed iframe height.",
       "route": "/?project=cindervault-rpg&doc=docs%2Fvault-breach-action.md",
       "projectId": "cindervault-rpg",
       "docPath": "docs/vault-breach-action.md",
@@ -144,7 +189,7 @@
       },
       "steps": [
         { "kind": "navigate" },
-        { "kind": "ensureMode", "mode": "visual" },
+        { "kind": "ensureMode", "mode": "read" },
         {
           "kind": "scrollElementIntoContainer",
           "container": ".sheet-scroll",
@@ -154,10 +199,9 @@
       ],
       "readiness": {
         "requiredSelectors": [
-          ".workbench",
-          ".embed-frame-wrapper",
-          "iframe.embed-sandbox-iframe",
-          ".save-badge.saved"
+          ".workbench[data-workspace-mode=\"read\"]",
+          ".embed-frame-wrapper.is-read-mode",
+          "iframe.embed-sandbox-iframe"
         ],
         "waitForFonts": true,
         "waitForVisibleEmbeds": true,
@@ -167,10 +211,10 @@
     },
     {
       "id": "narrow-viewport",
-      "label": "Narrow Responsive Layout (768x960 Single-Column Stack)",
+      "label": "Tablet Portrait Read View (768x960 Closed Reading + Non-Wrapping Action Pair)",
       "defaultSelected": true,
-      "actualAppState": "narrow-single-column-visual-edit",
-      "honestStateNote": "Single-column <=880px layout at 768x960 scrolled to the sidebar-to-document transition so reviewers can inspect stacked navigation, wrapping text-label toolbar controls, and narrow prose legibility.",
+      "actualAppState": "tablet-read-closed-drawers",
+      "honestStateNote": "768x960 tablet portrait Read view: overlay drawers start closed for distraction-free reading, sticky header keeps Docs, Git, and non-wrapping Edit + Review (1) controls on one clean bar, and page eyebrow sits above H1.",
       "route": "/?project=cindervault-rpg&doc=docs%2Fvault-breach-action.md",
       "projectId": "cindervault-rpg",
       "docPath": "docs/vault-breach-action.md",
@@ -184,17 +228,357 @@
       },
       "steps": [
         { "kind": "navigate" },
-        { "kind": "ensureMode", "mode": "visual" },
-        { "kind": "scrollWindowToElement", "target": ".document-stage", "offsetTop": 64 }
+        { "kind": "ensureMode", "mode": "read" },
+        { "kind": "scrollContainerTop", "selector": ".sheet-scroll", "top": 0 }
       ],
       "readiness": {
         "requiredSelectors": [
-          ".workbench",
+          ".workbench[data-workspace-mode=\"read\"]",
           ".document-stage",
           ".repo-topbar",
-          ".editor-toolbar",
-          ".ProseMirror h1",
-          ".save-badge.saved"
+          ".nav-toggle-btn",
+          ".primary-action-pair",
+          ".review-toggle-btn",
+          ".doc-page-eyebrow",
+          ".ProseMirror h1"
+        ],
+        "waitForFonts": true,
+        "waitForVisibleEmbeds": false,
+        "assertSavedState": true,
+        "timeoutMs": 12000
+      }
+    },
+    {
+      "id": "desktop-panels-collapsed",
+      "label": "Desktop Distraction-Free Read (Both Docs & Review Panels Collapsed)",
+      "defaultSelected": false,
+      "actualAppState": "desktop-both-panels-collapsed",
+      "honestStateNote": "Desktop 1440x900 Read view with both Docs navigation and Review panels collapsed via their Close buttons, leaving a calm centered reading sheet and clear Docs + Review reopen buttons in the sticky header.",
+      "route": "/?project=cindervault-rpg&doc=docs%2Fvault-breach-action.md",
+      "projectId": "cindervault-rpg",
+      "docPath": "docs/vault-breach-action.md",
+      "captureScope": "viewport",
+      "viewport": {
+        "width": 1440,
+        "height": 900,
+        "deviceScaleFactor": 1,
+        "colorScheme": "light",
+        "reducedMotion": true
+      },
+      "steps": [
+        { "kind": "navigate" },
+        { "kind": "ensureNavDrawer", "open": false },
+        { "kind": "ensureReviewSidebar", "open": false },
+        { "kind": "scrollContainerTop", "selector": ".sheet-scroll", "top": 0 }
+      ],
+      "readiness": {
+        "requiredSelectors": [
+          ".workbench[data-workspace-mode=\"read\"]",
+          ".nav-toggle-btn",
+          ".primary-action-pair",
+          ".btn-edit-entry",
+          ".review-toggle-btn",
+          ".ProseMirror h1"
+        ],
+        "waitForFonts": true,
+        "waitForVisibleEmbeds": false,
+        "assertSavedState": true,
+        "timeoutMs": 12000
+      }
+    },
+    {
+      "id": "narrow-phone",
+      "label": "Phone Portrait Closed Reading (390x844 Compact Header & Adjacent Edit + Review)",
+      "defaultSelected": false,
+      "actualAppState": "phone-read-closed-drawers",
+      "honestStateNote": "Phone portrait 390x844 closed reading: 48px compact sticky header keeps Docs, Git status, and side-by-side Edit + Review (1) without wrapping; page eyebrow + H1 + serif prose fill the full viewport width cleanly.",
+      "route": "/?project=cindervault-rpg&doc=docs%2Fvault-breach-action.md",
+      "projectId": "cindervault-rpg",
+      "docPath": "docs/vault-breach-action.md",
+      "captureScope": "viewport",
+      "viewport": {
+        "width": 390,
+        "height": 844,
+        "deviceScaleFactor": 1,
+        "colorScheme": "light",
+        "reducedMotion": true
+      },
+      "steps": [
+        { "kind": "navigate" },
+        { "kind": "ensureMode", "mode": "read" },
+        { "kind": "scrollContainerTop", "selector": ".sheet-scroll", "top": 0 }
+      ],
+      "readiness": {
+        "requiredSelectors": [
+          ".workbench[data-workspace-mode=\"read\"][data-layout-tier=\"overlay\"]",
+          ".repo-topbar",
+          ".nav-toggle-btn",
+          ".primary-action-pair",
+          ".btn-edit-entry",
+          ".review-toggle-btn",
+          ".doc-page-eyebrow",
+          ".ProseMirror h1"
+        ],
+        "waitForFonts": true,
+        "waitForVisibleEmbeds": false,
+        "assertSavedState": true,
+        "timeoutMs": 12000
+      }
+    },
+    {
+      "id": "phone-nav-open",
+      "label": "Phone Portrait Modal Docs Drawer Open (390x844 Dialog + Inert Stage)",
+      "defaultSelected": false,
+      "actualAppState": "phone-modal-nav-open",
+      "honestStateNote": "Phone portrait 390x844 with modal Docs drawer open (role=dialog, aria-modal=true, background <main inert>), showing clean Repository selector, search input, human document titles without raw path clutter, and Close button.",
+      "route": "/?project=cindervault-rpg&doc=docs%2Fvault-breach-action.md",
+      "projectId": "cindervault-rpg",
+      "docPath": "docs/vault-breach-action.md",
+      "captureScope": "viewport",
+      "viewport": {
+        "width": 390,
+        "height": 844,
+        "deviceScaleFactor": 1,
+        "colorScheme": "light",
+        "reducedMotion": true
+      },
+      "steps": [
+        { "kind": "navigate" },
+        { "kind": "ensureNavDrawer", "open": true }
+      ],
+      "readiness": {
+        "requiredSelectors": [
+          ".nav-sidebar.is-overlay-open[role=\"dialog\"]",
+          ".nav-sidebar .panel-close-btn",
+          ".drawer-backdrop",
+          "main.document-stage[inert]"
+        ],
+        "waitForFonts": true,
+        "waitForVisibleEmbeds": false,
+        "assertSavedState": true,
+        "timeoutMs": 12000
+      }
+    },
+    {
+      "id": "phone-review-open",
+      "label": "Phone Portrait Modal Review Drawer + Active Selection Comment Draft (390x844)",
+      "defaultSelected": false,
+      "actualAppState": "phone-modal-review-selection-draft",
+      "honestStateNote": "Phone portrait 390x844 after selecting prose in Read mode and clicking Comment: opens modal Review drawer (role=dialog, aria-modal=true) with quoted selection anchor, active draft note, existing thread, and Close button.",
+      "route": "/?project=cindervault-rpg&doc=docs%2Fvault-breach-action.md",
+      "projectId": "cindervault-rpg",
+      "docPath": "docs/vault-breach-action.md",
+      "captureScope": "viewport",
+      "viewport": {
+        "width": 390,
+        "height": 844,
+        "deviceScaleFactor": 1,
+        "colorScheme": "light",
+        "reducedMotion": true
+      },
+      "steps": [
+        { "kind": "navigate" },
+        {
+          "kind": "selectProseText",
+          "snippet": "clear handoffs between",
+          "clickCommentPill": true,
+          "draftText": "Verify handoff lock timing before partial success."
+        }
+      ],
+      "readiness": {
+        "requiredSelectors": [
+          ".review-sidebar.is-overlay-open[role=\"dialog\"]",
+          ".review-sidebar .panel-close-btn",
+          ".review-sidebar .composer-textarea",
+          ".drawer-backdrop",
+          "main.document-stage[inert]"
+        ],
+        "waitForFonts": true,
+        "waitForVisibleEmbeds": false,
+        "assertSavedState": true,
+        "timeoutMs": 12000
+      }
+    },
+    {
+      "id": "landscape-short-844x390",
+      "label": "Short Landscape Closed Reading (844x390 Overlay Tier — Zero Dual-Rail Squeeze)",
+      "defaultSelected": false,
+      "actualAppState": "landscape-short-844x390-read",
+      "honestStateNote": "Representative short landscape viewport (844x390): height <= 540px activates overlay drawer tier so neither persistent rail squeezes prose; compact sticky header keeps Edit + Review adjacent and full article width stays readable.",
+      "route": "/?project=cindervault-rpg&doc=docs%2Fvault-breach-action.md",
+      "projectId": "cindervault-rpg",
+      "docPath": "docs/vault-breach-action.md",
+      "captureScope": "viewport",
+      "viewport": {
+        "width": 844,
+        "height": 390,
+        "deviceScaleFactor": 1,
+        "colorScheme": "light",
+        "reducedMotion": true
+      },
+      "steps": [
+        { "kind": "navigate" },
+        { "kind": "scrollContainerTop", "selector": ".sheet-scroll", "top": 0 }
+      ],
+      "readiness": {
+        "requiredSelectors": [
+          ".workbench[data-workspace-mode=\"read\"][data-layout-tier=\"overlay\"]",
+          ".repo-topbar",
+          ".nav-toggle-btn",
+          ".primary-action-pair",
+          ".btn-edit-entry",
+          ".review-toggle-btn",
+          ".ProseMirror h1"
+        ],
+        "waitForFonts": true,
+        "waitForVisibleEmbeds": false,
+        "assertSavedState": true,
+        "timeoutMs": 12000
+      }
+    },
+    {
+      "id": "landscape-above880-956x440",
+      "label": "Short Landscape Above Former 880px Threshold (956x440 Closed Reading)",
+      "defaultSelected": false,
+      "actualAppState": "landscape-above880-956x440-read",
+      "honestStateNote": "Representative short landscape viewport (956x440) wider than the old 880px breakpoint: multi-dimensional overlay query ((max-width: 1024px), (max-height: 540px)) keeps drawers collapsed as modal overlays rather than docking two sidebars.",
+      "route": "/?project=cindervault-rpg&doc=docs%2Fvault-breach-action.md",
+      "projectId": "cindervault-rpg",
+      "docPath": "docs/vault-breach-action.md",
+      "captureScope": "viewport",
+      "viewport": {
+        "width": 956,
+        "height": 440,
+        "deviceScaleFactor": 1,
+        "colorScheme": "light",
+        "reducedMotion": true
+      },
+      "steps": [
+        { "kind": "navigate" },
+        { "kind": "scrollContainerTop", "selector": ".sheet-scroll", "top": 0 }
+      ],
+      "readiness": {
+        "requiredSelectors": [
+          ".workbench[data-workspace-mode=\"read\"][data-layout-tier=\"overlay\"]",
+          ".repo-topbar",
+          ".nav-toggle-btn",
+          ".primary-action-pair",
+          ".btn-edit-entry",
+          ".review-toggle-btn",
+          ".ProseMirror h1"
+        ],
+        "waitForFonts": true,
+        "waitForVisibleEmbeds": false,
+        "assertSavedState": true,
+        "timeoutMs": 12000
+      }
+    },
+    {
+      "id": "landscape-review-open-956x440",
+      "label": "Short Landscape Modal Review Drawer Open (956x440)",
+      "defaultSelected": false,
+      "actualAppState": "landscape-956x440-review-open",
+      "honestStateNote": "956x440 short landscape with modal Review drawer open over inert background stage: drawer scrolls independently with Passage jump and Close controls.",
+      "route": "/?project=cindervault-rpg&doc=docs%2Fvault-breach-action.md",
+      "projectId": "cindervault-rpg",
+      "docPath": "docs/vault-breach-action.md",
+      "captureScope": "viewport",
+      "viewport": {
+        "width": 956,
+        "height": 440,
+        "deviceScaleFactor": 1,
+        "colorScheme": "light",
+        "reducedMotion": true
+      },
+      "steps": [
+        { "kind": "navigate" },
+        { "kind": "ensureReviewSidebar", "open": true, "showResolved": false },
+        { "kind": "selectThread", "index": 0 }
+      ],
+      "readiness": {
+        "requiredSelectors": [
+          ".review-sidebar.is-overlay-open[role=\"dialog\"]",
+          ".review-sidebar .panel-close-btn",
+          ".thread-card.active",
+          "main.document-stage[inert]"
+        ],
+        "waitForFonts": true,
+        "waitForVisibleEmbeds": false,
+        "assertSavedState": true,
+        "timeoutMs": 12000
+      }
+    },
+    {
+      "id": "portrait-to-landscape-844x390",
+      "label": "Portrait (390x844) -> Landscape (844x390) Live Orientation Transition",
+      "defaultSelected": false,
+      "actualAppState": "portrait-to-landscape-transition",
+      "honestStateNote": "Booted at 390x844 portrait, scrolled 220px down the document via native window scroll, and rotated live to 844x390 landscape: preserves scroll progress, keeps scrollX=0 with unclipped left prose margin, and maintains adjacent Edit + Review buttons.",
+      "route": "/?project=cindervault-rpg&doc=docs%2Fvault-breach-action.md",
+      "projectId": "cindervault-rpg",
+      "docPath": "docs/vault-breach-action.md",
+      "captureScope": "viewport",
+      "initialViewport": {
+        "width": 390,
+        "height": 844
+      },
+      "initialScrollY": 220,
+      "viewport": {
+        "width": 844,
+        "height": 390,
+        "deviceScaleFactor": 1,
+        "colorScheme": "light",
+        "reducedMotion": true
+      },
+      "steps": [
+        { "kind": "navigate" }
+      ],
+      "readiness": {
+        "requiredSelectors": [
+          ".workbench[data-workspace-mode=\"read\"][data-layout-tier=\"overlay\"]",
+          ".repo-topbar",
+          ".primary-action-pair",
+          ".ProseMirror"
+        ],
+        "waitForFonts": true,
+        "waitForVisibleEmbeds": false,
+        "assertSavedState": true,
+        "timeoutMs": 12000
+      }
+    },
+    {
+      "id": "phone-helios-inventory",
+      "label": "Phone Narrow Helios Lab Bench Inventory Table (390x844 Scoped Table Scroll, Zero Clipping)",
+      "defaultSelected": false,
+      "actualAppState": "phone-helios-table-contained",
+      "honestStateNote": "390x844 phone portrait on helios-lab docs/bench-inventory.md scrolled to show prose + 5-column RFC 5737 IP inventory table: .tableWrapper isolates horizontal table scroll while H1, callout, and prose keep full unclipped left margins.",
+      "route": "/?project=helios-lab&doc=docs%2Fbench-inventory.md",
+      "projectId": "helios-lab",
+      "docPath": "docs/bench-inventory.md",
+      "captureScope": "viewport",
+      "viewport": {
+        "width": 390,
+        "height": 844,
+        "deviceScaleFactor": 1,
+        "colorScheme": "light",
+        "reducedMotion": true
+      },
+      "steps": [
+        { "kind": "navigate" },
+        { "kind": "ensureMode", "mode": "read" },
+        {
+          "kind": "scrollElementIntoContainer",
+          "container": ".sheet-scroll",
+          "target": ".ProseMirror .tableWrapper",
+          "offsetTop": 190
+        }
+      ],
+      "readiness": {
+        "requiredSelectors": [
+          ".workbench[data-workspace-mode=\"read\"][data-layout-tier=\"overlay\"]",
+          ".repo-topbar",
+          ".primary-action-pair",
+          ".ProseMirror .tableWrapper table"
         ],
         "waitForFonts": true,
         "waitForVisibleEmbeds": false,
@@ -204,10 +588,10 @@
     },
     {
       "id": "helios-lab-embed",
-      "label": "Helios Lab Runbook: Inventory Table & Power Sequencer Embed",
+      "label": "Helios Lab Runbook in Read Mode: Inventory Table & Power Sequencer",
       "defaultSelected": false,
-      "actualAppState": "visual-edit-second-project-embed",
-      "honestStateNote": "Second repository (helios-lab) in visual edit mode scrolled to show the synthetic RFC 5737 inventory table, sandboxed power-sequencer component, and open review thread.",
+      "actualAppState": "read-second-project-embed",
+      "honestStateNote": "Second repository (helios-lab) at 1440x900 Read mode scrolled to show the synthetic RFC 5737 inventory table, content-fitted power-sequencer component with aligned summary card, and compact review thread.",
       "route": "/?project=helios-lab&doc=docs%2Fbench-inventory.md",
       "projectId": "helios-lab",
       "docPath": "docs/bench-inventory.md",
@@ -221,23 +605,22 @@
       },
       "steps": [
         { "kind": "navigate" },
-        { "kind": "ensureMode", "mode": "visual" },
+        { "kind": "ensureMode", "mode": "read" },
         { "kind": "ensureReviewSidebar", "open": true, "showResolved": false },
         {
           "kind": "scrollElementIntoContainer",
           "container": ".sheet-scroll",
           "target": ".embed-frame-wrapper",
-          "offsetTop": 140
+          "offsetTop": 130
         }
       ],
       "readiness": {
         "requiredSelectors": [
-          ".workbench",
-          ".ProseMirror table",
-          ".embed-frame-wrapper",
+          ".workbench[data-workspace-mode=\"read\"]",
+          ".ProseMirror .tableWrapper table",
+          ".embed-frame-wrapper.is-read-mode",
           "iframe.embed-sandbox-iframe",
-          ".review-sidebar",
-          ".save-badge.saved"
+          ".review-sidebar"
         ],
         "waitForFonts": true,
         "waitForVisibleEmbeds": true,

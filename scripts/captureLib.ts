@@ -13,9 +13,16 @@ export interface CaptureViewportSpec {
 
 export type CaptureStep =
   | { kind: 'navigate' }
-  | { kind: 'ensureMode'; mode: 'visual' | 'source' }
+  | { kind: 'ensureMode'; mode: 'read' | 'visual' | 'source' }
   | { kind: 'ensureReviewSidebar'; open: boolean; showResolved?: boolean }
+  | { kind: 'ensureNavDrawer'; open: boolean }
   | { kind: 'selectThread'; index: number; expandHistory?: boolean }
+  | {
+      kind: 'selectProseText';
+      snippet: string;
+      clickCommentPill?: boolean;
+      draftText?: string;
+    }
   | { kind: 'scrollContainerTop'; selector: string; top: number }
   | {
       kind: 'scrollElementIntoContainer';
@@ -36,6 +43,7 @@ export interface CaptureReadinessSpec {
 
 export interface CaptureTargetSpec {
   id: string;
+  replacesTargetId?: string;
   label: string;
   defaultSelected: boolean;
   actualAppState: string;
@@ -44,6 +52,8 @@ export interface CaptureTargetSpec {
   projectId: string;
   docPath: string;
   captureScope: 'viewport' | 'full-page';
+  initialViewport?: { width: number; height: number };
+  initialScrollY?: number;
   viewport: CaptureViewportSpec;
   steps: CaptureStep[];
   readiness: CaptureReadinessSpec;
@@ -128,6 +138,7 @@ export interface BrowserCaptureTelemetry {
 export interface RecordedScreenEntry {
   order: number;
   targetId: string;
+  replacesTargetId?: string;
   label: string;
   actualAppState: string;
   honestStateNote: string;
@@ -171,10 +182,10 @@ export interface CompetitorReferenceEntry {
   product: string;
   screen: string;
   task: string;
-  declaredViewport: string;
+  declaredViewport: string | null;
   pngPixels: { width: number; height: number };
   source: string;
-  capturedDate: string;
+  capturedDate: string | null;
   importedAt: string;
   notes?: string;
   file: {
@@ -184,6 +195,8 @@ export interface CompetitorReferenceEntry {
   };
 }
 
+export type CaptureBrowserDriver = 'playwright-chromium' | 'openbot_browser';
+
 export interface CapturePacketManifest {
   schemaVersion: 1;
   packetId: string;
@@ -191,7 +204,7 @@ export interface CapturePacketManifest {
   updatedAt: string;
   baseUrl: string;
   manifestPath: string;
-  browserDriver: 'openbot_browser';
+  browserDriver: CaptureBrowserDriver;
   appGit: GitRevisionSnapshot | null;
   projectsGit: Record<string, ProjectRepoSnapshot>;
   plannedTargets: Array<{
@@ -452,39 +465,54 @@ export async function probeLiveCairnServer(
   }
 }
 
-/**
- * Generates a self-contained script for `openbot_browser.run_script` that navigates,
- * applies read-only UI steps, awaits fonts/content/embeds with bounded timeouts,
- * and returns structured readiness or failure telemetry JSON.
- */
-export function buildBrowserRunScript(target: CaptureTargetSpec, baseUrl: string): string {
-  const fullUrl = `${baseUrl.replace(/\/+$/, "")}${target.route}`;
-  const specJson = JSON.stringify({
+export interface InPageCaptureSpec {
+  targetId: string;
+  actualAppState: string;
+  fullUrl: string;
+  steps: CaptureStep[];
+  readiness: CaptureReadinessSpec;
+}
+
+export interface InPageCaptureResult {
+  ok: boolean;
+  stepName: string;
+  reason?: string;
+  missingSelectors: string[];
+  title?: string;
+  url: string;
+  observedDom: BrowserCaptureTelemetry['observedDom'] | null;
+  viewportCss?: BrowserCaptureTelemetry['viewportCss'];
+  readiness?: BrowserCaptureTelemetry['readiness'];
+}
+
+export function buildTargetInPageSpec(target: CaptureTargetSpec, baseUrl: string): InPageCaptureSpec {
+  const fullUrl = `${baseUrl.replace(/\/+$/, '')}${target.route}`;
+  return {
     targetId: target.id,
     actualAppState: target.actualAppState,
     fullUrl,
     steps: target.steps,
     readiness: target.readiness
-  });
+  };
+}
 
-  return `const startedAt = Date.now();
-let currentStep = "navigate";
+export const CAIRN_APP_BOOT_CHECK_EXPRESSION = `(() => {
+  const wb = document.querySelector(".workbench");
+  const gitBtn = document.querySelector(".git-status-btn");
+  const docReady =
+    Boolean(document.querySelector(".ProseMirror")) ||
+    Boolean(document.querySelector("textarea.markdown-source-editor"));
+  return Boolean(wb && gitBtn && docReady);
+})()`;
 
-try {
-  await navigate(${JSON.stringify(fullUrl)});
-
-  currentStep = "wait-app-boot";
-  await waitFor(() => {
-    const wb = document.querySelector(".workbench");
-    const gitBtn = document.querySelector(".git-status-btn");
-    const docReady =
-      Boolean(document.querySelector(".ProseMirror")) ||
-      Boolean(document.querySelector("textarea.markdown-source-editor"));
-    return Boolean(wb && gitBtn && docReady);
-  });
-
-  currentStep = "apply-steps-and-assert";
-  const pageResult = await evaluate(\`(async () => {
+/**
+ * Shared in-page step and readiness expression used by both the unattended Playwright
+ * runner (`scripts/captureRunner.ts`) and optional `openbot_browser.run_script` inspection.
+ * Consumes only validated `InPageCaptureSpec` JSON data (never arbitrary shell scripts).
+ */
+export function buildInPageStepAndReadinessExpression(spec: InPageCaptureSpec): string {
+  const specJson = JSON.stringify(spec);
+  return `(async () => {
     const spec = ${specJson};
     let stepName = "init";
     const waitCond = async (fn, ms = 8000) => {
@@ -502,32 +530,78 @@ try {
         if (s.kind === "navigate") continue;
 
         if (s.kind === "ensureMode") {
-          const wantedLabel = s.mode === "source" ? "Markdown source" : "Visual";
+          const getMode = () =>
+            document.querySelector(".workbench")?.getAttribute("data-workspace-mode") || null;
+
+          if (s.mode === "read") {
+            if (getMode() !== "read") {
+              const doneBtn = document.querySelector(".btn-done-editing");
+              if (!doneBtn) throw new Error("Done editing button (.btn-done-editing) not found");
+              doneBtn.click();
+            }
+            const ok = await waitCond(
+              () => getMode() === "read" && Boolean(document.querySelector(".ProseMirror"))
+            );
+            if (!ok) throw new Error("Timed out switching mode to read");
+            continue;
+          }
+
+          if (getMode() === "read") {
+            const editBtn = document.querySelector(".btn-edit-entry");
+            if (!editBtn) throw new Error("Edit entry button (.btn-edit-entry) not found");
+            editBtn.click();
+            const enteredEdit = await waitCond(() => Boolean(document.querySelector(".mode-switch")));
+            if (!enteredEdit) throw new Error("Authoring mode switch did not appear after clicking Edit");
+          }
+
+          const wantedLabel = s.mode === "source" ? "Markdown source" : "Visual editor";
           const buttons = Array.from(document.querySelectorAll(".mode-switch button"));
-          const btn = buttons.find((b) => (b.textContent || "").trim() === wantedLabel);
+          const btn = buttons.find((b) => {
+            const txt = (b.textContent || "").trim();
+            return txt === wantedLabel || (s.mode === "visual" && txt === "Visual");
+          });
           if (!btn) throw new Error("Mode switch button not found: " + wantedLabel);
           if (!btn.classList.contains("active")) btn.click();
           const ok = await waitCond(() =>
             s.mode === "source"
               ? Boolean(document.querySelector("textarea.markdown-source-editor"))
-              : Boolean(document.querySelector(".ProseMirror"))
+              : getMode() === "visual" && Boolean(document.querySelector(".ProseMirror"))
           );
           if (!ok) throw new Error("Timed out switching mode to " + wantedLabel);
           continue;
         }
 
         if (s.kind === "ensureReviewSidebar") {
-          const currentlyOpen = Boolean(document.querySelector(".review-sidebar"));
+          const isSidebarVisible = () => {
+            const el = document.querySelector(".review-sidebar");
+            if (!el) return false;
+            const r = el.getBoundingClientRect();
+            return r.width > 0 && r.height > 0;
+          };
+          const currentlyOpen = isSidebarVisible();
           if (currentlyOpen !== s.open) {
-            const toggleBtn = Array.from(document.querySelectorAll(".repo-topbar button")).find((b) => {
-              const txt = (b.textContent || "").trim();
-              return txt === "Hide review" || txt.startsWith("Review (");
-            });
-            if (!toggleBtn) throw new Error("Review sidebar toggle button not found");
-            toggleBtn.click();
+            if (!s.open) {
+              const closeBtn = document.querySelector(".review-sidebar .panel-close-btn");
+              if (closeBtn) {
+                closeBtn.click();
+              } else {
+                const toggleBtn = document.querySelector(".review-toggle-btn");
+                if (!toggleBtn) throw new Error("Review sidebar toggle button not found");
+                toggleBtn.click();
+              }
+            } else {
+              const toggleBtn =
+                document.querySelector(".review-toggle-btn") ||
+                Array.from(document.querySelectorAll(".repo-topbar button")).find((b) => {
+                  const txt = (b.textContent || "").trim();
+                  return txt === "Hide review" || txt.startsWith("Review");
+                });
+              if (!toggleBtn) throw new Error("Review sidebar toggle button not found");
+              toggleBtn.click();
+            }
           }
           if (s.open) {
-            const ok = await waitCond(() => Boolean(document.querySelector(".review-sidebar")));
+            const ok = await waitCond(() => isSidebarVisible());
             if (!ok) throw new Error("Review sidebar did not open");
             if (typeof s.showResolved === "boolean") {
               const cb = document.querySelector(".review-sidebar input[type=checkbox]");
@@ -537,7 +611,35 @@ try {
                 await new Promise((r) => requestAnimationFrame(r));
               }
             }
+          } else {
+            await waitCond(() => !isSidebarVisible(), 3000);
           }
+          continue;
+        }
+
+        if (s.kind === "ensureNavDrawer") {
+          const isNavVisible = () => {
+            const el = document.querySelector(".nav-sidebar");
+            if (!el) return false;
+            const r = el.getBoundingClientRect();
+            return r.width > 0 && r.height > 0;
+          };
+          if (isNavVisible() !== s.open) {
+            if (s.open) {
+              const navBtn =
+                document.querySelector(".nav-toggle-btn") ||
+                document.querySelector(".mobile-nav-btn");
+              if (!navBtn) throw new Error("Navigation toggle button not found");
+              navBtn.click();
+            } else {
+              const closeBtn =
+                document.querySelector(".nav-sidebar .panel-close-btn") ||
+                document.querySelector(".nav-sidebar .mobile-drawer-close");
+              if (closeBtn) closeBtn.click();
+            }
+          }
+          const ok = await waitCond(() => isNavVisible() === s.open, 3000);
+          if (!ok) throw new Error("Navigation drawer did not reach open=" + String(s.open));
           continue;
         }
 
@@ -560,10 +662,78 @@ try {
           continue;
         }
 
+        if (s.kind === "selectProseText") {
+          const prose = document.querySelector(".ProseMirror");
+          if (!prose) throw new Error(".ProseMirror not found for selectProseText");
+          const walker = document.createTreeWalker(prose, NodeFilter.SHOW_TEXT);
+          let matchedNode = null;
+          let matchedIdx = -1;
+          let node = walker.nextNode();
+          while (node) {
+            const txt = node.nodeValue || "";
+            const idx = txt.indexOf(s.snippet);
+            if (idx >= 0) {
+              matchedNode = node;
+              matchedIdx = idx;
+              break;
+            }
+            node = walker.nextNode();
+          }
+          if (!matchedNode || matchedIdx < 0) {
+            throw new Error("Text snippet not found in .ProseMirror: " + s.snippet);
+          }
+          const range = document.createRange();
+          range.setStart(matchedNode, matchedIdx);
+          range.setEnd(matchedNode, matchedIdx + s.snippet.length);
+          const sel = window.getSelection();
+          if (sel) {
+            sel.removeAllRanges();
+            sel.addRange(range);
+          }
+          document.dispatchEvent(new Event("selectionchange"));
+          const popOk = await waitCond(
+            () => Boolean(document.querySelector(".selection-comment-popover")),
+            3000
+          );
+          if (!popOk) throw new Error("Selection comment popover did not appear");
+          if (s.clickCommentPill) {
+            const pillBtn = document.querySelector(".selection-comment-popover");
+            if (!pillBtn) throw new Error("Selection comment button missing");
+            pillBtn.click();
+            const composerOk = await waitCond(
+              () => Boolean(document.querySelector(".review-sidebar .composer-textarea")),
+              3000
+            );
+            if (!composerOk) throw new Error("Review composer did not open from selection pill");
+            if (typeof s.draftText === "string") {
+              const ta = document.querySelector(".review-sidebar .composer-textarea");
+              if (ta) {
+                const setter = Object.getOwnPropertyDescriptor(
+                  window.HTMLTextAreaElement.prototype,
+                  "value"
+                )?.set;
+                if (setter) {
+                  setter.call(ta, s.draftText);
+                } else {
+                  ta.value = s.draftText;
+                }
+                ta.dispatchEvent(new Event("input", { bubbles: true }));
+              }
+            }
+          }
+          await new Promise((r) => requestAnimationFrame(r));
+          continue;
+        }
+
         if (s.kind === "scrollContainerTop") {
           const el = document.querySelector(s.selector);
           if (!el) throw new Error("Scroll container not found: " + s.selector);
-          el.scrollTop = s.top;
+          const oy = window.getComputedStyle(el).overflowY;
+          if (oy === "auto" || oy === "scroll") {
+            el.scrollTop = s.top;
+          } else {
+            window.scrollTo(0, s.top);
+          }
           await new Promise((r) => requestAnimationFrame(r));
           continue;
         }
@@ -575,10 +745,16 @@ try {
           if (!ok) throw new Error("Missing container or target: " + s.container + " -> " + s.target);
           const container = document.querySelector(s.container);
           const targetEl = document.querySelector(s.target);
-          const cRect = container.getBoundingClientRect();
           const tRect = targetEl.getBoundingClientRect();
           const desiredOffset = typeof s.offsetTop === "number" ? s.offsetTop : 48;
-          container.scrollTop = Math.max(0, container.scrollTop + (tRect.top - cRect.top) - desiredOffset);
+          const oy = window.getComputedStyle(container).overflowY;
+          if (oy === "auto" || oy === "scroll") {
+            const cRect = container.getBoundingClientRect();
+            container.scrollTop = Math.max(0, container.scrollTop + (tRect.top - cRect.top) - desiredOffset);
+          } else {
+            const headerOffset = (document.querySelector(".repo-topbar")?.getBoundingClientRect().height || 48) + desiredOffset;
+            window.scrollTo(0, Math.max(0, window.scrollY + tRect.top - headerOffset));
+          }
           await new Promise((r) => requestAnimationFrame(r));
           continue;
         }
@@ -618,7 +794,11 @@ try {
         }
         let savedOk = true;
         if (readiness.assertSavedState) {
-          savedOk = Boolean(document.querySelector(".save-badge.saved")) && !document.querySelector(".save-badge.conflict");
+          const wbSaved =
+            document.querySelector('.workbench')?.getAttribute('data-save-state') === 'saved';
+          savedOk =
+            (wbSaved || Boolean(document.querySelector('.save-badge.saved'))) &&
+            !document.querySelector('.save-badge.conflict');
         }
         let embedsOk = true;
         if (readiness.waitForVisibleEmbeds) {
@@ -631,7 +811,14 @@ try {
             iframes.every((f) => {
               const r = f.getBoundingClientRect();
               const srcAttr = f.getAttribute("src") || "";
-              return r.width >= 200 && r.height >= 120 && srcAttr.startsWith("/embed-sandbox/");
+              const wrap = f.closest(".embed-frame-wrapper");
+              const sizingMode = wrap ? wrap.getAttribute("data-sizing-mode") : "auto";
+              return (
+                r.width >= 200 &&
+                r.height >= 120 &&
+                srcAttr.startsWith("/embed-sandbox/") &&
+                sizingMode !== "measuring"
+              );
             });
         }
         if (missing.length === 0 && textareaOk && savedOk && embedsOk) {
@@ -656,9 +843,22 @@ try {
       }
 
       const saveBadge = document.querySelector(".save-badge");
-      const saveBadgeText = saveBadge ? (saveBadge.textContent || "").trim() : null;
-      if (readiness.assertSavedState && !document.querySelector(".save-badge.saved")) {
-        finalMissing.push(".save-badge.saved (observed: " + String(saveBadgeText) + ")");
+      const wbSaveState = document.querySelector(".workbench")?.getAttribute("data-save-state") || null;
+      const saveBadgeText = saveBadge
+        ? (saveBadge.textContent || "").trim()
+        : wbSaveState === "saved"
+          ? "Saved (read-clean)"
+          : null;
+      if (
+        readiness.assertSavedState &&
+        wbSaveState !== "saved" &&
+        !document.querySelector(".save-badge.saved")
+      ) {
+        finalMissing.push(
+          ".workbench[data-save-state=saved] or .save-badge.saved (observed: " +
+            String(saveBadgeText) +
+            ")"
+        );
       }
 
       const visibleEmbeds = Array.from(document.querySelectorAll(".embed-frame-wrapper"))
@@ -682,7 +882,14 @@ try {
       }
 
       const sheetEl = document.querySelector(".sheet-scroll");
+      const wbMode = document.querySelector(".workbench")?.getAttribute("data-workspace-mode");
       const activeModeBtn = document.querySelector(".mode-switch button.active");
+      const activeModeLabel =
+        wbMode === "read"
+          ? "Read"
+          : activeModeBtn
+            ? (activeModeBtn.textContent || "").trim()
+            : wbMode || null;
       const noticeEl = document.querySelector(".notice-banner span");
       const h1El = document.querySelector(".ProseMirror h1");
 
@@ -695,7 +902,7 @@ try {
         observedDom: {
           saveBadgeText,
           noticeBannerText: noticeEl ? (noticeEl.textContent || "").trim() : null,
-          activeMode: activeModeBtn ? (activeModeBtn.textContent || "").trim() : null,
+          activeMode: activeModeLabel,
           h1Text: h1El ? (h1El.textContent || "").trim() : null,
           presentSelectors: Object.keys(checkedSelectors).filter((k) => checkedSelectors[k])
         },
@@ -705,7 +912,11 @@ try {
           devicePixelRatio: window.devicePixelRatio || 1,
           scrollX: Math.round(window.scrollX),
           scrollY: Math.round(window.scrollY),
-          sheetScrollTop: sheetEl ? Math.round(sheetEl.scrollTop) : null
+          sheetScrollTop: sheetEl
+            ? ['auto', 'scroll'].includes(window.getComputedStyle(sheetEl).overflowY)
+              ? Math.round(sheetEl.scrollTop)
+              : Math.round(window.scrollY)
+            : null
         },
         readiness: {
           passed: finalMissing.length === 0,
@@ -734,14 +945,69 @@ try {
         }
       };
     }
-  })()\`);
+  })()`;
+}
+
+export function toBrowserCaptureTelemetry(
+  spec: InPageCaptureSpec,
+  pageResult: InPageCaptureResult,
+  elapsedMs: number
+): BrowserCaptureTelemetry {
+  if (!pageResult.ok) {
+    return {
+      status: 'failed',
+      targetId: spec.targetId,
+      actualAppState: spec.actualAppState,
+      url: pageResult.url || spec.fullUrl,
+      elapsedMs,
+      failedStep: pageResult.stepName || 'apply-steps-and-assert',
+      reason:
+        pageResult.reason ||
+        `Readiness assertions timed out: missing ${(pageResult.missingSelectors || []).join(', ')}`,
+      missingSelectors: pageResult.missingSelectors || [],
+      observedDom: pageResult.observedDom ?? undefined
+    };
+  }
+
+  return {
+    status: 'ready',
+    targetId: spec.targetId,
+    actualAppState: spec.actualAppState,
+    url: pageResult.url || spec.fullUrl,
+    title: pageResult.title,
+    elapsedMs,
+    viewportCss: pageResult.viewportCss,
+    readiness: pageResult.readiness
+  };
+}
+
+/**
+ * Generates a self-contained script for `openbot_browser.run_script` that reuses
+ * the shared step and readiness expressions (`CAIRN_APP_BOOT_CHECK_EXPRESSION` and
+ * `buildInPageStepAndReadinessExpression`).
+ */
+export function buildBrowserRunScript(target: CaptureTargetSpec, baseUrl: string): string {
+  const spec = buildTargetInPageSpec(target, baseUrl);
+  const inPageExpr = buildInPageStepAndReadinessExpression(spec);
+
+  return `const startedAt = Date.now();
+let currentStep = "navigate";
+
+try {
+  await navigate(${JSON.stringify(spec.fullUrl)});
+
+  currentStep = "wait-app-boot";
+  await waitFor(() => ${CAIRN_APP_BOOT_CHECK_EXPRESSION});
+
+  currentStep = "apply-steps-and-assert";
+  const pageResult = await evaluate(${JSON.stringify(inPageExpr)});
 
   if (!pageResult.ok) {
     return {
       status: "failed",
-      targetId: ${JSON.stringify(target.id)},
-      actualAppState: ${JSON.stringify(target.actualAppState)},
-      url: pageResult.url || ${JSON.stringify(fullUrl)},
+      targetId: ${JSON.stringify(spec.targetId)},
+      actualAppState: ${JSON.stringify(spec.actualAppState)},
+      url: pageResult.url || ${JSON.stringify(spec.fullUrl)},
       elapsedMs: Date.now() - startedAt,
       failedStep: pageResult.stepName || currentStep,
       reason: pageResult.reason || ("Readiness assertions timed out: missing " + (pageResult.missingSelectors || []).join(", ")),
@@ -752,8 +1018,8 @@ try {
 
   return {
     status: "ready",
-    targetId: ${JSON.stringify(target.id)},
-    actualAppState: ${JSON.stringify(target.actualAppState)},
+    targetId: ${JSON.stringify(spec.targetId)},
+    actualAppState: ${JSON.stringify(spec.actualAppState)},
     url: pageResult.url,
     title: pageResult.title,
     elapsedMs: Date.now() - startedAt,
@@ -763,9 +1029,9 @@ try {
 } catch (err) {
   return {
     status: "failed",
-    targetId: ${JSON.stringify(target.id)},
-    actualAppState: ${JSON.stringify(target.actualAppState)},
-    url: ${JSON.stringify(fullUrl)},
+    targetId: ${JSON.stringify(spec.targetId)},
+    actualAppState: ${JSON.stringify(spec.actualAppState)},
+    url: ${JSON.stringify(spec.fullUrl)},
     elapsedMs: Date.now() - startedAt,
     failedStep: currentStep,
     reason: err && err.message ? String(err.message) : String(err),
@@ -791,9 +1057,12 @@ export async function createCapturePlan(options: {
   all?: boolean;
   baseUrl?: string;
   skipLiveProbe?: boolean;
+  browserDriver?: CaptureBrowserDriver;
+  resetExistingResults?: boolean;
 }): Promise<{
   packetDir: string;
   packetManifest: CapturePacketManifest;
+  selectedTargets: CaptureTargetSpec[];
   liveReachable: boolean;
   probeError?: string;
 }> {
@@ -846,8 +1115,10 @@ export async function createCapturePlan(options: {
   if (fs.existsSync(existingPacketPath)) {
     try {
       const prev = JSON.parse(fs.readFileSync(existingPacketPath, 'utf8')) as CapturePacketManifest;
-      existingCaptures = prev.captures ?? [];
-      existingFailures = prev.failures ?? [];
+      if (!options.resetExistingResults) {
+        existingCaptures = prev.captures ?? [];
+        existingFailures = prev.failures ?? [];
+      }
       existingRefs = prev.competitorReferences ?? [];
       createdAt = prev.createdAt || nowIso;
     } catch {
@@ -862,7 +1133,7 @@ export async function createCapturePlan(options: {
     updatedAt: nowIso,
     baseUrl,
     manifestPath: path.relative(options.projectRoot, manifestAbs),
-    browserDriver: 'openbot_browser',
+    browserDriver: options.browserDriver ?? 'openbot_browser',
     appGit,
     projectsGit: probe.projectsGit,
     plannedTargets,
@@ -877,6 +1148,7 @@ export async function createCapturePlan(options: {
   return {
     packetDir,
     packetManifest,
+    selectedTargets,
     liveReachable: probe.reachable,
     probeError: probe.error
   };
@@ -943,6 +1215,7 @@ export function recordTargetCapture(options: {
   const entry: RecordedScreenEntry = {
     order,
     targetId: target.id,
+    ...(target.replacesTargetId ? { replacesTargetId: target.replacesTargetId } : {}),
     label: target.label,
     actualAppState: target.actualAppState,
     honestStateNote: target.honestStateNote,
@@ -1055,14 +1328,15 @@ export function importCompetitorPng(options: {
     throw new Error('import-reference requires non-empty --product, --screen, --task, and --source');
   }
 
-  const capturedDate = (options.date ?? new Date().toISOString().slice(0, 10)).trim();
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(capturedDate)) {
+  const capturedDate = options.date?.trim() || null;
+  if (capturedDate !== null && !/^\d{4}-\d{2}-\d{2}$/.test(capturedDate)) {
     throw new Error(`Invalid --date "${capturedDate}"; expected YYYY-MM-DD`);
   }
 
   const pngInfo = inspectPngFile(resolvedSrc);
-  const declaredViewport = (options.viewport ?? `${pngInfo.width}x${pngInfo.height}`).trim();
-  const id = `${capturedDate}-${slugify(product)}-${slugify(screen)}`;
+  // Pixel dimensions alone cannot establish the original CSS viewport or capture date.
+  const declaredViewport = options.viewport?.trim() || null;
+  const id = `${capturedDate ?? 'date-unknown'}-${slugify(product)}-${slugify(screen)}`;
 
   const competitorsDir = path.join(options.projectRoot, 'captures', 'competitors');
   ensureSharedDir(competitorsDir);
@@ -1218,7 +1492,11 @@ export function renderPacketSummaryMarkdown(packet: CapturePacketManifest): stri
   lines.push('');
   lines.push(`- **Updated:** \`${packet.updatedAt}\``);
   lines.push(`- **Base URL:** \`${packet.baseUrl}\``);
-  lines.push(`- **Browser Driver:** \`${packet.browserDriver}\` (OpenBot MCP embedded browser)`);
+  const driverLabel =
+    packet.browserDriver === 'playwright-chromium'
+      ? 'local headless Playwright Chromium'
+      : 'OpenBot MCP embedded browser';
+  lines.push(`- **Browser Driver:** \`${packet.browserDriver}\` (${driverLabel})`);
   if (packet.appGit) {
     lines.push(
       `- **App Revision:** \`${packet.appGit.sha}\` on \`${packet.appGit.branch}\` (${packet.appGit.isClean ? 'clean' : `${packet.appGit.dirtyFiles.length} uncommitted path(s)`})`
@@ -1252,7 +1530,8 @@ export function renderPacketSummaryMarkdown(packet: CapturePacketManifest): stri
     lines.push('### Honest State Notes');
     lines.push('');
     for (const c of packet.captures) {
-      lines.push(`- **\`${c.targetId}\` (${c.label}):** ${c.honestStateNote}`);
+      const mapping = c.replacesTargetId ? ` [replaces \`${c.replacesTargetId}\`]` : '';
+      lines.push(`- **\`${c.targetId}\`${mapping} (${c.label}):** ${c.honestStateNote}`);
     }
   }
   lines.push('');
@@ -1273,7 +1552,7 @@ export function renderPacketSummaryMarkdown(packet: CapturePacketManifest): stri
     lines.push('| :--- | :--- | :--- | :--- | :--- | :--- | :--- |');
     for (const r of packet.competitorReferences) {
       lines.push(
-        `| ${r.product} | ${r.screen} | ${r.task} | \`${r.pngPixels.width}x${r.pngPixels.height}\` | \`${r.capturedDate}\` | ${r.source} | \`${r.file.relativePath}\` |`
+        `| ${r.product} | ${r.screen} | ${r.task} | \`${r.pngPixels.width}x${r.pngPixels.height}\` | \`${r.capturedDate ?? 'unknown'}\` | ${r.source} | \`${r.file.relativePath}\` |`
       );
     }
     lines.push('');

@@ -15,6 +15,7 @@ import {
   validateCapturePacket,
   writeSharedFile
 } from './captureLib.js';
+import { runPlaywrightCapture } from './captureRunner.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -69,6 +70,7 @@ function printUsage(): void {
 
 Usage:
   npm run capture -- list [--manifest config/capture-manifest.json]
+  npm run capture -- run [--packet <id>] [--targets id1,id2 | --all] [--base-url http://127.0.0.1:8088] [--manifest config/capture-manifest.json]
   npm run capture -- plan [--packet <id>] [--targets id1,id2 | --all] [--base-url http://127.0.0.1:8088]
   npm run capture -- record --packet <id> --target <target-id> --image <saved.png> [--telemetry <json-or-file>]
   npm run capture -- record-failure --packet <id> --target <target-id> --reason <message> [--telemetry <json-or-file>]
@@ -182,7 +184,56 @@ async function main(): Promise<void> {
     return;
   }
 
-  if (subcommand === 'plan' || subcommand === 'run') {
+  if (subcommand === 'run') {
+    const rawTargets = getStringFlag(flags, 'targets');
+    const targetIds = rawTargets
+      ? rawTargets
+          .split(',')
+          .map((s) => s.trim())
+          .filter(Boolean)
+      : undefined;
+
+    const runResult = await runPlaywrightCapture({
+      projectRoot: PROJECT_ROOT,
+      manifestPath: manifestRel,
+      packetId: getStringFlag(flags, 'packet'),
+      targetIds,
+      all: Boolean(flags.all),
+      baseUrl: getStringFlag(flags, 'base-url')
+    });
+
+    const summaryPayload = {
+      status: runResult.ok ? 'complete' : 'failed',
+      packetId: runResult.packetId,
+      packetDir: runResult.packetDir,
+      baseUrl: runResult.baseUrl,
+      browserDriver: 'playwright-chromium',
+      browserVersion: runResult.browserVersion,
+      captured: runResult.captured.map((c) => ({
+        order: c.order,
+        targetId: c.targetId,
+        actualAppState: c.actualAppState,
+        file: path.join(runResult.packetDir, c.file.relativePath),
+        relativePath: c.file.relativePath,
+        pixels: `${c.viewport.pngPixels.width}x${c.viewport.pngPixels.height}`,
+        elapsedMs: c.elapsedMs,
+        sha256: c.file.sha256
+      })),
+      failures: runResult.failures,
+      validation: runResult.validation,
+      ...(runResult.error ? { error: runResult.error } : {})
+    };
+
+    if (!runResult.ok) {
+      console.error(JSON.stringify(summaryPayload, null, 2));
+      process.exit(1);
+    }
+
+    console.log(JSON.stringify(summaryPayload, null, 2));
+    return;
+  }
+
+  if (subcommand === 'plan') {
     const rawTargets = getStringFlag(flags, 'targets');
     const targetIds = rawTargets
       ? rawTargets
@@ -226,16 +277,6 @@ async function main(): Promise<void> {
         2
       )
     );
-
-    if (subcommand === 'run') {
-      console.error(
-        `\n[capture] Standalone browser execution halted by policy: OpenBot browser rules forbid installing or invoking a separate Playwright/Puppeteer/Chromium browser without explicit user authorization.\n` +
-          `Packet plan and per-target openbot_browser scripts are ready at: ${result.packetDir}\n` +
-          `Execute each target with OpenBot's embedded browser (openbot_browser.set_environment -> openbot_browser.run_script -> openbot_browser.screenshot save:true), then finalize via:\n` +
-          `  npm run capture -- record --packet ${result.packetManifest.packetId} --target <id> --image <saved.png> --telemetry '<json>'`
-      );
-      process.exit(2);
-    }
     return;
   }
 

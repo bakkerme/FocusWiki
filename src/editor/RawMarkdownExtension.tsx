@@ -5,8 +5,10 @@ import {
   type NodeViewProps
 } from '@tiptap/react';
 import { useState } from 'react';
+import { useEditorBridge } from './EmbedContext';
 
 function RawBlockView({ node, updateAttributes }: NodeViewProps) {
+  const { isEditing } = useEditorBridge();
   const kind = String(node.attrs.kind ?? 'markdown');
   const raw = String(node.attrs.raw ?? '');
   const [expanded, setExpanded] = useState<boolean>(false);
@@ -14,13 +16,13 @@ function RawBlockView({ node, updateAttributes }: NodeViewProps) {
   return (
     <NodeViewWrapper className="preserved-raw-block" contentEditable={false}>
       <div className="preserved-raw-header">
-        <span>Preserved Markdown construct ({kind})</span>
+        <span>Preserved Markdown ({kind})</span>
         <button
           type="button"
           className="btn btn-compact"
           onClick={() => setExpanded((v) => !v)}
         >
-          {expanded ? 'Collapse raw source' : 'Inspect / edit raw'}
+          {expanded ? 'Collapse' : isEditing ? 'Inspect / edit raw' : 'Inspect raw'}
         </button>
       </div>
       {expanded ? (
@@ -28,7 +30,12 @@ function RawBlockView({ node, updateAttributes }: NodeViewProps) {
           className="preserved-raw-textarea"
           rows={Math.min(10, Math.max(3, raw.split('\n').length + 1))}
           value={raw}
-          onChange={(e) => updateAttributes({ raw: e.target.value })}
+          readOnly={!isEditing}
+          onChange={(e) => {
+            if (isEditing) {
+              updateAttributes({ raw: e.target.value });
+            }
+          }}
         />
       ) : (
         <div

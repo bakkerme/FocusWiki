@@ -109,13 +109,14 @@ Comments are stored in `<doc-without-.md>.comments.json` alongside each `.md` fi
 | `lucide-react` | Minimal UI iconography | ISC |
 | `@fontsource/literata`, `@fontsource/plus-jakarta-sans`, `@fontsource/jetbrains-mono` | Self-hosted WOFF2 typography | OFL-1.1 |
 | `typescript`, `vite`, `vitest`, `supertest`, `tsx` | Build, typecheck, and automated test toolchain | Apache-2.0 / MIT |
+| `playwright` | Local headless Chromium runner for repeatable review packet screenshots | Apache-2.0 |
 
 ## Screenshot Capture & Visual Review Packets
 
-See [`docs/SCREENSHOTS.md`](docs/SCREENSHOTS.md) for the repeatable `openbot_browser` screenshot pipeline, named UI states (`config/capture-manifest.json`), review packet validation, and competitor PNG import:
+See [`docs/SCREENSHOTS.md`](docs/SCREENSHOTS.md) for the unattended local Playwright screenshot runner (`npm run capture -- run ...`), optional `openbot_browser` interactive inspection (`plan` + `record`), named UI states (`config/capture-manifest.json`), packet validation, and competitor PNG import:
 
 ```bash
 npm run capture -- list
-npm run capture -- plan --packet review-run-01 --all
-npm run capture -- validate --packet baseline-2026-11-15
+npm run capture -- run --packet playwright-2026-11-15 --all --base-url http://100.117.116.91:8088
+npm run capture -- validate --packet playwright-2026-11-15
 ```

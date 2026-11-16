@@ -1,11 +1,15 @@
-import { useState } from 'react';
-import { Search } from 'lucide-react';
+import { useRef, useState, type RefObject } from 'react';
+import { Blocks, FileText, Plus, Search, X } from 'lucide-react';
 import type { ProjectSummary, SearchResultItem } from '../../shared/types';
+import { useModalOverlayFocus } from '../utils/overlayModal';
 
 interface Props {
   projects: ProjectSummary[];
   activeProject: ProjectSummary | null;
   activeDocPath: string;
+  isEditing: boolean;
+  isOverlay: boolean;
+  restoreFocusRef?: RefObject<HTMLElement | null>;
   searchQuery: string;
   searchResults: SearchResultItem[];
   onChangeSearch: (q: string) => void;
@@ -13,6 +17,7 @@ interface Props {
   onSelectDoc: (projectId: string, docPath: string) => void;
   onCreateDoc: (relPath: string, title: string) => Promise<void>;
   onOpenEmbedModal: () => void;
+  onClose: () => void;
 }
 
 export function SidebarNav(props: Props) {
@@ -20,19 +25,32 @@ export function SidebarNav(props: Props) {
     projects,
     activeProject,
     activeDocPath,
+    isEditing,
+    isOverlay,
+    restoreFocusRef,
     searchQuery,
     searchResults,
     onChangeSearch,
     onSelectProject,
     onSelectDoc,
     onCreateDoc,
-    onOpenEmbedModal
+    onOpenEmbedModal,
+    onClose
   } = props;
 
+  const navRef = useRef<HTMLElement | null>(null);
   const [creatingDoc, setCreatingDoc] = useState<boolean>(false);
   const [newDocTitle, setNewDocTitle] = useState<string>('');
   const [newDocPath, setNewDocPath] = useState<string>('docs/');
   const [createErr, setCreateErr] = useState<string | null>(null);
+
+  useModalOverlayFocus({
+    active: isOverlay,
+    containerRef: navRef,
+    restoreFocusRef,
+    initialFocusSelector: '#globalSearchInput',
+    onDismiss: onClose
+  });
 
   async function handleCreateSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -43,57 +61,79 @@ export function SidebarNav(props: Props) {
       setNewDocTitle('');
       setNewDocPath('docs/');
       setCreatingDoc(false);
+      if (isOverlay) {
+        onClose();
+      }
     } catch (err) {
       setCreateErr(err instanceof Error ? err.message : 'Could not create file');
     }
   }
 
   return (
-    <aside className="nav-sidebar" aria-label="Projects and documents">
+    <aside
+      id="cairn-nav-panel"
+      ref={navRef}
+      className={`nav-sidebar ${isOverlay ? 'is-overlay is-overlay-open is-mobile-open' : 'is-docked'}`}
+      role={isOverlay ? 'dialog' : undefined}
+      aria-modal={isOverlay ? 'true' : undefined}
+      aria-label="Projects and documents"
+      tabIndex={-1}
+    >
       <div className="brand-row">
-        <h1 className="brand-name">Cairn</h1>
-        <span className="brand-sub">Local repo docs</span>
+        <div className="brand-identity">
+          <span className="brand-name">Cairn</span>
+          <span className="brand-sub">Docs</span>
+        </div>
+        <button
+          type="button"
+          className="icon-btn panel-close-btn mobile-drawer-close"
+          onClick={onClose}
+          aria-label="Close navigation"
+          title="Close navigation"
+        >
+          <X size={16} aria-hidden="true" />
+        </button>
       </div>
 
       <div className="project-select-box">
-        <label htmlFor="projectSelect">Active repository</label>
+        <label htmlFor="projectSelect">Repository</label>
         <select
           id="projectSelect"
           className="project-select"
           value={activeProject?.id ?? ''}
-          onChange={(e) => onSelectProject(e.target.value)}
+          title={activeProject?.description ?? 'Select repository'}
+          onChange={(e) => {
+            onSelectProject(e.target.value);
+          }}
         >
           {projects.map((proj) => (
             <option key={proj.id} value={proj.id}>
-              {proj.name} ({proj.git.branch})
+              {proj.name}
             </option>
           ))}
         </select>
-        {activeProject && <p className="project-desc">{activeProject.description}</p>}
       </div>
 
-      <div>
-        <label htmlFor="globalSearchInput" className="sidebar-heading">
+      <div className="sidebar-search-section">
+        <label htmlFor="globalSearchInput" className="sr-only">
           Search across projects
         </label>
         <div className="search-box">
-          <Search size={14} className="search-icon" />
+          <Search size={14} className="search-icon" aria-hidden="true" />
           <input
             id="globalSearchInput"
             type="search"
             className="search-input"
-            placeholder="Find text, IP, rule, or embed…"
+            placeholder="Search across projects…"
             value={searchQuery}
             onChange={(e) => onChangeSearch(e.target.value)}
           />
         </div>
 
         {searchQuery.trim() !== '' && (
-          <div className="search-results-panel" style={{ marginTop: 6 }}>
+          <div className="search-results-panel">
             {searchResults.length === 0 ? (
-              <div style={{ fontSize: 12, color: 'var(--ink-secondary)', padding: 6 }}>
-                No matching lines across registered repositories.
-              </div>
+              <div className="search-empty">No matching lines across repositories.</div>
             ) : (
               searchResults.map((hit, idx) => (
                 <button
@@ -103,6 +143,9 @@ export function SidebarNav(props: Props) {
                   onClick={() => {
                     onSelectDoc(hit.projectId, hit.path);
                     onChangeSearch('');
+                    if (isOverlay) {
+                      onClose();
+                    }
                   }}
                 >
                   <div className="search-hit-title">{hit.title}</div>
@@ -118,44 +161,32 @@ export function SidebarNav(props: Props) {
       </div>
 
       {activeProject && (
-        <div>
-          <div
-            style={{
-              display: 'flex',
-              justifyContent: 'space-between',
-              alignItems: 'center',
-              marginBottom: 6
-            }}
-          >
-            <span className="sidebar-heading" style={{ margin: 0 }}>
-              Documents ({activeProject.docs.length})
-            </span>
+        <nav className="sidebar-docs-section" aria-label={`${activeProject.name} documents`}>
+          <div className="sidebar-section-header">
+            <span className="sidebar-heading">Pages</span>
             <button
               type="button"
-              className="btn btn-compact"
+              className="btn btn-compact btn-quiet"
               onClick={() => setCreatingDoc((v) => !v)}
+              title="Create a new Markdown page in this repository"
             >
-              {creatingDoc ? 'Cancel' : 'New doc'}
+              {creatingDoc ? (
+                <span>Cancel</span>
+              ) : (
+                <>
+                  <Plus size={13} aria-hidden="true" />
+                  <span>New</span>
+                </>
+              )}
             </button>
           </div>
 
           {creatingDoc && (
-            <form
-              onSubmit={(e) => void handleCreateSubmit(e)}
-              style={{
-                background: 'var(--surface-sheet)',
-                border: '1px solid var(--line-border)',
-                borderRadius: 5,
-                padding: 10,
-                marginBottom: 8,
-                display: 'flex',
-                flexDirection: 'column',
-                gap: 6
-              }}
-            >
+            <form onSubmit={(e) => void handleCreateSubmit(e)} className="new-doc-form">
               <input
                 type="text"
-                placeholder="Document title"
+                placeholder="Page title"
+                className="field-input"
                 value={newDocTitle}
                 onChange={(e) => {
                   const t = e.target.value;
@@ -166,26 +197,17 @@ export function SidebarNav(props: Props) {
                     .replace(/^-|-$/g, '');
                   if (slug) setNewDocPath(`docs/${slug}.md`);
                 }}
-                style={{ padding: '5px 8px', border: '1px solid var(--line-border)', borderRadius: 4 }}
               />
               <input
                 type="text"
                 placeholder="docs/example.md"
+                className="field-input field-code"
                 value={newDocPath}
                 onChange={(e) => setNewDocPath(e.target.value)}
-                style={{
-                  padding: '5px 8px',
-                  fontFamily: 'var(--font-code)',
-                  fontSize: 12,
-                  border: '1px solid var(--line-border)',
-                  borderRadius: 4
-                }}
               />
-              {createErr && (
-                <div style={{ fontSize: 11.5, color: 'var(--conflict-garnet)' }}>{createErr}</div>
-              )}
+              {createErr && <div className="form-error-text">{createErr}</div>}
               <button type="submit" className="btn btn-compact btn-primary">
-                Create Markdown file
+                Create page
               </button>
             </form>
           )}
@@ -198,14 +220,22 @@ export function SidebarNav(props: Props) {
                   key={doc.path}
                   type="button"
                   className={`doc-item ${isActive ? 'active' : ''}`}
-                  onClick={() => onSelectDoc(activeProject.id, doc.path)}
+                  aria-current={isActive ? 'page' : undefined}
+                  title={`${doc.title} — ${doc.path}`}
+                  onClick={() => {
+                    onSelectDoc(activeProject.id, doc.path);
+                    if (isOverlay) {
+                      onClose();
+                    }
+                  }}
                 >
-                  <div style={{ minWidth: 0 }}>
-                    <div className="doc-item-title">{doc.title}</div>
-                    <div className="doc-item-path">{doc.path}</div>
-                  </div>
+                  <FileText size={14} className="doc-item-icon" aria-hidden="true" />
+                  <span className="doc-item-title">{doc.title}</span>
                   {doc.openComments > 0 && (
-                    <span className="comment-count-pill" title={`${doc.openComments} open threads`}>
+                    <span
+                      className="comment-count-pill"
+                      title={`${doc.openComments} open ${doc.openComments === 1 ? 'thread' : 'threads'}`}
+                    >
                       {doc.openComments}
                     </span>
                   )}
@@ -213,38 +243,59 @@ export function SidebarNav(props: Props) {
               );
             })}
           </div>
-        </div>
+        </nav>
       )}
 
-      {activeProject && (
-        <div>
-          <div
-            style={{
-              display: 'flex',
-              justifyContent: 'space-between',
-              alignItems: 'center',
-              marginBottom: 6
-            }}
-          >
-            <span className="sidebar-heading" style={{ margin: 0 }}>
-              Project embeds ({activeProject.embeds.length})
-            </span>
-            <button type="button" className="btn btn-compact" onClick={onOpenEmbedModal}>
-              Add embed
-            </button>
-          </div>
-          <div className="embed-inventory-list">
-            {activeProject.embeds.map((emb) => (
-              <div key={emb.src} className="embed-inventory-item">
-                <span style={{ fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                  {emb.name}
-                </span>
-                <span style={{ fontFamily: 'var(--font-code)', fontSize: 11, color: 'var(--ink-secondary)' }}>
-                  {emb.files.length} {emb.files.length === 1 ? 'file' : 'files'}
-                </span>
+      {activeProject && activeProject.embeds.length > 0 && (
+        <div className="sidebar-embeds-footer">
+          {isEditing ? (
+            <div>
+              <div className="sidebar-section-header">
+                <span className="sidebar-heading">Project embeds</span>
+                <button
+                  type="button"
+                  className="btn btn-compact btn-quiet"
+                  onClick={() => {
+                    if (isOverlay) {
+                      onClose();
+                    }
+                    onOpenEmbedModal();
+                  }}
+                >
+                  <Blocks size={12} aria-hidden="true" />
+                  <span>Add embed</span>
+                </button>
               </div>
-            ))}
-          </div>
+              <div className="embed-inventory-list">
+                {activeProject.embeds.map((emb) => (
+                  <div key={emb.src} className="embed-inventory-item" title={emb.src}>
+                    <span className="embed-inv-name">{emb.name}</span>
+                    <span className="embed-inv-meta">
+                      {emb.files.length} {emb.files.length === 1 ? 'file' : 'files'}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : (
+            <details className="sidebar-embeds-disclosure">
+              <summary>
+                <Blocks size={13} aria-hidden="true" />
+                <span>
+                  {activeProject.embeds.length} project{' '}
+                  {activeProject.embeds.length === 1 ? 'embed' : 'embeds'}
+                </span>
+              </summary>
+              <div className="embed-inventory-list" style={{ marginTop: 6 }}>
+                {activeProject.embeds.map((emb) => (
+                  <div key={emb.src} className="embed-inventory-item" title={emb.src}>
+                    <span className="embed-inv-name">{emb.name}</span>
+                    <span className="embed-inv-meta">{emb.directory}</span>
+                  </div>
+                ))}
+              </div>
+            </details>
+          )}
         </div>
       )}
     </aside>
