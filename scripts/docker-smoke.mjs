@@ -79,8 +79,11 @@ const helpers = `
 `;
 
 try {
-  const security = JSON.parse(docker('info', '--format', '{{json .SecurityOptions}}'));
-  assert.ok(security.includes('name=rootless'), 'Use the existing rootless daemon');
+  // GitHub-hosted runners supply a Docker daemon on a disposable VM.
+  if (process.env.GITHUB_ACTIONS !== 'true' || process.env.RUNNER_ENVIRONMENT !== 'github-hosted') {
+    const security = JSON.parse(docker('info', '--format', '{{json .SecurityOptions}}'));
+    assert.ok(security.includes('name=rootless'), 'Use the existing rootless daemon');
+  }
   docker('volume', 'create', volume);
   await start();
   console.log('PASS: fresh image seeds both Git repositories and becomes healthy');

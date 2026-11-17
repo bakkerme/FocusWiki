@@ -83,6 +83,10 @@ docker compose down
 
 The smoke test requires the rootless daemon and removes only its own temporary container and named volume. It does not modify `sample-repos`. `docker compose down` retains the bind-mounted project files. The Compose service runs detached and restarts with the existing daemon; no separate host Node server is needed. See `REVIEW.md` for the latest Docker verification and browser-test limits.
 
+## Docker CI/CD
+
+GitHub Actions tests and builds the Docker image and publishes successful `main` builds to Google Artifact Registry at `gcr.io`. See [Docker CI/CD setup](docs/DOCKER-CICD.md) for the registry and GitHub configuration.
+
 ## Embedding Project-Authored Components
 
 Place any self-contained HTML/JS/CSS/SVG component inside `<repo>/embeds/<widget-name>/index.html` and reference it in any `.md` file using a fenced `embed` block:
