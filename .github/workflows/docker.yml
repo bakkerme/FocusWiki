@@ -1,0 +1,90 @@
+name: Docker CI/CD
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    name: Test and build image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - run: npm run typecheck
+      - run: npm run build
+      - run: npm test
+      - name: Build and smoke-test Docker image
+        run: |
+          docker build --tag "focuswiki:${GITHUB_SHA}" .
+          node scripts/docker-smoke.mjs "focuswiki:${GITHUB_SHA}"
+      - name: Archive tested image
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        run: docker save "focuswiki:${GITHUB_SHA}" | gzip -1 > "$RUNNER_TEMP/focuswiki.tar.gz"
+      - name: Upload tested image
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: focuswiki-image
+          path: ${{ runner.temp }}/focuswiki.tar.gz
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+          overwrite: true
+
+  publish:
+    name: Publish image to GCR
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      id-token: write
+    env:
+      GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+    steps:
+      - name: Check registry configuration
+        run: |
+          : "${GCP_PROJECT_ID:?Set the GCP_PROJECT_ID GitHub Actions variable}"
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: focuswiki-image
+          path: ${{ runner.temp }}
+      - name: Load tested image
+        run: docker load --input "$RUNNER_TEMP/focuswiki.tar.gz"
+      - name: Authenticate to Google Cloud
+        id: google-auth
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          project_id: ${{ vars.GCP_PROJECT_ID }}
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
+          token_format: access_token
+          create_credentials_file: false
+          export_environment_variables: false
+      - name: Push tested image
+        env:
+          GCP_ACCESS_TOKEN: ${{ steps.google-auth.outputs.access_token }}
+        run: |
+          printf '%s' "$GCP_ACCESS_TOKEN" | docker login --username oauth2accesstoken --password-stdin gcr.io
+          image="gcr.io/${GCP_PROJECT_ID}/focuswiki:${GITHUB_SHA}"
+          docker tag "focuswiki:${GITHUB_SHA}" "$image"
+          docker push "$image"
+          printf 'Published `%s`\n' "$image" >> "$GITHUB_STEP_SUMMARY"
