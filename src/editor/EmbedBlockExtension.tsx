@@ -227,6 +227,7 @@ function EmbedNodeView(props: NodeViewProps) {
   function moveBlock(direction: -1 | 1) {
     if (typeof getPos !== 'function') return;
     const pos = getPos();
+    if (typeof pos !== 'number') return;
     const { doc, tr } = editor.state;
     const $pos = doc.resolve(pos);
     const index = $pos.index(0);

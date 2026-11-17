@@ -219,3 +219,12 @@ export interface SearchResultItem {
   line: number;
   snippet: string;
 }
+
+/** Optional client request fields; omitted commit paths retain whole-checkout behavior. */
+export interface GitCommitSelection {
+  paths?: string[];
+}
+
+export interface CloneOptions {
+  shallow?: boolean;
+}

@@ -13,6 +13,7 @@ import {
   X
 } from 'lucide-react';
 import type {
+  CloneOptions,
   ProjectSummary,
   RemoteInspectResult,
   RepoInspectionResult
@@ -49,6 +50,7 @@ export function ImportRepoModal(props: Props) {
   const [submitting, setSubmitting] = useState<boolean>(false);
 
   // Clone tab state
+  const [shallow, setShallow] = useState(false);
   const [cloneUrl, setCloneUrl] = useState<string>('');
   const [cloneName, setCloneName] = useState<string>('');
   const [cloneDefaultDoc, setCloneDefaultDoc] = useState<string>('');
@@ -155,8 +157,9 @@ export function ImportRepoModal(props: Props) {
     setAuthPromptHost(null);
     setSubmitting(true);
     try {
-      const payload: Record<string, unknown> = {
+      const payload: Record<string, unknown> & CloneOptions = {
         mode: 'clone',
+        shallow,
         url: cloneUrl.trim()
       };
       if (cloneName.trim()) payload.name = cloneName.trim();
@@ -590,6 +593,11 @@ export function ImportRepoModal(props: Props) {
                 </div>
               )}
             </div>
+
+            <label className="import-save-token-check">
+              <input type="checkbox" checked={shallow} onChange={(e) => setShallow(e.target.checked)} disabled={submitting} />
+              <span>Shallow clone (latest commit only — faster for large repos)</span>
+            </label>
 
             <div className="import-two-col">
               <label className="import-field">
