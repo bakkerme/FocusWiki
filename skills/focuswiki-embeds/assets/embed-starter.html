@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="color-scheme" content="light dark" />
+  <title>Interactive Documentation Widget</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #ffffff;
+      --surface: #ffffff;
+      --panel: #fafafa;
+      --ink: #171717;
+      --muted: #525252;
+      --line: #e5e7eb;
+      --accent: #1d4ed8;
+      --accent-soft: #eff6ff;
+      --warn: #b91c1c;
+      --warn-soft: #fef2f2;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #141417;
+        --surface: #1b1b20;
+        --panel: #1a1a1f;
+        --ink: #f4f4f5;
+        --muted: #a1a1aa;
+        --line: #27272d;
+        --accent: #60a5fa;
+        --accent-soft: rgba(59, 130, 246, 0.16);
+        --warn: #f87171;
+        --warn-soft: rgba(239, 68, 68, 0.16);
+      }
+    }
+    * { box-sizing: border-box; }
+    html { height: auto; }
+    body {
+      margin: 0;
+      padding: 14px 16px;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      background: var(--bg);
+      color: var(--ink);
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: 1fr 1.2fr;
+      gap: 14px;
+      align-items: start;
+    }
+    @media (max-width: 640px) {
+      .grid { grid-template-columns: 1fr; }
+    }
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 12px 14px;
+    }
+    .readout {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 12px 14px;
+    }
+    label {
+      display: flex;
+      justify-content: space-between;
+      font-size: 12.5px;
+      font-weight: 600;
+      margin-bottom: 6px;
+    }
+    input[type="range"] {
+      width: 100%;
+      accent-color: var(--accent);
+    }
+    .value-big {
+      font-size: 20px;
+      font-weight: 700;
+      margin: 4px 0 6px;
+    }
+    .formula {
+      font-family: "JetBrains Mono", ui-monospace, monospace;
+      font-size: 12px;
+      color: var(--muted);
+    }
+  </style>
+</head>
+<body>
+  <div class="grid">
+    <div class="card">
+      <label for="loadInput">
+        <span>Input Load</span>
+        <span id="loadLabel">50%</span>
+      </label>
+      <input id="loadInput" type="range" min="0" max="100" step="5" value="50" />
+    </div>
+    <div class="readout">
+      <div style="font-size: 12px; font-weight: 600; color: var(--muted);">Computed Output</div>
+      <div class="value-big" id="resultValue">150 ms</div>
+      <div class="formula" id="formulaText">latency = 50 + (50 * 2)</div>
+    </div>
+  </div>
+
+  <script>
+    let instanceId = new URLSearchParams(window.location.search).get('instance') || undefined;
+    let baseLatencyMs = 50;
+
+    const loadInput = document.getElementById('loadInput');
+    const loadLabel = document.getElementById('loadLabel');
+    const resultValue = document.getElementById('resultValue');
+    const formulaText = document.getElementById('formulaText');
+
+    function reportHeight(type) {
+      const height = Math.ceil(
+        Math.max(document.body.scrollHeight, document.documentElement.scrollHeight)
+      );
+      window.parent.postMessage({ type, instanceId, height }, '*');
+    }
+
+    function render() {
+      const load = Number(loadInput.value);
+      const latency = baseLatencyMs + load * 2;
+      loadLabel.textContent = `${load}%`;
+      resultValue.textContent = `${latency} ms`;
+      formulaText.textContent = `latency = ${baseLatencyMs} + (${load} * 2)`;
+
+      window.parent.postMessage(
+        {
+          type: 'focus:embed:telemetry',
+          instanceId,
+          summary: `Load ${load}% · Latency ${latency} ms`
+        },
+        '*'
+      );
+      reportHeight('focus:embed:resize');
+    }
+
+    loadInput.addEventListener('input', render);
+
+    window.addEventListener('message', (event) => {
+      const data = event.data;
+      if (!data || typeof data !== 'object') return;
+      if (data.type === 'focus:embed:init' || data.type === 'cairn:embed:init') {
+        if (typeof data.instanceId === 'string') {
+          instanceId = data.instanceId;
+        }
+        const p = data.props || {};
+        if (typeof p.defaultLoad === 'number') {
+          loadInput.value = String(p.defaultLoad);
+        }
+        if (typeof p.baseLatencyMs === 'number') {
+          baseLatencyMs = p.baseLatencyMs;
+        }
+        render();
+      }
+    });
+
+    if (typeof ResizeObserver !== 'undefined') {
+      new ResizeObserver(() => reportHeight('focus:embed:resize')).observe(document.body);
+    }
+    window.addEventListener('resize', () => reportHeight('focus:embed:resize'));
+
+    render();
+    reportHeight('focus:embed:ready');
+  </script>
+</body>
+</html>

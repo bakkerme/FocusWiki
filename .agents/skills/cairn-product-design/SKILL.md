@@ -1,6 +1,8 @@
 ---
 name: cairn-product-design
 description: Design and review Cairn's documentation workspace, reading preferences, editing and feedback flows. Use for Cairn UI changes, not unrelated sites or branding work.
+metadata:
+  internal: true
 ---
 
 # Cairn product design

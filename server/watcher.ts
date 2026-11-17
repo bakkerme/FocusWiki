@@ -11,6 +11,8 @@ export interface WorkspaceChangeEvent {
   at: string;
 }
 
+const IGNORED_AGENT_DOC_NAMES = new Set(['AGENTS.md', 'CLAUDE.md', 'GEMINI.md']);
+
 export class ProjectWatcherHub {
   private clients = new Set<Response>();
   private watchers: FSWatcher[] = [];
@@ -34,10 +36,19 @@ export class ProjectWatcherHub {
       const emitFor = (absPath: string) => {
         const relPath = path.relative(project.rootPath, absPath).split(path.sep).join('/');
         if (!relPath || relPath.startsWith('..')) return;
+        const parts = relPath.split('/');
+        const baseName = parts[parts.length - 1] ?? '';
+        const inHiddenDir = parts.slice(0, -1).some((p) => p.startsWith('.'));
         let kind: WorkspaceChangeEvent['kind'] = 'other';
-        if (relPath.endsWith('.comments.json')) {
+        if (relPath.endsWith('.comments.json') && !inHiddenDir) {
           kind = 'comments';
-        } else if (relPath.endsWith('.md') && !relPath.startsWith('.cairn/conflicts/')) {
+        } else if (
+          relPath.endsWith('.md') &&
+          !inHiddenDir &&
+          !baseName.startsWith('.') &&
+          !IGNORED_AGENT_DOC_NAMES.has(baseName) &&
+          !relPath.startsWith('embeds/')
+        ) {
           kind = 'doc';
         } else if (relPath.startsWith('embeds/')) {
           kind = 'embed';

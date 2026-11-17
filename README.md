@@ -110,6 +110,32 @@ Comments are stored in `<doc-without-.md>.comments.json` alongside each `.md` fi
 3. **Resolve or reopen thread:**
    `POST /api/projects/:projectId/comments/:threadId/status` with `{"path":"...","status":"resolved","actor":"Audit Bot","role":"bot","note":"Verified"}`.
 
+## Agent Skills for Documentation Repositories (`skills/`)
+
+FocusWiki pages are standard GitHub-Flavored Markdown with attachable self-contained HTML artefacts (`embeds/<name>/index.html`) and sibling `.comments.json` review sidecars. Three minimal [`agentskills.io`](https://agentskills.io)-compatible skills live under [`skills/`](skills/) so coding agents (Claude Code, Codex, Cursor, Gemini CLI, Antigravity, GitHub Copilot, etc.) can work with any FocusWiki-backed repository:
+
+- **[`focuswiki-docs`](skills/focuswiki-docs/SKILL.md)** — Standard GFM pages plus attaching interactive HTML artefacts via ` ```embed ` fences (`src`, `title`, `height`, single-line JSON `props`) and running the zero-dependency offline validator (`scripts/validate-wiki.mjs`).
+- **[`focuswiki-embeds`](skills/focuswiki-embeds/SKILL.md)** — Authoring self-contained `embeds/<name>/index.html` artefacts inside FocusWiki's `<iframe sandbox="allow-scripts">` + strict CSP (no storage/cookies or external CDNs, light/dark CSS tokens, and optional `focus:embed:*` auto-sizing), starting from `assets/embed-starter.html`.
+- **[`focuswiki-comments`](skills/focuswiki-comments/SKILL.md)** — Managing inline review threads with `"role": "bot"`:
+  - **Inside a local checkout / branch / worktree (default):** Edit `<doc-without-.md>.comments.json` directly on disk—no server URL required, and changes stay on the active Git branch.
+  - **Against a live FocusWiki server over HTTP:** Resolve `<origin>` and `:projectId` from a pasted FocusWiki browser URL (`http://<host>:<port>/?project=<projectId>&doc=<docPath>`), from `FOCUSWIKI_URL` / `.focuswiki/config.json`, or by matching `rootPath` / `git.remoteUrl` in `GET <origin>/api/projects`.
+
+### Installing into a Documentation Repository
+
+Run from the root of any documentation repository and commit the installed `.agents/skills/` files (plus `.claude/skills/` symlinks and `skills-lock.json`):
+
+```bash
+# Install from GitHub or a local FocusWiki checkout:
+npx skills add bakkerme/FocusWiki
+# or:
+npx skills add /workspace/wiki-prototype
+
+# Optional offline check for embed fences, sandbox rules, and comment anchors:
+node .agents/skills/focuswiki-docs/scripts/validate-wiki.mjs .
+```
+
+*(Workspace-internal UI design skills in `.agents/skills/` carry `metadata.internal: true` so external repos only install the three authoring skills above. FocusWiki's document scanner and file watcher automatically ignore dot-directories like `.agents/` and `.claude/` as well as `AGENTS.md`, `CLAUDE.md`, and `GEMINI.md`.)*
+
 ## Dependencies & Licenses
 
 | Package | Purpose | License |

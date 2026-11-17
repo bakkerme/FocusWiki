@@ -61,6 +61,8 @@ const MIME_BY_EXT: Record<string, string> = {
   '.txt': 'text/plain; charset=utf-8'
 };
 
+const IGNORED_AGENT_DOC_NAMES = new Set(['AGENTS.md', 'CLAUDE.md', 'GEMINI.md']);
+
 function scanMarkdownDocs(project: ProjectConfig): DocTreeEntry[] {
   const entries: DocTreeEntry[] = [];
   const root = project.rootPath;
@@ -70,9 +72,8 @@ function scanMarkdownDocs(project: ProjectConfig): DocTreeEntry[] {
     const items = fs.readdirSync(dirAbs, { withFileTypes: true });
     for (const item of items) {
       if (
-        item.name === '.git' ||
+        item.name.startsWith('.') ||
         item.name === 'node_modules' ||
-        item.name === '.cairn' ||
         item.name === 'embeds'
       ) {
         continue;
@@ -80,7 +81,11 @@ function scanMarkdownDocs(project: ProjectConfig): DocTreeEntry[] {
       const full = path.join(dirAbs, item.name);
       if (item.isDirectory()) {
         walk(full);
-      } else if (item.isFile() && item.name.endsWith('.md')) {
+      } else if (
+        item.isFile() &&
+        item.name.endsWith('.md') &&
+        !IGNORED_AGENT_DOC_NAMES.has(item.name)
+      ) {
         const relPath = path.relative(root, full).split(path.sep).join('/');
         const raw = fs.readFileSync(full, 'utf8');
         const stat = fs.statSync(full);
