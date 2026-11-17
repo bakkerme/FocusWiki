@@ -34,7 +34,7 @@ describe('Hub API & Repository Integration (Acceptance Scenarios 1–9)', () => 
   let hub: HubAppInstance;
 
   beforeEach(() => {
-    tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cairn-hub-test-'));
+    tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'focuswiki-hub-test-'));
     rpgDir = path.join(tmpRoot, 'cindervault-rpg');
     labDir = path.join(tmpRoot, 'helios-lab');
 
@@ -138,7 +138,7 @@ describe('Hub API & Repository Integration (Acceptance Scenarios 1–9)', () => 
   });
 
   it('supports adding a fourth project-authored component using only project files and documented syntax (Scenario 3)', async () => {
-    const widgetHtml = `<!doctype html><html><body><button id="calc">Compute Loot</button><script>window.parent.postMessage({type:'cairn:embed:ready',height:180},'*');</script></body></html>`;
+    const widgetHtml = `<!doctype html><html><body><button id="calc">Compute Loot</button><script>window.parent.postMessage({type:'focus:embed:ready',height:180},'*');</script></body></html>`;
 
     await request(hub.app)
       .post('/api/projects/cindervault-rpg/embeds')

@@ -17,7 +17,7 @@ import {
   selectCaptureTargets,
   validateCapturePacket
 } from '../scripts/captureLib';
-import { assertLocalCairnBaseUrl, runPlaywrightCapture } from '../scripts/captureRunner';
+import { assertLocalFocusWikiBaseUrl, runPlaywrightCapture } from '../scripts/captureRunner';
 
 const PROJECT_ROOT = path.resolve(__dirname, '..');
 const MANIFEST_PATH = path.join(PROJECT_ROOT, 'config', 'capture-manifest.json');
@@ -66,7 +66,7 @@ function createSyntheticPng(width: number, height: number): Buffer {
 
 const tempDirs: string[] = [];
 function makeTempProject(): string {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cairn-capture-test-'));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'focuswiki-capture-test-'));
   tempDirs.push(dir);
   fs.mkdirSync(path.join(dir, 'config'), { recursive: true });
   fs.copyFileSync(MANIFEST_PATH, path.join(dir, 'config', 'capture-manifest.json'));
@@ -295,10 +295,10 @@ describe('Screenshot capture manifest & packet workflow', () => {
   });
 
   it('enforces local/private base-url scope and fails cleanly on unavailable service or partial readiness failure', async () => {
-    expect(() => assertLocalCairnBaseUrl('http://127.0.0.1:8088')).not.toThrow();
-    expect(() => assertLocalCairnBaseUrl('http://100.117.116.91:8088')).not.toThrow();
-    expect(() => assertLocalCairnBaseUrl('https://example.com')).toThrow(/Refusing non-local/);
-    expect(() => assertLocalCairnBaseUrl('file:///etc/passwd')).toThrow(/Unsupported protocol/);
+    expect(() => assertLocalFocusWikiBaseUrl('http://127.0.0.1:8088')).not.toThrow();
+    expect(() => assertLocalFocusWikiBaseUrl('http://100.117.116.91:8088')).not.toThrow();
+    expect(() => assertLocalFocusWikiBaseUrl('https://example.com')).toThrow(/Refusing non-local/);
+    expect(() => assertLocalFocusWikiBaseUrl('file:///etc/passwd')).toThrow(/Unsupported protocol/);
 
     const tmpProj = makeTempProject();
 
@@ -330,7 +330,7 @@ describe('Screenshot capture manifest & packet workflow', () => {
     const server = http.createServer((req, res) => {
       if (req.url === '/healthz') {
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ status: 'ok', service: 'cairn-test' }));
+        res.end(JSON.stringify({ status: 'ok', service: 'focuswiki-test' }));
         return;
       }
       if (req.url === '/api/projects') {
@@ -358,7 +358,7 @@ describe('Screenshot capture manifest & packet workflow', () => {
     try {
       const testManifest: CaptureManifest = {
         schemaVersion: 1,
-        appName: 'Cairn Test Fixture',
+        appName: 'FocusWiki Test Fixture',
         defaultBaseUrl: baseUrl,
         targets: [
           {

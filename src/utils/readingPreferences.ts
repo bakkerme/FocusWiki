@@ -22,7 +22,8 @@ export interface PageWidthOptionSpec {
   cssMaxWidth: string;
 }
 
-export const READING_PREFERENCES_STORAGE_KEY = 'cairn:reading-preferences:v1';
+export const READING_PREFERENCES_STORAGE_KEY = 'focus:reading-preferences:v1';
+const LEGACY_READING_PREFERENCES_STORAGE_KEY = 'cairn:reading-preferences:v1';
 export const READING_PREFERENCES_VERSION = 1;
 
 export const DEFAULT_READING_PREFERENCES: ReadingPreferences = {
@@ -104,7 +105,9 @@ export function loadReadingPreferences(
     return { ...DEFAULT_READING_PREFERENCES };
   }
   try {
-    const raw = storage.getItem(READING_PREFERENCES_STORAGE_KEY);
+    const raw =
+      storage.getItem(READING_PREFERENCES_STORAGE_KEY) ??
+      storage.getItem(LEGACY_READING_PREFERENCES_STORAGE_KEY);
     if (!raw) {
       return { ...DEFAULT_READING_PREFERENCES };
     }

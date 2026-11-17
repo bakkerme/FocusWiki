@@ -4,8 +4,8 @@ set -euo pipefail
 umask 0007
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RUNTIME_DIR="${ROOT_DIR}/.runtime"
-PID_FILE="${RUNTIME_DIR}/cairn-server.pid"
-LOG_FILE="${RUNTIME_DIR}/cairn-server.log"
+PID_FILE="${RUNTIME_DIR}/focuswiki-server.pid"
+LOG_FILE="${RUNTIME_DIR}/focuswiki-server.log"
 
 mkdir -p "${RUNTIME_DIR}"
 
@@ -25,7 +25,7 @@ cmd="${1:-status}"
 case "${cmd}" in
   start)
     if is_running; then
-      echo "cairn-wiki-hub already running (PID $(cat "${PID_FILE}"))"
+      echo "focuswiki already running (PID $(cat "${PID_FILE}"))"
       exit 0
     fi
     cd "${ROOT_DIR}"
@@ -37,9 +37,9 @@ case "${cmd}" in
     )
     sleep 1
     if is_running; then
-      echo "Started cairn-wiki-hub (PID $(cat "${PID_FILE}")), log: ${LOG_FILE}"
+      echo "Started focuswiki (PID $(cat "${PID_FILE}")), log: ${LOG_FILE}"
     else
-      echo "Failed to start cairn-wiki-hub; recent log:" >&2
+      echo "Failed to start focuswiki; recent log:" >&2
       tail -n 30 "${LOG_FILE}" >&2 || true
       exit 1
     fi
@@ -55,10 +55,10 @@ case "${cmd}" in
         sleep 0.1
       done
       rm -f "${PID_FILE}"
-      echo "Stopped cairn-wiki-hub (PID ${pid})"
+      echo "Stopped focuswiki (PID ${pid})"
     else
       rm -f "${PID_FILE}"
-      echo "cairn-wiki-hub is not running"
+      echo "focuswiki is not running"
     fi
     ;;
   restart)

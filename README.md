@@ -1,6 +1,6 @@
-# Cairn — Self-Hosted Repository Documentation Hub
+# FocusWiki — Self-Hosted Repository Documentation Hub
 
-Cairn is a private, local-first documentation workspace over Git-backed Markdown repositories. Humans write and review visually with live interactive embeds and anchored marginalia; bots and scripts edit authoritative `.md`, `embeds/`, and `.comments.json` files directly on disk or via a compact HTTP JSON API.
+FocusWiki (shown as **Focus** in the UI) is a private, local-first documentation workspace over Git-backed Markdown repositories. Humans write and review visually with live interactive embeds and anchored marginalia; bots and scripts edit authoritative `.md`, `embeds/`, and `.comments.json` files directly on disk or via a compact HTTP JSON API.
 
 > **Sample Content Notice:** Both seeded repositories (`cindervault-rpg` and `helios-lab`) contain strictly fictional, synthetic prototype data.
 
@@ -20,13 +20,28 @@ npm test              # Runs Vitest unit + API integration suite
 ./scripts/server-ctl.sh stop
 ```
 
+## Repository Import, Branches/PRs & Remote Sync
+
+You do not need to edit `config/projects.json` or restart the server to add repositories:
+
+- **In the UI:** Click **+ Add** next to the `Repository` selector in the sidebar to:
+  1. **Clone URL:** Inspect remote branches and PR refs (`refs/pull/*/head` / `refs/merge-requests/*/head`), pick a starting branch or PR `#`, and clone directly into `repos/` (or `FOCUSWIKI_REPOS_DIR`).
+  2. **Local folder:** Inspect and attach an existing local checkout or plain Markdown folder inside `FOCUSWIKI_ALLOWED_IMPORT_ROOTS`.
+  3. **New repo:** Initialize a fresh Git-backed wiki repo with an initial commit on `main`.
+  4. **Connected:** Unregister a repository from Focus without deleting files on disk.
+- **Branches, PRs & Pull:** Click the topbar branch pill (`main · clean` / `↓N`) to open **Repository Git**, where you can **Fetch** remote branches and PR heads, **Pull** fast-forward updates (`--ff-only`, blocked safely if local edits exist), or switch to a local branch, remote branch, or PR `#` under **Branches & PRs**.
+- **HTTP API:**
+  - `POST /api/projects/inspect-remote` / `POST /api/projects/inspect-local`
+  - `POST /api/projects/import` (`mode`: `"clone" | "local" | "init"`) & `DELETE /api/projects/:projectId`
+  - `GET /api/projects/:projectId/git/refs`, `POST /api/projects/:projectId/git/fetch`, `POST /api/projects/:projectId/git/pull`, `POST /api/projects/:projectId/git/checkout`
+
 ## Rootless Docker Packaging & Deployment (`ubuntu` uid 1000)
 
-`Dockerfile` and `compose.yaml` package the production build with persistent bind mounts for `./sample-repos` and `./config` (read-only), dropped Linux capabilities (`cap_drop: [ALL]`), `no-new-privileges`, a `/healthz` healthcheck, and `restart: unless-stopped`.
+`Dockerfile` and `compose.yaml` package the production build with persistent bind mounts for `./sample-repos`, `./repos` (`FOCUSWIKI_REPOS_DIR=/app/repos`), and `./config` (writable so UI/API imports persist in `projects.json`), dropped Linux capabilities (`cap_drop: [ALL]`), `no-new-privileges`, a `/healthz` healthcheck, and `restart: unless-stopped`.
 
 Docker URLs are **http://100.117.116.91:8088/** (private Tailscale) and **http://127.0.0.1:8089/** (loopback). This host's rootless Docker fails when publishing both addresses with the same host port; distinct host ports avoid that conflict. The container still listens on port `8088`. Nothing is published on the LAN address or a wildcard host address.
 
-The image includes the compiled seed script for first startup. Existing repositories are retained. Git trusts only `/app/sample-repos/cindervault-rpg` and `/app/sample-repos/helios-lab` in the container so the existing repositories owned by another host account work through the rootless UID mapping and project ACLs. Additional mounts with a different owner need their own explicit Git trust configuration; no wildcard trust is enabled.
+The image includes the compiled seed script for first startup. Existing repositories are retained. Git trusts mounted sample checkouts explicitly and applies per-repo `-c safe.directory=<path>` for registered repositories without enabling wildcard trust.
 
 When deploying under the `ubuntu` account that owns the rootless Docker daemon (`/run/user/1000/docker.sock`), stop the standalone host Node listener on port `8088` first, then start Compose:
 
@@ -85,9 +100,9 @@ curl -X POST http://127.0.0.1:8088/api/projects/cindervault-rpg/embeds \
 
 ### Optional `postMessage` Bridge Inside Embeds
 
-- Listen for `window.addEventListener('message', (e) => { if (e.data?.type === 'cairn:embed:init') { /* e.data.props */ } })`.
-- Post `{ type: 'cairn:embed:resize', height: document.documentElement.scrollHeight }` to auto-fit iframe height.
-- Post `{ type: 'cairn:embed:telemetry', summary: 'Current state summary' }` to update the frame footer status line.
+- Listen for `window.addEventListener('message', (e) => { if (e.data?.type === 'focus:embed:init') { /* e.data.props */ } })`.
+- Post `{ type: 'focus:embed:resize', height: document.documentElement.scrollHeight }` to auto-fit iframe height.
+- Post `{ type: 'focus:embed:telemetry', summary: 'Current state summary' }` to update the frame footer status line.
 
 ## Bot & Script Operations for Inline Comments
 

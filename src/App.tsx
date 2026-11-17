@@ -27,7 +27,8 @@ import { ReviewMargin } from './components/ReviewMargin';
 import { GitDrawerModal } from './components/GitDrawerModal';
 import { ConflictModal } from './components/ConflictModal';
 import { InsertEmbedModal } from './components/InsertEmbedModal';
-import { ReadingSettingsModal } from './components/ReadingSettingsModal';
+import { SettingsModal, type SettingsSection } from './components/SettingsModal';
+import { ImportRepoModal } from './components/ImportRepoModal';
 import { useOverlayScrollLock } from './utils/overlayModal';
 import {
   DEFAULT_READING_PREFERENCES,
@@ -39,6 +40,13 @@ import {
   type ReadingPreferences,
   type TextSizePreset
 } from './utils/readingPreferences';
+import {
+  DEFAULT_WORKSPACE_SETTINGS,
+  applyThemeMode,
+  loadWorkspaceSettings,
+  saveWorkspaceSettings,
+  type WorkspaceSettings
+} from './utils/workspaceSettings';
 
 export type LayoutTier = 'overlay' | 'medium-desktop' | 'wide-desktop';
 
@@ -102,8 +110,13 @@ export function App() {
   const [pendingAnchor, setPendingAnchor] = useState<CommentAnchor | null>(null);
   const [composerOpen, setComposerOpen] = useState<boolean>(false);
 
+  const [workspaceSettings, setWorkspaceSettings] = useState<WorkspaceSettings>(
+    loadWorkspaceSettings
+  );
   // Lifted review draft & author state so dismissing/rotating drawers never discards drafts
-  const [authorName, setAuthorName] = useState<string>('Reviewer');
+  const [authorName, setAuthorName] = useState<string>(
+    () => loadWorkspaceSettings().reviewerName
+  );
   const [commentDraft, setCommentDraft] = useState<string>('');
   const [replyDrafts, setReplyDrafts] = useState<Record<string, string>>({});
   const [expandedHistory, setExpandedHistory] = useState<Record<string, boolean>>({});
@@ -122,7 +135,11 @@ export function App() {
   const [embedReloadToken, setEmbedReloadToken] = useState<number>(0);
   const [gitModalOpen, setGitModalOpen] = useState<boolean>(false);
   const [embedModalOpen, setEmbedModalOpen] = useState<boolean>(false);
+  const [importModalOpen, setImportModalOpen] = useState<boolean>(false);
+  const [initialLoaded, setInitialLoaded] = useState<boolean>(false);
   const [readingSettingsOpen, setReadingSettingsOpen] = useState<boolean>(false);
+  const [settingsSection, setSettingsSection] = useState<SettingsSection>('reading');
+  const [settingsCredHost, setSettingsCredHost] = useState<string>('');
   const [readingPreferences, setReadingPreferences] = useState<ReadingPreferences>(
     loadReadingPreferences
   );
@@ -133,6 +150,7 @@ export function App() {
   const navTriggerRef = useRef<HTMLButtonElement | null>(null);
   const reviewTriggerRef = useRef<HTMLButtonElement | null>(null);
   const settingsTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const importTriggerRef = useRef<HTMLButtonElement | null>(null);
 
   const baseRevisionRef = useRef<string>('');
   const lastSavedMdRef = useRef<string>('');
@@ -164,11 +182,19 @@ export function App() {
   const effectiveReviewVisible = isOverlayLayout ? overlayDrawer === 'review' : desktopReviewOpen;
   const isOverlayModalOpen = isOverlayLayout && overlayDrawer !== null;
   const anyDialogOpen =
-    readingSettingsOpen || gitModalOpen || embedModalOpen || Boolean(conflictData);
+    readingSettingsOpen ||
+    gitModalOpen ||
+    embedModalOpen ||
+    importModalOpen ||
+    Boolean(conflictData);
   const lockDocumentScroll = isOverlayModalOpen || readingSettingsOpen;
   const stageInert = isOverlayModalOpen || anyDialogOpen;
 
   useOverlayScrollLock(lockDocumentScroll);
+
+  useEffect(() => {
+    applyThemeMode(workspaceSettings.themeMode);
+  }, [workspaceSettings.themeMode]);
 
   // Set native HTML inert attribute on <main> while an overlay drawer or modal dialog is open
   useEffect(() => {
@@ -189,6 +215,29 @@ export function App() {
     });
   }
 
+  function updateWorkspaceSettings(updater: (prev: WorkspaceSettings) => WorkspaceSettings) {
+    setWorkspaceSettings((prev) => {
+      const next = updater(prev);
+      saveWorkspaceSettings(next);
+      if (next.reviewerName !== prev.reviewerName) {
+        setAuthorName(next.reviewerName);
+      }
+      return next;
+    });
+  }
+
+  function handleChangeReviewAuthorName(nextAuthor: string) {
+    setAuthorName(nextAuthor);
+    updateWorkspaceSettings((prev) => ({
+      ...prev,
+      reviewerName: nextAuthor.trim() || DEFAULT_WORKSPACE_SETTINGS.reviewerName
+    }));
+  }
+
+  function handleResetWorkspaceDefaults() {
+    updateWorkspaceSettings(() => ({ ...DEFAULT_WORKSPACE_SETTINGS }));
+  }
+
   function handleChangeTextSize(textSize: TextSizePreset) {
     updateReadingPreferences((prev) => ({ ...prev, textSize }));
   }
@@ -201,10 +250,12 @@ export function App() {
     updateReadingPreferences(() => ({ ...DEFAULT_READING_PREFERENCES }));
   }
 
-  function handleOpenReadingSettings() {
+  function handleOpenReadingSettings(section: SettingsSection = 'reading', credHost = '') {
     if (isOverlayLayout) {
       setOverlayDrawer(null);
     }
+    setSettingsSection(section);
+    setSettingsCredHost(credHost);
     setReadingSettingsOpen(true);
   }
 
@@ -357,21 +408,37 @@ export function App() {
   useEffect(() => {
     let cancelled = false;
     async function boot() {
-      const list = await refreshProjects();
-      if (cancelled || list.length === 0) return;
+      try {
+        const list = await refreshProjects();
+        if (cancelled) return;
+        if (list.length === 0) {
+          setActiveProjectId('');
+          setActiveDocPath('');
+          return;
+        }
 
-      const params = new URLSearchParams(window.location.search);
-      const urlProject = params.get('project');
-      const urlDoc = params.get('doc');
+        const params = new URLSearchParams(window.location.search);
+        const urlProject = params.get('project');
+        const urlDoc = params.get('doc');
 
-      const chosenProj = list.find((p) => p.id === urlProject) ?? list[0];
-      const chosenDoc =
-        urlDoc && chosenProj.docs.some((d) => d.path === urlDoc)
-          ? urlDoc
-          : chosenProj.defaultDoc || chosenProj.docs[0]?.path || '';
+        const chosenProj = list.find((p) => p.id === urlProject) ?? list[0];
+        const chosenDoc =
+          urlDoc && chosenProj.docs.some((d) => d.path === urlDoc)
+            ? urlDoc
+            : chosenProj.docs.some((d) => d.path === chosenProj.defaultDoc)
+              ? chosenProj.defaultDoc
+              : chosenProj.docs[0]?.path || '';
 
-      if (chosenDoc) {
-        await loadDocument(chosenProj.id, chosenDoc);
+        if (chosenDoc) {
+          await loadDocument(chosenProj.id, chosenDoc);
+        } else {
+          setActiveProjectId(chosenProj.id);
+          setActiveDocPath('');
+        }
+      } finally {
+        if (!cancelled) {
+          setInitialLoaded(true);
+        }
       }
     }
     void boot();
@@ -518,6 +585,10 @@ export function App() {
           relPath?: string;
           kind?: string;
         };
+        if (msg.type === 'projects:updated') {
+          void refreshProjects();
+          return;
+        }
         if (msg.type !== 'workspace:changed') return;
 
         void refreshProjects();
@@ -615,6 +686,30 @@ export function App() {
     return () => window.clearTimeout(timer);
   }, [searchQuery]);
 
+  async function openProjectSummary(proj: ProjectSummary, preferredDoc?: string) {
+    const targetDoc =
+      preferredDoc && proj.docs.some((d) => d.path === preferredDoc)
+        ? preferredDoc
+        : proj.docs.some((d) => d.path === proj.defaultDoc)
+          ? proj.defaultDoc
+          : proj.docs[0]?.path || '';
+
+    if (targetDoc) {
+      await loadDocument(proj.id, targetDoc);
+    } else {
+      setActiveProjectId(proj.id);
+      setActiveDocPath('');
+      setInitialDocMarkdown('');
+      setLiveMarkdown('');
+      setThreads([]);
+      setEditSessionBaseline(null);
+      editSessionBaselineRef.current = null;
+      setWorkspaceMode('read');
+      workspaceModeRef.current = 'read';
+      syncUrlParams(proj.id, '', 'read');
+    }
+  }
+
   async function handleSelectProject(nextProjectId: string) {
     if (saveTimerRef.current !== null) {
       window.clearTimeout(saveTimerRef.current);
@@ -622,10 +717,45 @@ export function App() {
     }
     const proj = projects.find((p) => p.id === nextProjectId);
     if (!proj) return;
-    const targetDoc = proj.defaultDoc || proj.docs[0]?.path || '';
-    if (targetDoc) {
-      await loadDocument(proj.id, targetDoc);
+    await openProjectSummary(proj);
+  }
+
+  async function handleRepoImported(imported: ProjectSummary) {
+    const list = await refreshProjects();
+    const fresh = list.find((p) => p.id === imported.id) ?? imported;
+    await openProjectSummary(fresh);
+    setStatusNotice(`Connected repository "${fresh.name}" on branch ${fresh.git.branch}.`);
+  }
+
+  async function handleRepoRemoved(removedId: string) {
+    const list = await refreshProjects();
+    if (activeProjectId === removedId) {
+      if (list.length > 0) {
+        await openProjectSummary(list[0]);
+      } else {
+        setActiveProjectId('');
+        setActiveDocPath('');
+        setInitialDocMarkdown('');
+        setLiveMarkdown('');
+        setThreads([]);
+      }
     }
+    setStatusNotice(`Removed repository "${removedId}" from Focus (files kept on disk).`);
+  }
+
+  async function handleRepoUpdated(updated: ProjectSummary) {
+    await refreshProjects();
+    setStatusNotice(`Updated repository "${updated.name}" (default page: ${updated.defaultDoc}).`);
+  }
+
+  async function handleRepoSynced(notice: string) {
+    const list = await refreshProjects();
+    const current = list.find((p) => p.id === activeProjectIdRef.current);
+    if (current) {
+      await openProjectSummary(current, activeDocPathRef.current);
+      setEmbedReloadToken((n) => n + 1);
+    }
+    setStatusNotice(notice);
   }
 
   async function handleSelectDoc(projectId: string, docPath: string) {
@@ -1031,10 +1161,10 @@ export function App() {
   const textSizeSpec = getTextSizeSpec(readingPreferences.textSize);
   const pageWidthSpec = getPageWidthSpec(readingPreferences.pageWidth);
   const workbenchStyle = {
-    '--cairn-prose-size': textSizeSpec.cssFontSize,
-    '--cairn-prose-line-height': textSizeSpec.cssLineHeight,
-    '--cairn-prose-max-width': pageWidthSpec.cssMaxWidth,
-    '--cairn-review-prose-size': textSizeSpec.cssReviewSize
+    '--focus-prose-size': textSizeSpec.cssFontSize,
+    '--focus-prose-line-height': textSizeSpec.cssLineHeight,
+    '--focus-prose-max-width': pageWidthSpec.cssMaxWidth,
+    '--focus-review-prose-size': textSizeSpec.cssReviewSize
   } as React.CSSProperties;
 
   return (
@@ -1065,6 +1195,7 @@ export function App() {
             isOverlay={isOverlayLayout}
             restoreFocusRef={navTriggerRef}
             settingsTriggerRef={settingsTriggerRef}
+            importTriggerRef={importTriggerRef}
             searchQuery={searchQuery}
             searchResults={searchResults}
             onChangeSearch={setSearchQuery}
@@ -1072,7 +1203,8 @@ export function App() {
             onSelectDoc={(projId, docPath) => void handleSelectDoc(projId, docPath)}
             onCreateDoc={handleCreateDoc}
             onOpenEmbedModal={() => setEmbedModalOpen(true)}
-            onOpenReadingSettings={handleOpenReadingSettings}
+            onOpenReadingSettings={() => handleOpenReadingSettings('reading')}
+            onOpenImportRepoModal={() => setImportModalOpen(true)}
             onClose={closeNavPanel}
           />
         )}
@@ -1091,7 +1223,7 @@ export function App() {
                   className={`btn btn-compact nav-toggle-btn mobile-nav-btn ${effectiveNavVisible ? 'is-active-btn' : ''}`}
                   onClick={toggleNavPanel}
                   aria-expanded={effectiveNavVisible}
-                  aria-controls="cairn-nav-panel"
+                  aria-controls="focus-nav-panel"
                   aria-label={effectiveNavVisible ? 'Close navigation' : 'Open navigation'}
                   title={effectiveNavVisible ? 'Hide pages navigation' : 'Open pages navigation'}
                 >
@@ -1121,8 +1253,8 @@ export function App() {
                         : `${activeProject.git.changedFiles.length} uncommitted ${
                             activeProject.git.changedFiles.length === 1 ? 'file' : 'files'
                           }`
-                    }. Inspect Git status and checkout path.`}
-                    title={`Checkout: ${activeProject.rootPath} (${activeProject.git.branch}) — Inspect diff & commit`}
+                    }. Open Git branches, PRs, pull, and change review.`}
+                    title={`Checkout: ${activeProject.rootPath} (${activeProject.git.branch}) — Branches, PRs, Pull & Diff`}
                   >
                     <GitBranch size={12} aria-hidden="true" />
                     <span className="git-branch-name">{activeProject.git.branch}</span>
@@ -1135,6 +1267,11 @@ export function App() {
                       </>
                     ) : (
                       <span className="git-status-word">clean</span>
+                    )}
+                    {(activeProject.git.behind ?? 0) > 0 && (
+                      <span className="git-behind-pill" title={`${activeProject.git.behind} commit(s) behind remote`}>
+                        ↓{activeProject.git.behind}
+                      </span>
                     )}
                   </button>
                 </>
@@ -1199,7 +1336,7 @@ export function App() {
                     className={`btn btn-compact review-toggle-btn ${effectiveReviewVisible ? 'is-active-btn' : ''}`}
                     onClick={toggleReviewPanel}
                     aria-expanded={effectiveReviewVisible}
-                    aria-controls="cairn-review-panel"
+                    aria-controls="focus-review-panel"
                     title={effectiveReviewVisible ? 'Close review panel' : 'Open review threads'}
                   >
                     <MessageSquare size={13} aria-hidden="true" />
@@ -1265,7 +1402,7 @@ export function App() {
                       className={`btn btn-compact review-toggle-btn ${effectiveReviewVisible ? 'is-active-btn' : ''}`}
                       onClick={toggleReviewPanel}
                       aria-expanded={effectiveReviewVisible}
-                      aria-controls="cairn-review-panel"
+                      aria-controls="focus-review-panel"
                       title={effectiveReviewVisible ? 'Close review panel' : 'Open review threads'}
                     >
                       <MessageSquare size={13} aria-hidden="true" />
@@ -1362,8 +1499,50 @@ export function App() {
               onTriggerImmediateSave={() => void performSave(liveMdRef.current, false)}
               onLocateThreadInRead={handleLocateThreadInRead}
             />
-          ) : (
+          ) : !initialLoaded ? (
             <div className="sheet-scroll">Loading workspace…</div>
+          ) : activeProject ? (
+            <div className="sheet-scroll">
+              <div className="empty-workspace-card">
+                <h2>No Markdown pages in {activeProject.name}</h2>
+                <p>
+                  This repository doesn’t have any <code>.md</code> documents yet on branch{' '}
+                  <code>{activeProject.git.branch}</code>.
+                </p>
+                <div className="empty-workspace-actions">
+                  <button
+                    type="button"
+                    className="btn btn-compact btn-primary"
+                    onClick={() => void handleCreateDoc('README.md', activeProject.name)}
+                  >
+                    Create README.md
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-compact"
+                    onClick={() => setGitModalOpen(true)}
+                  >
+                    Branches &amp; Git
+                  </button>
+                </div>
+              </div>
+            </div>
+          ) : (
+            <div className="sheet-scroll">
+              <div className="empty-workspace-card">
+                <h2>No repositories connected</h2>
+                <p>Clone a Git repository or connect a local folder to start reading and editing.</p>
+                <div className="empty-workspace-actions">
+                  <button
+                    type="button"
+                    className="btn btn-compact btn-primary"
+                    onClick={() => setImportModalOpen(true)}
+                  >
+                    Add repository
+                  </button>
+                </div>
+              </div>
+            </div>
           )}
         </main>
 
@@ -1378,7 +1557,7 @@ export function App() {
             isOverlay={isOverlayLayout}
             restoreFocusRef={reviewTriggerRef}
             authorName={authorName}
-            onChangeAuthorName={setAuthorName}
+            onChangeAuthorName={handleChangeReviewAuthorName}
             commentDraft={commentDraft}
             onChangeCommentDraft={setCommentDraft}
             replyDrafts={replyDrafts}
@@ -1417,12 +1596,23 @@ export function App() {
       </div>
 
       {readingSettingsOpen && (
-        <ReadingSettingsModal
-          preferences={readingPreferences}
+        <SettingsModal
+          initialSection={settingsSection}
+          initialCredentialHost={settingsCredHost}
+          readingPreferences={readingPreferences}
+          workspaceSettings={workspaceSettings}
+          projects={projects}
+          activeProjectId={activeProjectId}
           restoreFocusRef={isOverlayLayout ? navTriggerRef : settingsTriggerRef}
           onChangeTextSize={handleChangeTextSize}
           onChangePageWidth={handleChangePageWidth}
-          onResetDefaults={handleResetReadingPreferences}
+          onResetReadingDefaults={handleResetReadingPreferences}
+          onUpdateWorkspaceSettings={updateWorkspaceSettings}
+          onResetWorkspaceDefaults={handleResetWorkspaceDefaults}
+          onSelectProject={handleSelectProject}
+          onRepoUpdated={handleRepoUpdated}
+          onRepoRemoved={handleRepoRemoved}
+          onOpenImportRepoModal={() => setImportModalOpen(true)}
           onClose={() => setReadingSettingsOpen(false)}
         />
       )}
@@ -1431,10 +1621,29 @@ export function App() {
         <GitDrawerModal
           project={activeProject}
           activeDocPath={activeDocPath}
+          defaultAuthorName={workspaceSettings.commitAuthorName}
+          defaultAuthorEmail={workspaceSettings.commitAuthorEmail}
+          defaultTab={workspaceSettings.defaultGitTab}
+          autoFetchOnOpen={workspaceSettings.autoFetchOnGitOpen}
+          includePrRefsOnFetch={workspaceSettings.includePrRefsOnFetch}
+          onOpenCredentialsSettings={(host) => handleOpenReadingSettings('credentials', host ?? '')}
           onClose={() => setGitModalOpen(false)}
           onCommitted={async () => {
             await refreshProjects();
           }}
+          onRepoSynced={handleRepoSynced}
+        />
+      )}
+
+      {importModalOpen && (
+        <ImportRepoModal
+          projects={projects}
+          activeProjectId={activeProjectId}
+          restoreFocusRef={isOverlayLayout ? navTriggerRef : importTriggerRef}
+          onImported={handleRepoImported}
+          onRemoved={handleRepoRemoved}
+          onOpenCredentialsSettings={(host) => handleOpenReadingSettings('credentials', host ?? '')}
+          onClose={() => setImportModalOpen(false)}
         />
       )}
 

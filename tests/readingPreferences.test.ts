@@ -54,6 +54,7 @@ describe('Reading presentation preferences persistence and recovery', () => {
 
     const ok = saveReadingPreferences({ textSize: 'large', pageWidth: 'narrow' }, memStorage);
     expect(ok).toBe(true);
+    expect(READING_PREFERENCES_STORAGE_KEY).toBe('focus:reading-preferences:v1');
     const saved = JSON.parse(map.get(READING_PREFERENCES_STORAGE_KEY) || '{}');
     expect(saved).toEqual({
       version: 1,
@@ -63,6 +64,17 @@ describe('Reading presentation preferences persistence and recovery', () => {
     expect(loadReadingPreferences(memStorage)).toEqual({
       textSize: 'large',
       pageWidth: 'narrow'
+    });
+
+    const legacyOnlyStore = {
+      getItem: (k: string) =>
+        k === 'cairn:reading-preferences:v1'
+          ? JSON.stringify({ version: 1, textSize: 'small', pageWidth: 'wide' })
+          : null
+    };
+    expect(loadReadingPreferences(legacyOnlyStore)).toEqual({
+      textSize: 'small',
+      pageWidth: 'wide'
     });
   });
 });

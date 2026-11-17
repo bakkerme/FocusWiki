@@ -41,6 +41,7 @@ function EmbedNodeView(props: NodeViewProps) {
   );
 
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
+  const embedProtocolRef = useRef<'focus' | 'cairn'>('focus');
   const hasDynamicSizeRef = useRef<boolean>(false);
   const fallbackTimerRef = useRef<number | null>(null);
 
@@ -89,9 +90,10 @@ function EmbedNodeView(props: NodeViewProps) {
     } catch {
       parsed = {};
     }
+    const prefix = embedProtocolRef.current === 'cairn' ? 'cairn:embed' : 'focus:embed';
     win.postMessage(
       {
-        type: 'cairn:embed:init',
+        type: `${prefix}:init`,
         instanceId,
         props: parsed
       },
@@ -107,6 +109,7 @@ function EmbedNodeView(props: NodeViewProps) {
   }, [projectId, src, embedReloadToken, localReload, instanceId]);
 
   useEffect(() => {
+    embedProtocolRef.current = 'focus';
     hasDynamicSizeRef.current = false;
     setSizingMode('measuring');
     setLiveHeight(PRE_MEASURE_HEIGHT);
@@ -127,7 +130,16 @@ function EmbedNodeView(props: NodeViewProps) {
         return;
       }
 
-      if (data.type === 'cairn:embed:ready' || data.type === 'cairn:embed:resize') {
+      if (data.type === 'cairn:embed:ready' || data.type === 'cairn:embed:resize' || data.type === 'cairn:embed:telemetry') {
+        embedProtocolRef.current = 'cairn';
+      }
+
+      if (
+        data.type === 'focus:embed:ready' ||
+        data.type === 'focus:embed:resize' ||
+        data.type === 'cairn:embed:ready' ||
+        data.type === 'cairn:embed:resize'
+      ) {
         if (typeof data.height === 'number' && Number.isFinite(data.height) && data.height >= 60) {
           hasDynamicSizeRef.current = true;
           if (fallbackTimerRef.current !== null) {
@@ -137,10 +149,13 @@ function EmbedNodeView(props: NodeViewProps) {
           setSizingMode('auto');
           setLiveHeight(clampHeight(data.height + 2));
         }
-        if (data.type === 'cairn:embed:ready') {
+        if (data.type === 'focus:embed:ready' || data.type === 'cairn:embed:ready') {
           sendInitProps();
         }
-      } else if (data.type === 'cairn:embed:telemetry' && typeof data.summary === 'string') {
+      } else if (
+        (data.type === 'focus:embed:telemetry' || data.type === 'cairn:embed:telemetry') &&
+        typeof data.summary === 'string'
+      ) {
         setTelemetry(data.summary.slice(0, 140));
       }
     }

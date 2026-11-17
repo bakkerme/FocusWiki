@@ -419,7 +419,7 @@ export function readGitRevisionSnapshot(repoDir: string): GitRevisionSnapshot | 
   }
 }
 
-export async function probeLiveCairnServer(
+export async function probeLiveFocusWikiServer(
   baseUrl: string
 ): Promise<{
   reachable: boolean;
@@ -507,7 +507,7 @@ export function buildTargetInPageSpec(target: CaptureTargetSpec, baseUrl: string
   };
 }
 
-export const CAIRN_APP_BOOT_CHECK_EXPRESSION = `(() => {
+export const FOCUSWIKI_APP_BOOT_CHECK_EXPRESSION = `(() => {
   const wb = document.querySelector(".workbench");
   const gitBtn = document.querySelector(".git-status-btn");
   const docReady =
@@ -1069,7 +1069,7 @@ export function toBrowserCaptureTelemetry(
 
 /**
  * Generates a self-contained script for `openbot_browser.run_script` that reuses
- * the shared step and readiness expressions (`CAIRN_APP_BOOT_CHECK_EXPRESSION` and
+ * the shared step and readiness expressions (`FOCUSWIKI_APP_BOOT_CHECK_EXPRESSION` and
  * `buildInPageStepAndReadinessExpression`).
  */
 export function buildBrowserRunScript(target: CaptureTargetSpec, baseUrl: string): string {
@@ -1083,7 +1083,7 @@ try {
   await navigate(${JSON.stringify(spec.fullUrl)});
 
   currentStep = "wait-app-boot";
-  await waitFor(() => ${CAIRN_APP_BOOT_CHECK_EXPRESSION});
+  await waitFor(() => ${FOCUSWIKI_APP_BOOT_CHECK_EXPRESSION});
 
   currentStep = "apply-steps-and-assert";
   const pageResult = await evaluate(${JSON.stringify(inPageExpr)});
@@ -1161,7 +1161,7 @@ export async function createCapturePlan(options: {
 
   const baseUrl = (options.baseUrl ?? manifest.defaultBaseUrl).replace(/\/+$/, '');
   const nowIso = new Date().toISOString();
-  const defaultPacketId = `cairn-${nowIso.slice(0, 19).replace(/[:T]/g, '-')}`;
+  const defaultPacketId = `focuswiki-${nowIso.slice(0, 19).replace(/[:T]/g, '-')}`;
   const packetId = options.packetId ? slugify(options.packetId) : defaultPacketId;
   const packetDir = resolvePacketDir(options.projectRoot, packetId);
 
@@ -1172,7 +1172,7 @@ export async function createCapturePlan(options: {
   const appGit = readGitRevisionSnapshot(options.projectRoot);
   const probe = options.skipLiveProbe
     ? { reachable: true, projectsGit: {} }
-    : await probeLiveCairnServer(baseUrl);
+    : await probeLiveFocusWikiServer(baseUrl);
 
   const plannedTargets = selectedTargets.map((target, idx) => {
     const order = idx + 1;

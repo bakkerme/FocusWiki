@@ -1,6 +1,7 @@
 node_modules
 dist
 sample-repos
+repos
 .git
 *.log
 .runtime
@@ -9,3 +10,6 @@ captures/
 .codex
 .env
 .env.*
+config/.credential-master.key
+config/.git-credentials.enc.json
+config/.*.tmp

@@ -1,7 +1,11 @@
 node_modules/
 dist/
 sample-repos/
+repos/
 *.log
 .runtime/
 captures/packets/
 captures/competitors/
+config/.credential-master.key
+config/.git-credentials.enc.json
+config/.*.tmp

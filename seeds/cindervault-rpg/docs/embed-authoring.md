@@ -19,7 +19,7 @@ props: {"depth":3,"luckBonus":1}
 
 1. Create `embeds/<your-widget>/index.html` inside the project's working tree (on disk or via `POST /api/projects/:projectId/embeds`).
 2. Add a fenced `embed` block pointing to `src: embeds/<your-widget>/index.html` in any `.md` document.
-3. Optional: listen for `window.addEventListener('message', ...)` with `event.data.type === 'cairn:embed:init'` to read `event.data.props`, and post `{ type: 'cairn:embed:resize', height }` to auto-fit height.
+3. Optional: listen for `window.addEventListener('message', ...)` with `event.data.type === 'focus:embed:init'` to read `event.data.props`, and post `{ type: 'focus:embed:resize', height }` to auto-fit height.
 
 ## Sandbox Guarantees
 

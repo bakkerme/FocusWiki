@@ -1,16 +1,18 @@
 services:
-  cairn-hub:
+  focuswiki:
     build:
       context: .
       dockerfile: Dockerfile
-    image: cairn-wiki-hub:latest
-    container_name: cairn-wiki-hub
+    image: focuswiki:latest
+    container_name: focuswiki
     restart: unless-stopped
     environment:
       NODE_ENV: production
       PORT: "8088"
       BIND_HOSTS: "0.0.0.0"
       PROJECTS_CONFIG: "/app/config/projects.json"
+      FOCUSWIKI_REPOS_DIR: "/app/repos"
+      FOCUSWIKI_ALLOWED_IMPORT_ROOTS: "/app/repos,/app/sample-repos"
     # Rootless Docker needs distinct published ports for these two host addresses.
     # Keep host exposure restricted to loopback and the private Tailscale interface.
     ports:
@@ -18,7 +20,8 @@ services:
       - "100.117.116.91:8088:8088"
     volumes:
       - ./sample-repos:/app/sample-repos
-      - ./config:/app/config:ro
+      - ./repos:/app/repos
+      - ./config:/app/config
     security_opt:
       - no-new-privileges:true
     cap_drop:

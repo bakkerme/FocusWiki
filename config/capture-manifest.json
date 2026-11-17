@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "appName": "Cairn Repository Documentation Hub",
+  "appName": "FocusWiki Repository Documentation Hub",
   "defaultBaseUrl": "http://127.0.0.1:8088",
   "alternateBaseUrls": [
     "http://100.117.116.91:8088"
@@ -153,7 +153,7 @@
         {
           "kind": "scrollElementIntoContainer",
           "container": ".sheet-scroll",
-          "target": ".cairn-comment-highlight.active, .cairn-comment-highlight",
+          "target": ".focus-comment-highlight.active, .focus-comment-highlight",
           "offsetTop": 120
         }
       ],
@@ -163,8 +163,8 @@
           ".review-sidebar",
           ".thread-card.active.is-expanded",
           ".thread-card.is-compact",
-          ".cairn-comment-highlight.is-selected",
-          ".cairn-comment-highlight.is-resolved"
+          ".focus-comment-highlight.is-selected",
+          ".focus-comment-highlight.is-resolved"
         ],
         "waitForFonts": true,
         "waitForVisibleEmbeds": false,

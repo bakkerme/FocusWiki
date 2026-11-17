@@ -143,7 +143,7 @@ export const commentHighlightPluginKey = new PluginKey<{
   threads: ResolvedCommentThread[];
   activeThreadId: string | null;
   showResolved: boolean;
-}>('cairnCommentHighlights');
+}>('focusCommentHighlights');
 
 export const CommentHighlightExtension = Extension.create<{
   onSelectThread: (threadId: string) => void;
@@ -218,7 +218,7 @@ export const CommentHighlightExtension = Extension.create<{
                   const isResolved = thread.status === 'resolved';
                   const author = thread.messages[0]?.author ?? 'Reviewer';
                   const stateClasses = [
-                    'cairn-comment-highlight',
+                    'focus-comment-highlight',
                     isResolved ? 'is-resolved' : 'is-open',
                     isSelected ? 'is-selected active' : ''
                   ]
@@ -241,7 +241,7 @@ export const CommentHighlightExtension = Extension.create<{
                         const badge = document.createElement('button');
                         badge.type = 'button';
                         badge.className = [
-                          'cairn-anchor-marker',
+                          'focus-anchor-marker',
                           isResolved ? 'is-resolved' : 'is-open',
                           isSelected ? 'is-selected' : ''
                         ]

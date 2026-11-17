@@ -274,7 +274,7 @@ export const VisualMarkdownEditor = forwardRef<VisualEditorHandle, Props>(
           : range.startContainer.parentElement;
       if (
         startElem?.closest(
-          '.embed-frame-wrapper, .preserved-raw-block, .selection-comment-popover, .cairn-anchor-marker'
+          '.embed-frame-wrapper, .preserved-raw-block, .selection-comment-popover, .focus-anchor-marker'
         )
       ) {
         return { anchor: null, rect: null };
@@ -396,7 +396,7 @@ export const VisualMarkdownEditor = forwardRef<VisualEditorHandle, Props>(
         const sheetEl = sheetScrollRef.current;
         if (!sheetEl) return;
         const target = sheetEl.querySelector(
-          `.cairn-comment-highlight[data-thread-id="${CSS.escape(threadId)}"]`
+          `.focus-comment-highlight[data-thread-id="${CSS.escape(threadId)}"]`
         ) as HTMLElement | null;
         if (!target) return;
         const targetRect = target.getBoundingClientRect();

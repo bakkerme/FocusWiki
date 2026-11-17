@@ -66,7 +66,7 @@ function parseTelemetryArg(raw: string | undefined): BrowserCaptureTelemetry | n
 }
 
 function printUsage(): void {
-  console.log(`Cairn Screenshot & Visual Review Packet CLI
+  console.log(`FocusWiki Screenshot & Visual Review Packet CLI
 
 Usage:
   npm run capture -- list [--manifest config/capture-manifest.json]
@@ -94,7 +94,7 @@ function copyDirRecursive(src: string, dest: string): void {
 }
 
 async function runIsolatedFixtureServer(port: number): Promise<void> {
-  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cairn-capture-fixture-'));
+  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'focuswiki-capture-fixture-'));
   const reposDir = path.join(tmpRoot, 'repos');
   ensureSharedDir(reposDir);
 
@@ -103,7 +103,7 @@ async function runIsolatedFixtureServer(port: number): Promise<void> {
     const destRepo = path.join(reposDir, repoId);
     copyDirRecursive(srcSeed, destRepo);
     execFileSync('git', ['init', '-b', 'main'], { cwd: destRepo, stdio: 'ignore' });
-    execFileSync('git', ['config', 'user.name', 'Cairn Capture Fixture'], { cwd: destRepo, stdio: 'ignore' });
+    execFileSync('git', ['config', 'user.name', 'FocusWiki Capture Fixture'], { cwd: destRepo, stdio: 'ignore' });
     execFileSync('git', ['config', 'user.email', 'fixture@helios-lab.example'], { cwd: destRepo, stdio: 'ignore' });
     execFileSync('git', ['add', '-A'], { cwd: destRepo, stdio: 'ignore' });
     execFileSync(
@@ -250,7 +250,7 @@ async function main(): Promise<void> {
 
     if (!result.liveReachable) {
       console.error(
-        `[capture] Failure: Live Cairn server check failed (${result.probeError ?? 'unreachable'}). Start the server or pass --base-url.`
+        `[capture] Failure: Live FocusWiki server check failed (${result.probeError ?? 'unreachable'}). Start the server or pass --base-url.`
       );
       process.exit(1);
     }

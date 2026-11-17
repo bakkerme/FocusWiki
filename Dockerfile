@@ -15,7 +15,7 @@ RUN npm run build
 FROM node:22-bookworm-slim AS runtime
 
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends git ca-certificates curl \
+  && apt-get install -y --no-install-recommends git openssh-client ca-certificates curl \
   && rm -rf /var/lib/apt/lists/*
 
 # The existing samples belong to the host's builder account. Rootless UID
@@ -36,8 +36,8 @@ COPY seeds ./seeds
 COPY config ./config
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod 0755 /usr/local/bin/docker-entrypoint.sh \
-  && mkdir -p /app/sample-repos \
-  && chmod 0770 /app/sample-repos
+  && mkdir -p /app/sample-repos /app/repos \
+  && chmod 0770 /app/sample-repos /app/repos
 
 EXPOSE 8088
 

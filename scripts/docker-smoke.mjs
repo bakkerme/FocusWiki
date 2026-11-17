@@ -5,8 +5,8 @@ import { setTimeout } from 'node:timers/promises';
 
 // Exercise the actual runtime image without touching the working repositories or
 // publishing ports. Only this run's disposable container and volume are removed.
-const image = process.argv[2] ?? 'cairn-wiki-hub:latest';
-const name = `cairn-smoke-${randomUUID()}`;
+const image = process.argv[2] ?? 'focuswiki:latest';
+const name = `focuswiki-smoke-${randomUUID()}`;
 const volume = `${name}-repos`;
 
 function docker(...args) {

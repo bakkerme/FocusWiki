@@ -28,7 +28,7 @@ function copyDirRecursive(src: string, dest: string): void {
 function initGitRepo(repoDir: string): void {
   execFileSync('git', ['init', '-b', 'main'], { cwd: repoDir });
   execFileSync('git', ['config', 'user.name', 'Test Author'], { cwd: repoDir });
-  execFileSync('git', ['config', 'user.email', 'test@cairn.local'], { cwd: repoDir });
+  execFileSync('git', ['config', 'user.email', 'test@focuswiki.local'], { cwd: repoDir });
   execFileSync('git', ['add', '-A'], { cwd: repoDir });
   execFileSync('git', ['commit', '-m', 'Initial fixture'], { cwd: repoDir });
 }
@@ -48,7 +48,7 @@ describe('Council UI Design & Responsive IA Pass — Interactive Browser Verific
       process.env.PLAYWRIGHT_BROWSERS_PATH = localCache;
     }
 
-    tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cairn-ui-pass-test-'));
+    tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'focuswiki-ui-pass-test-'));
     repoRoot = path.join(tmpRoot, 'cindervault-rpg');
     heliosRoot = path.join(tmpRoot, 'helios-lab');
     copyDirRecursive(SEEDS_CINDERVAULT, repoRoot);
@@ -84,7 +84,11 @@ describe('Council UI Design & Responsive IA Pass — Interactive Browser Verific
     baseUrl = `http://127.0.0.1:${port}`;
 
     const { chromium } = await import('playwright');
-    browser = await chromium.launch({ headless: true, chromiumSandbox: true });
+    try {
+      browser = await chromium.launch({ headless: true, chromiumSandbox: true });
+    } catch {
+      browser = await chromium.launch({ headless: true });
+    }
   }, 25000);
 
   afterAll(async () => {
@@ -166,13 +170,13 @@ describe('Council UI Design & Responsive IA Pass — Interactive Browser Verific
       await page.locator('.thread-card.active button:has-text("Resolve")').click();
       const showResolvedCb = page.locator('.review-sidebar input[type="checkbox"]');
       await showResolvedCb.check();
-      await page.waitForSelector('.cairn-comment-highlight.is-resolved');
-      expect(await page.locator('.cairn-comment-highlight.is-open').count()).toBeGreaterThan(0);
+      await page.waitForSelector('.focus-comment-highlight.is-resolved');
+      expect(await page.locator('.focus-comment-highlight.is-open').count()).toBeGreaterThan(0);
 
       // Reopen resolved thread from compact summary button
       await page.locator('.thread-card.is-resolved button:has-text("Reopen")').first().click();
       await page.waitForFunction(
-        () => document.querySelectorAll('.cairn-comment-highlight.is-open').length >= 2
+        () => document.querySelectorAll('.focus-comment-highlight.is-open').length >= 2
       );
     } finally {
       await context.close();
@@ -867,7 +871,7 @@ describe('Council UI Design & Responsive IA Pass — Interactive Browser Verific
           h1Font: getComputedStyle(h1).fontFamily,
           proseSize: parseFloat(getComputedStyle(prose).fontSize),
           proseMaxWidth: getComputedStyle(document.querySelector('.workbench')!)
-            .getPropertyValue('--cairn-prose-max-width')
+            .getPropertyValue('--focus-prose-max-width')
             .trim(),
           proseRectWidth: prose.getBoundingClientRect().width,
           topbarBtnSize: parseFloat(getComputedStyle(topbarBtn).fontSize),
@@ -923,7 +927,7 @@ describe('Council UI Design & Responsive IA Pass — Interactive Browser Verific
           .click();
         const maxW = await page.evaluate(() =>
           getComputedStyle(document.querySelector('.workbench')!)
-            .getPropertyValue('--cairn-prose-max-width')
+            .getPropertyValue('--focus-prose-max-width')
             .trim()
         );
         expect(maxW).toBe(`${expectedWidths[widthKey]}px`);
@@ -1053,7 +1057,7 @@ describe('Council UI Design & Responsive IA Pass — Interactive Browser Verific
 
       // 6. Invalid/corrupt localStorage recovery in live browser
       await page.evaluate(() => {
-        window.localStorage.setItem('cairn:reading-preferences:v1', '{"version":1,"textSize":"giant","pageWidth":"invalid"}');
+        window.localStorage.setItem('focus:reading-preferences:v1', '{"version":1,"textSize":"giant","pageWidth":"invalid"}');
       });
       await page.reload();
       await page.waitForSelector('.workbench[data-text-size="standard"][data-page-width="standard"]');

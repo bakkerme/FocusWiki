@@ -349,7 +349,7 @@
       return Math.max(140, Math.ceil(document.body.getBoundingClientRect().height));
     }
 
-    function reportHeight(msgType = 'cairn:embed:resize') {
+    function reportHeight(msgType = 'focus:embed:resize') {
       window.parent.postMessage(
         { type: msgType, instanceId, height: measureIntrinsicHeight() },
         '*'
@@ -363,7 +363,7 @@
       render();
       window.parent.postMessage(
         {
-          type: 'cairn:embed:telemetry',
+          type: 'focus:embed:telemetry',
           instanceId,
           summary: `State: ${STATES[currentState].title} (${transitionCount} steps)`
         },
@@ -402,7 +402,7 @@
         btnContainer.appendChild(btn);
       });
 
-      reportHeight('cairn:embed:resize');
+      reportHeight('focus:embed:resize');
     }
 
     document.querySelectorAll('.state-node').forEach((el) => {
@@ -418,7 +418,7 @@
 
     window.addEventListener('message', (event) => {
       const data = event.data;
-      if (data && data.type === 'cairn:embed:init') {
+      if (data && data.type === 'focus:embed:init') {
         if (typeof data.instanceId === 'string') {
           instanceId = data.instanceId;
         }
@@ -426,18 +426,18 @@
           currentState = data.props.initialState;
           render();
         } else {
-          reportHeight('cairn:embed:resize');
+          reportHeight('focus:embed:resize');
         }
       }
     });
 
     if (typeof ResizeObserver !== 'undefined') {
-      new ResizeObserver(() => reportHeight('cairn:embed:resize')).observe(document.body);
+      new ResizeObserver(() => reportHeight('focus:embed:resize')).observe(document.body);
     }
-    window.addEventListener('resize', () => reportHeight('cairn:embed:resize'));
+    window.addEventListener('resize', () => reportHeight('focus:embed:resize'));
 
     render();
-    reportHeight('cairn:embed:ready');
+    reportHeight('focus:embed:ready');
   </script>
 </body>
 </html>

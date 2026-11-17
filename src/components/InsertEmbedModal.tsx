@@ -48,14 +48,19 @@ const STARTER_COMPONENT_HTML = `<!DOCTYPE html>
     document.getElementById('incBtn').addEventListener('click', () => {
       count += 1;
       document.getElementById('output').textContent = 'Counter: ' + count;
-      window.parent.postMessage({ type: 'cairn:embed:telemetry', summary: 'Counter = ' + count }, '*');
+      window.parent.postMessage({ type: 'focus:embed:telemetry', summary: 'Counter = ' + count }, '*');
     });
     window.addEventListener('message', (ev) => {
-      if (ev.data && ev.data.type === 'cairn:embed:init' && ev.data.props && ev.data.props.label) {
+      if (
+        ev.data &&
+        (ev.data.type === 'focus:embed:init' || ev.data.type === 'cairn:embed:init') &&
+        ev.data.props &&
+        ev.data.props.label
+      ) {
         document.getElementById('heading').textContent = String(ev.data.props.label);
       }
     });
-    window.parent.postMessage({ type: 'cairn:embed:ready', height: document.documentElement.scrollHeight }, '*');
+    window.parent.postMessage({ type: 'focus:embed:ready', height: document.documentElement.scrollHeight }, '*');
   </script>
 </body>
 </html>

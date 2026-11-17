@@ -1,9 +1,16 @@
+export interface ProjectSourceMeta {
+  originType?: 'managed-clone' | 'local-link' | 'initialized';
+  remoteUrl?: string;
+  importedAt?: string;
+}
+
 export interface ProjectConfig {
   id: string;
   name: string;
   description: string;
   rootPath: string;
   defaultDoc: string;
+  source?: ProjectSourceMeta;
 }
 
 export interface GitChangedFile {
@@ -18,6 +25,81 @@ export interface GitRepoStatus {
   headSubject: string;
   isClean: boolean;
   changedFiles: GitChangedFile[];
+  remoteName?: string | null;
+  remoteUrl?: string | null;
+  ahead?: number;
+  behind?: number;
+}
+
+export interface GitBranchEntry {
+  name: string;
+  kind: 'local' | 'remote';
+  remote?: string;
+  upstream?: string;
+  sha: string;
+  subject: string;
+  isCurrent: boolean;
+}
+
+export interface GitPullRequestRef {
+  number: number;
+  ref: string;
+  sha: string;
+  localBranch: string;
+  checkedOut: boolean;
+  subject?: string;
+}
+
+export interface GitRefsPayload {
+  status: GitRepoStatus;
+  hasRemote: boolean;
+  remoteName: string | null;
+  remoteUrl: string | null;
+  ahead: number;
+  behind: number;
+  branches: GitBranchEntry[];
+  pullRequests: GitPullRequestRef[];
+}
+
+export interface RepoInspectionResult {
+  valid: boolean;
+  path: string;
+  suggestedId: string;
+  suggestedName: string;
+  suggestedDefaultDoc: string;
+  docCount: number;
+  embedCount: number;
+  isGitRepo: boolean;
+  branch?: string;
+  remoteUrl?: string | null;
+  alreadyRegisteredId?: string | null;
+  error?: string;
+}
+
+export interface RemoteInspectResult {
+  url: string;
+  defaultBranch: string | null;
+  branches: string[];
+  pullRequests: Array<{ number: number; ref: string; sha: string }>;
+}
+
+export interface GitCredentialSummary {
+  id: string;
+  host: string;
+  username: string;
+  maskedHint: string;
+  source: 'stored' | 'env';
+  updatedAt?: string;
+}
+
+export interface ServerEnvironmentInfo {
+  managedReposDir: string;
+  allowedImportRoots: string[];
+  configPath: string | null;
+  credentialsPath: string | null;
+  encryptionMode: 'env-key' | 'file-key' | 'memory-only';
+  sshClientAvailable: boolean;
+  projectCount: number;
 }
 
 export interface DocTreeEntry {

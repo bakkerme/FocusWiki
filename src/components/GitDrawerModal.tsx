@@ -1,15 +1,21 @@
 import { useEffect, useRef, useState } from 'react';
 import {
+  ArrowDown,
+  ArrowUp,
   CheckCircle2,
   Code2,
+  Download,
   FileDiff,
   FilePlus2,
   FileText,
   FileX2,
   GitBranch,
+  GitPullRequest,
+  KeyRound,
   Layers,
   MessageSquare,
   RefreshCw,
+  Search,
   X
 } from 'lucide-react';
 import type {
@@ -20,14 +26,21 @@ import type {
   InertReviewBlock,
   MarkdownReviewEntry
 } from '../../shared/changeReview';
-import type { GitRepoStatus, ProjectSummary } from '../../shared/types';
+import type { GitRefsPayload, GitRepoStatus, ProjectSummary } from '../../shared/types';
 import { useModalOverlayFocus } from '../utils/overlayModal';
 
 interface Props {
   project: ProjectSummary;
   activeDocPath?: string;
+  defaultAuthorName?: string;
+  defaultAuthorEmail?: string;
+  defaultTab?: 'changes' | 'branches';
+  autoFetchOnOpen?: boolean;
+  includePrRefsOnFetch?: boolean;
+  onOpenCredentialsSettings?: (host?: string) => void;
   onClose: () => void;
   onCommitted: () => Promise<void>;
+  onRepoSynced?: (notice: string) => Promise<void>;
 }
 
 function renderDiffTokens(tokens: DiffToken[]) {
@@ -400,9 +413,23 @@ function renderMarkdownEntry(entry: MarkdownReviewEntry, index: number) {
   );
 }
 
-export function GitDrawerModal({ project, activeDocPath, onClose, onCommitted }: Props) {
+export function GitDrawerModal({
+  project,
+  activeDocPath,
+  defaultAuthorName,
+  defaultAuthorEmail,
+  defaultTab = 'changes',
+  autoFetchOnOpen = false,
+  includePrRefsOnFetch = true,
+  onOpenCredentialsSettings,
+  onClose,
+  onCommitted,
+  onRepoSynced
+}: Props) {
   const modalRef = useRef<HTMLDivElement | null>(null);
+  const [modalTab, setModalTab] = useState<'changes' | 'branches'>(defaultTab);
   const [loading, setLoading] = useState<boolean>(true);
+  const [refsLoading, setRefsLoading] = useState<boolean>(true);
   const [review, setReview] = useState<GitChangeReviewPayload>({
     status: project.git,
     diff: '',
@@ -410,12 +437,17 @@ export function GitDrawerModal({ project, activeDocPath, onClose, onCommitted }:
     commitScopeNote: '',
     files: []
   });
+  const [refsData, setRefsData] = useState<GitRefsPayload | null>(null);
+  const [branchFilter, setBranchFilter] = useState<string>('');
+  const [prNumberInput, setPrNumberInput] = useState<string>('');
+  const [syncingAction, setSyncingAction] = useState<'fetch' | 'pull' | 'checkout' | null>(null);
   const [selectedPath, setSelectedPath] = useState<string>('');
   const [viewMode, setViewMode] = useState<'rich' | 'raw-file' | 'raw-all'>('rich');
   const [commitMessage, setCommitMessage] = useState<string>('');
-  const [authorName, setAuthorName] = useState<string>('Workspace Author');
+  const [authorName, setAuthorName] = useState<string>(defaultAuthorName || 'Workspace Author');
   const [committing, setCommitting] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
+  const [authPromptHost, setAuthPromptHost] = useState<string | null>(null);
   const [commitResult, setCommitResult] = useState<string | null>(null);
 
   useModalOverlayFocus({
@@ -428,6 +460,7 @@ export function GitDrawerModal({ project, activeDocPath, onClose, onCommitted }:
   async function loadDiff(preferredPath?: string) {
     setLoading(true);
     setError(null);
+    setAuthPromptHost(null);
     try {
       const res = await fetch(`/api/projects/${encodeURIComponent(project.id)}/git/diff`);
       if (!res.ok) throw new Error(`Failed to read working-tree changes (${res.status})`);
@@ -447,16 +480,153 @@ export function GitDrawerModal({ project, activeDocPath, onClose, onCommitted }:
     }
   }
 
+  async function loadRefs() {
+    setRefsLoading(true);
+    try {
+      const res = await fetch(`/api/projects/${encodeURIComponent(project.id)}/git/refs`);
+      if (!res.ok) return;
+      const data = (await res.json()) as GitRefsPayload;
+      setRefsData(data);
+    } catch {
+      // non-fatal
+    } finally {
+      setRefsLoading(false);
+    }
+  }
+
   useEffect(() => {
     void loadDiff(activeDocPath);
+    void loadRefs();
+    if (autoFetchOnOpen && project.git.remoteName) {
+      void handleFetch();
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [project.id]);
+
+  async function handleFetch() {
+    if (syncingAction) return;
+    setSyncingAction('fetch');
+    setError(null);
+    setAuthPromptHost(null);
+    try {
+      const res = await fetch(`/api/projects/${encodeURIComponent(project.id)}/git/fetch`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ includePrRefs: includePrRefsOnFetch })
+      });
+      const body = (await res.json()) as GitRefsPayload & {
+        error?: string;
+        host?: string | null;
+        message?: string;
+      };
+      if (!res.ok) {
+        if (res.status === 401 || body.error === 'auth_required') {
+          setAuthPromptHost(body.host ?? null);
+        }
+        throw new Error(body.message ?? 'Fetch failed');
+      }
+      setRefsData(body);
+      setCommitResult(
+        `Fetched remote branches${body.pullRequests.length > 0 ? ` and ${body.pullRequests.length} PR refs` : ''} from ${body.remoteName ?? 'origin'}.`
+      );
+      await onCommitted();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Fetch failed');
+    } finally {
+      setSyncingAction(null);
+    }
+  }
+
+  async function handlePull() {
+    if (syncingAction) return;
+    setSyncingAction('pull');
+    setError(null);
+    setAuthPromptHost(null);
+    try {
+      const res = await fetch(`/api/projects/${encodeURIComponent(project.id)}/git/pull`, {
+        method: 'POST'
+      });
+      const body = (await res.json()) as {
+        status?: GitRepoStatus;
+        summary?: string;
+        updated?: boolean;
+        error?: string;
+        host?: string | null;
+        message?: string;
+      };
+      if (!res.ok) {
+        if (res.status === 401 || body.error === 'auth_required') {
+          setAuthPromptHost(body.host ?? null);
+        }
+        throw new Error(body.message ?? 'Pull failed');
+      }
+      const notice = body.summary ?? 'Pulled latest changes from remote.';
+      setCommitResult(notice);
+      await loadDiff(activeDocPath);
+      await loadRefs();
+      if (onRepoSynced) {
+        await onRepoSynced(notice);
+      } else {
+        await onCommitted();
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Pull failed');
+    } finally {
+      setSyncingAction(null);
+    }
+  }
+
+  async function handleCheckoutTarget(target: {
+    kind: 'local' | 'remote' | 'pr';
+    ref: string;
+    prNumber?: number;
+  }) {
+    if (syncingAction) return;
+    setSyncingAction('checkout');
+    setError(null);
+    setAuthPromptHost(null);
+    try {
+      const res = await fetch(`/api/projects/${encodeURIComponent(project.id)}/git/checkout`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(target)
+      });
+      const body = (await res.json()) as {
+        status?: GitRepoStatus;
+        branch?: string;
+        error?: string;
+        host?: string | null;
+        message?: string;
+      };
+      if (!res.ok) {
+        if (res.status === 401 || body.error === 'auth_required') {
+          setAuthPromptHost(body.host ?? null);
+        }
+        throw new Error(body.message ?? 'Branch checkout failed');
+      }
+      const notice = `Switched repository to ${body.branch ?? target.ref}.`;
+      setCommitResult(notice);
+      if (target.kind === 'pr') setPrNumberInput('');
+      await loadDiff(activeDocPath);
+      await loadRefs();
+      if (onRepoSynced) {
+        await onRepoSynced(notice);
+      } else {
+        await onCommitted();
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Checkout failed');
+    } finally {
+      setSyncingAction(null);
+    }
+  }
 
   async function handleCommit(e: React.FormEvent) {
     e.preventDefault();
     if (!commitMessage.trim() || review.status.isClean) return;
     setCommitting(true);
     setError(null);
+    setAuthPromptHost(null);
     try {
       const res = await fetch(`/api/projects/${encodeURIComponent(project.id)}/git/commit`, {
         method: 'POST',
@@ -464,6 +634,7 @@ export function GitDrawerModal({ project, activeDocPath, onClose, onCommitted }:
         body: JSON.stringify({
           message: commitMessage.trim(),
           authorName: authorName.trim() || 'Workspace Author',
+          ...(defaultAuthorEmail?.trim() ? { authorEmail: defaultAuthorEmail.trim() } : {}),
           expectedSnapshotDigest: review.snapshotDigest
         })
       });
@@ -655,6 +826,32 @@ export function GitDrawerModal({ project, activeDocPath, onClose, onCommitted }:
     );
   }
 
+  const filterNeedle = branchFilter.trim().toLowerCase();
+  const localBranches = (refsData?.branches ?? []).filter(
+    (b) =>
+      b.kind === 'local' &&
+      (!filterNeedle ||
+        b.name.toLowerCase().includes(filterNeedle) ||
+        b.subject.toLowerCase().includes(filterNeedle))
+  );
+  const remoteBranches = (refsData?.branches ?? []).filter(
+    (b) =>
+      b.kind === 'remote' &&
+      (!filterNeedle ||
+        b.name.toLowerCase().includes(filterNeedle) ||
+        b.subject.toLowerCase().includes(filterNeedle))
+  );
+  const prRefs = (refsData?.pullRequests ?? []).filter(
+    (pr) =>
+      !filterNeedle ||
+      `#${pr.number}`.includes(filterNeedle) ||
+      pr.localBranch.toLowerCase().includes(filterNeedle) ||
+      (pr.subject ?? '').toLowerCase().includes(filterNeedle)
+  );
+  const hasRemote = Boolean(refsData?.hasRemote ?? status.remoteName);
+  const aheadCount = refsData?.ahead ?? status.ahead ?? 0;
+  const behindCount = refsData?.behind ?? status.behind ?? 0;
+
   return (
     <div className="modal-backdrop" onClick={onClose}>
       <div
@@ -663,30 +860,76 @@ export function GitDrawerModal({ project, activeDocPath, onClose, onCommitted }:
         onClick={(e) => e.stopPropagation()}
         role="dialog"
         aria-modal="true"
-        aria-label="Review working changes and commit locally"
+        aria-label="Repository Git sync, branches, and working changes"
         tabIndex={-1}
       >
         <div className="change-review-header">
           <div className="change-review-title-block">
             <div className="change-review-title-row">
-              <h2>Review working changes</h2>
+              <h2>Repository Git</h2>
               <span className="code-chip">
                 <GitBranch size={11} aria-hidden="true" /> {status.branch}
                 {status.headSha ? ` @ ${status.headSha}` : ''}
               </span>
+              {aheadCount > 0 && (
+                <span className="code-chip git-sync-chip" title={`${aheadCount} local commit(s) ahead`}>
+                  <ArrowUp size={11} aria-hidden="true" /> {aheadCount}
+                </span>
+              )}
+              {behindCount > 0 && (
+                <span className="code-chip git-sync-chip is-behind" title={`${behindCount} commit(s) behind remote`}>
+                  <ArrowDown size={11} aria-hidden="true" /> {behindCount}
+                </span>
+              )}
             </div>
             <div className="change-review-checkout" title={project.rootPath}>
               Checkout: <code>{project.rootPath}</code>
+              {refsData?.remoteUrl && (
+                <span className="git-remote-inline" title={refsData.remoteUrl}>
+                  {' '}· Remote: <code>{refsData.remoteUrl}</code>
+                </span>
+              )}
             </div>
           </div>
 
           <div className="change-review-header-actions">
+            {hasRemote && (
+              <>
+                <button
+                  type="button"
+                  className="btn btn-compact"
+                  onClick={() => void handleFetch()}
+                  disabled={Boolean(syncingAction) || committing}
+                  title="Fetch latest remote branches and pull request refs"
+                >
+                  <RefreshCw size={13} aria-hidden="true" />
+                  <span>{syncingAction === 'fetch' ? 'Fetching…' : 'Fetch'}</span>
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-compact"
+                  onClick={() => void handlePull()}
+                  disabled={!status.isClean || Boolean(syncingAction) || committing}
+                  title={
+                    !status.isClean
+                      ? 'Commit or revert local changes before pulling'
+                      : 'Fast-forward pull current branch from remote'
+                  }
+                >
+                  <Download size={13} aria-hidden="true" />
+                  <span>{syncingAction === 'pull' ? 'Pulling…' : 'Pull'}</span>
+                </button>
+              </>
+            )}
             <button
               type="button"
               className="btn btn-compact"
-              onClick={() => void loadDiff(selectedPath)}
-              disabled={loading || committing}
-              title="Refresh working-tree diff against HEAD"
+              onClick={() => {
+                void loadDiff(selectedPath);
+                void loadRefs();
+              }}
+              disabled={loading || committing || Boolean(syncingAction)}
+              title="Refresh Git status"
             >
               <RefreshCw size={13} aria-hidden="true" />
               <span>Refresh</span>
@@ -695,10 +938,34 @@ export function GitDrawerModal({ project, activeDocPath, onClose, onCommitted }:
               type="button"
               className="icon-btn panel-close-btn change-review-close-btn"
               onClick={onClose}
-              aria-label="Close change review"
+              aria-label="Close Git dialog"
               title="Close"
             >
               <X size={16} aria-hidden="true" />
+            </button>
+          </div>
+        </div>
+
+        <div className="git-modal-subbar">
+          <div className="mode-switch" role="tablist" aria-label="Git inspection view">
+            <button
+              type="button"
+              role="tab"
+              aria-selected={modalTab === 'changes'}
+              className={modalTab === 'changes' ? 'active' : ''}
+              onClick={() => setModalTab('changes')}
+            >
+              <span>Working changes{changedCount > 0 ? ` (${changedCount})` : ''}</span>
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={modalTab === 'branches'}
+              className={modalTab === 'branches' ? 'active' : ''}
+              onClick={() => setModalTab('branches')}
+            >
+              <GitBranch size={12} aria-hidden="true" />
+              <span>Branches & PRs</span>
             </button>
           </div>
         </div>
@@ -712,163 +979,375 @@ export function GitDrawerModal({ project, activeDocPath, onClose, onCommitted }:
         {error && (
           <div className="notice-banner conflict change-review-banner">
             <span>{error}</span>
+            {authPromptHost && onOpenCredentialsSettings && (
+              <button
+                type="button"
+                className="btn btn-compact"
+                onClick={() => {
+                  onClose();
+                  onOpenCredentialsSettings(authPromptHost);
+                }}
+              >
+                <KeyRound size={12} aria-hidden="true" />
+                <span>Configure PAT for {authPromptHost}</span>
+              </button>
+            )}
           </div>
         )}
 
-        {loading ? (
-          <div className="change-review-empty">Inspecting working copy against HEAD…</div>
-        ) : status.isClean || review.files.length === 0 ? (
-          <div className="change-review-empty">
-            <CheckCircle2 size={20} aria-hidden="true" />
-            <div>
-              <strong>Working copy matches HEAD ({status.branch})</strong>
-              <p>Autosaved edits, comment updates, and new components appear here before you commit.</p>
-            </div>
-          </div>
-        ) : (
-          <div className="change-review-body">
-            <aside className="change-file-rail" aria-label="Changed files in working copy">
-              <div className="change-rail-heading">
-                Changed files ({review.files.length})
+        {modalTab === 'changes' ? (
+          <>
+            {loading ? (
+              <div className="change-review-empty">Inspecting working copy against HEAD…</div>
+            ) : status.isClean || review.files.length === 0 ? (
+              <div className="change-review-empty">
+                <CheckCircle2 size={20} aria-hidden="true" />
+                <div>
+                  <strong>Working copy matches HEAD ({status.branch})</strong>
+                  <p>
+                    Autosaved edits, comment updates, and new components appear here before you commit.
+                  </p>
+                </div>
               </div>
-              <div className="change-file-list">
-                {review.files.map((file) => {
-                  const active = selectedFile?.path === file.path && viewMode !== 'raw-all';
-                  return (
-                    <button
-                      key={file.path}
-                      type="button"
-                      className={`change-file-item ${active ? 'active' : ''}`}
-                      onClick={() => {
-                        setSelectedPath(file.path);
-                        if (viewMode === 'raw-all') {
-                          setViewMode('rich');
-                        }
-                      }}
-                    >
-                      <div className="change-file-item-top">
-                        {renderFileIcon(file)}
-                        <span className="change-file-human">{file.humanTitle}</span>
-                      </div>
-                      <div className="change-file-path">
-                        {file.oldPath ? `${file.oldPath} → ${file.path}` : file.path}
-                      </div>
-                      <div className="change-file-meta-row">
-                        <span
-                          className={`change-status-tag is-${
-                            file.formattingOnly ? 'formatting' : file.status
-                          }`}
-                        >
-                          {file.formattingOnly ? 'formatting' : file.status}
-                        </span>
-                        <span className="change-file-summary">{file.summaryLabel}</span>
-                      </div>
-                    </button>
-                  );
-                })}
-              </div>
-            </aside>
-
-            <section className="change-detail-pane" aria-label="Selected file comparison">
-              {selectedFile && (
-                <>
-                  <div className="change-detail-toolbar">
-                    <div className="change-detail-identity">
-                      <div className="change-detail-title">{selectedFile.humanTitle}</div>
-                      <div className="change-detail-path">
-                        {selectedFile.oldPath
-                          ? `${selectedFile.oldPath} → ${selectedFile.path}`
-                          : selectedFile.path}
-                      </div>
-                    </div>
-
-                    <div className="mode-switch change-view-switch" role="group" aria-label="Diff display mode">
-                      <button
-                        type="button"
-                        className={viewMode === 'rich' ? 'active' : ''}
-                        onClick={() => setViewMode('rich')}
-                      >
-                        Rich review
-                      </button>
-                      <button
-                        type="button"
-                        className={viewMode === 'raw-file' ? 'active' : ''}
-                        onClick={() => setViewMode('raw-file')}
-                      >
-                        Raw diff
-                      </button>
-                      {review.files.length > 1 && (
-                        <button
-                          type="button"
-                          className={viewMode === 'raw-all' ? 'active' : ''}
-                          onClick={() => setViewMode('raw-all')}
-                        >
-                          All raw ({review.files.length})
-                        </button>
-                      )}
-                    </div>
+            ) : (
+              <div className="change-review-body">
+                <aside className="change-file-rail" aria-label="Changed files in working copy">
+                  <div className="change-rail-heading">
+                    Changed files ({review.files.length})
                   </div>
+                  <div className="change-file-list">
+                    {review.files.map((file) => {
+                      const active = selectedFile?.path === file.path && viewMode !== 'raw-all';
+                      return (
+                        <button
+                          key={file.path}
+                          type="button"
+                          className={`change-file-item ${active ? 'active' : ''}`}
+                          onClick={() => {
+                            setSelectedPath(file.path);
+                            if (viewMode === 'raw-all') {
+                              setViewMode('rich');
+                            }
+                          }}
+                        >
+                          <div className="change-file-item-top">
+                            {renderFileIcon(file)}
+                            <span className="change-file-human">{file.humanTitle}</span>
+                          </div>
+                          <div className="change-file-path">
+                            {file.oldPath ? `${file.oldPath} → ${file.path}` : file.path}
+                          </div>
+                          <div className="change-file-meta-row">
+                            <span
+                              className={`change-status-tag is-${
+                                file.formattingOnly ? 'formatting' : file.status
+                              }`}
+                            >
+                              {file.formattingOnly ? 'formatting' : file.status}
+                            </span>
+                            <span className="change-file-summary">{file.summaryLabel}</span>
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </aside>
 
-                  <div className="change-detail-scroll">
-                    {viewMode === 'rich' ? (
-                      renderSelectedFileRichBody(selectedFile)
-                    ) : viewMode === 'raw-file' ? (
-                      <pre className="diff-viewer">
-                        {selectedFile.rawPatch || 'No textual git diff lines for this file.'}
-                      </pre>
-                    ) : (
-                      <pre className="diff-viewer">
-                        {review.diff || 'No uncommitted diff lines.'}
-                      </pre>
+                <section className="change-detail-pane" aria-label="Selected file comparison">
+                  {selectedFile && (
+                    <>
+                      <div className="change-detail-toolbar">
+                        <div className="change-detail-identity">
+                          <div className="change-detail-title">{selectedFile.humanTitle}</div>
+                          <div className="change-detail-path">
+                            {selectedFile.oldPath
+                              ? `${selectedFile.oldPath} → ${selectedFile.path}`
+                              : selectedFile.path}
+                          </div>
+                        </div>
+
+                        <div
+                          className="mode-switch change-view-switch"
+                          role="group"
+                          aria-label="Diff display mode"
+                        >
+                          <button
+                            type="button"
+                            className={viewMode === 'rich' ? 'active' : ''}
+                            onClick={() => setViewMode('rich')}
+                          >
+                            Rich review
+                          </button>
+                          <button
+                            type="button"
+                            className={viewMode === 'raw-file' ? 'active' : ''}
+                            onClick={() => setViewMode('raw-file')}
+                          >
+                            Raw diff
+                          </button>
+                          {review.files.length > 1 && (
+                            <button
+                              type="button"
+                              className={viewMode === 'raw-all' ? 'active' : ''}
+                              onClick={() => setViewMode('raw-all')}
+                            >
+                              All raw ({review.files.length})
+                            </button>
+                          )}
+                        </div>
+                      </div>
+
+                      <div className="change-detail-scroll">
+                        {viewMode === 'rich' ? (
+                          renderSelectedFileRichBody(selectedFile)
+                        ) : viewMode === 'raw-file' ? (
+                          <pre className="diff-viewer">
+                            {selectedFile.rawPatch || 'No textual git diff lines for this file.'}
+                          </pre>
+                        ) : (
+                          <pre className="diff-viewer">
+                            {review.diff || 'No uncommitted diff lines.'}
+                          </pre>
+                        )}
+                      </div>
+                    </>
+                  )}
+                </section>
+              </div>
+            )}
+
+            <form className="change-commit-footer" onSubmit={(e) => void handleCommit(e)}>
+              <div className="change-commit-scope">
+                <FileDiff size={13} aria-hidden="true" />
+                <span>
+                  {review.commitScopeNote || `Local branch ${status.branch} (never pushes).`}
+                </span>
+              </div>
+              <div className="change-commit-inputs">
+                <input
+                  type="text"
+                  className="field-input commit-message-input"
+                  aria-label="Commit message"
+                  placeholder={
+                    status.isClean
+                      ? 'No uncommitted changes'
+                      : 'Summarize these changes for local Git history…'
+                  }
+                  value={commitMessage}
+                  onChange={(e) => setCommitMessage(e.target.value)}
+                  disabled={status.isClean || committing}
+                />
+                <input
+                  type="text"
+                  className="field-input commit-author-input"
+                  aria-label="Commit author name"
+                  placeholder="Author name"
+                  value={authorName}
+                  onChange={(e) => setAuthorName(e.target.value)}
+                  disabled={status.isClean || committing}
+                />
+                <button
+                  type="submit"
+                  className="btn btn-primary commit-submit-btn"
+                  disabled={status.isClean || !commitMessage.trim() || committing}
+                >
+                  {committing
+                    ? 'Committing…'
+                    : changedCount > 0
+                      ? `Commit ${changedCount} ${changedCount === 1 ? 'file' : 'files'}`
+                      : 'Commit changes'}
+                </button>
+              </div>
+            </form>
+          </>
+        ) : (
+          <div className="git-branches-panel">
+            {!status.isClean && (
+              <div className="git-dirty-guard-banner">
+                Working copy has {changedCount} uncommitted{' '}
+                {changedCount === 1 ? 'file' : 'files'}. Commit or revert changes before switching
+                branches or pulling.
+              </div>
+            )}
+
+            <div className="git-branches-toolbar">
+              <div className="search-box git-branch-filter-box">
+                <Search size={13} className="search-icon" aria-hidden="true" />
+                <input
+                  type="search"
+                  className="search-input"
+                  aria-label="Filter branches and pull requests"
+                  placeholder="Filter branches or PRs…"
+                  value={branchFilter}
+                  onChange={(e) => setBranchFilter(e.target.value)}
+                />
+              </div>
+
+              {hasRemote && (
+                <form
+                  className="git-pr-quick-form"
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    const num = Number.parseInt(prNumberInput.trim().replace(/^#/, ''), 10);
+                    if (!Number.isInteger(num) || num <= 0) {
+                      setError('Enter a positive pull request number.');
+                      return;
+                    }
+                    void handleCheckoutTarget({ kind: 'pr', ref: `pr/${num}`, prNumber: num });
+                  }}
+                >
+                  <input
+                    type="text"
+                    className="field-input field-code git-pr-input"
+                    aria-label="Pull request number"
+                    placeholder="PR #"
+                    value={prNumberInput}
+                    onChange={(e) => setPrNumberInput(e.target.value)}
+                    disabled={!status.isClean || Boolean(syncingAction)}
+                  />
+                  <button
+                    type="submit"
+                    className="btn btn-compact"
+                    disabled={!status.isClean || !prNumberInput.trim() || Boolean(syncingAction)}
+                    title="Fetch and check out pull request by number"
+                  >
+                    <GitPullRequest size={13} aria-hidden="true" />
+                    <span>Checkout PR</span>
+                  </button>
+                </form>
+              )}
+            </div>
+
+            {refsLoading ? (
+              <div className="change-review-empty">Loading branches and pull requests…</div>
+            ) : (
+              <div className="git-refs-scroll">
+                <section className="git-ref-group">
+                  <div className="git-ref-group-heading">
+                    <span>Pull requests ({prRefs.length})</span>
+                    {hasRemote && (
+                      <span className="git-ref-group-hint">
+                        Click Fetch above to refresh PR heads from remote
+                      </span>
                     )}
                   </div>
-                </>
-              )}
-            </section>
+                  {prRefs.length === 0 ? (
+                    <div className="git-ref-empty">
+                      No fetched PR branches yet. Use Fetch or enter a PR # above.
+                    </div>
+                  ) : (
+                    <div className="git-ref-list">
+                      {prRefs.map((pr) => (
+                        <div
+                          key={pr.ref}
+                          className={`git-ref-row ${pr.checkedOut ? 'is-current' : ''}`}
+                        >
+                          <div className="git-ref-main">
+                            <div className="git-ref-title">
+                              <GitPullRequest size={13} aria-hidden="true" />
+                              <strong>PR #{pr.number}</strong>
+                              <span className="code-chip">{pr.sha}</span>
+                              {pr.checkedOut && <span className="git-current-pill">Active</span>}
+                            </div>
+                            {pr.subject && <div className="git-ref-subject">{pr.subject}</div>}
+                          </div>
+                          {!pr.checkedOut && (
+                            <button
+                              type="button"
+                              className="btn btn-compact"
+                              disabled={!status.isClean || Boolean(syncingAction)}
+                              onClick={() =>
+                                void handleCheckoutTarget({
+                                  kind: 'pr',
+                                  ref: pr.localBranch,
+                                  prNumber: pr.number
+                                })
+                              }
+                            >
+                              Switch
+                            </button>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </section>
+
+                <section className="git-ref-group">
+                  <div className="git-ref-group-heading">
+                    <span>Local branches ({localBranches.length})</span>
+                  </div>
+                  {localBranches.length === 0 ? (
+                    <div className="git-ref-empty">No matching local branches.</div>
+                  ) : (
+                    <div className="git-ref-list">
+                      {localBranches.map((br) => (
+                        <div
+                          key={br.name}
+                          className={`git-ref-row ${br.isCurrent ? 'is-current' : ''}`}
+                        >
+                          <div className="git-ref-main">
+                            <div className="git-ref-title">
+                              <GitBranch size={13} aria-hidden="true" />
+                              <code>{br.name}</code>
+                              <span className="code-chip">{br.sha}</span>
+                              {br.isCurrent && <span className="git-current-pill">Active</span>}
+                            </div>
+                            {br.subject && <div className="git-ref-subject">{br.subject}</div>}
+                          </div>
+                          {!br.isCurrent && (
+                            <button
+                              type="button"
+                              className="btn btn-compact"
+                              disabled={!status.isClean || Boolean(syncingAction)}
+                              onClick={() =>
+                                void handleCheckoutTarget({ kind: 'local', ref: br.name })
+                              }
+                            >
+                              Switch
+                            </button>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </section>
+
+                {remoteBranches.length > 0 && (
+                  <section className="git-ref-group">
+                    <div className="git-ref-group-heading">
+                      <span>Remote branches ({remoteBranches.length})</span>
+                    </div>
+                    <div className="git-ref-list">
+                      {remoteBranches.map((br) => (
+                        <div key={br.name} className="git-ref-row">
+                          <div className="git-ref-main">
+                            <div className="git-ref-title">
+                              <GitBranch size={13} aria-hidden="true" />
+                              <code>{br.name}</code>
+                              <span className="code-chip">{br.sha}</span>
+                            </div>
+                            {br.subject && <div className="git-ref-subject">{br.subject}</div>}
+                          </div>
+                          <button
+                            type="button"
+                            className="btn btn-compact"
+                            disabled={!status.isClean || Boolean(syncingAction)}
+                            onClick={() =>
+                              void handleCheckoutTarget({ kind: 'remote', ref: br.name })
+                            }
+                          >
+                            Checkout
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  </section>
+                )}
+              </div>
+            )}
           </div>
         )}
-
-        <form className="change-commit-footer" onSubmit={(e) => void handleCommit(e)}>
-          <div className="change-commit-scope">
-            <FileDiff size={13} aria-hidden="true" />
-            <span>{review.commitScopeNote || `Local branch ${status.branch} (never pushes).`}</span>
-          </div>
-          <div className="change-commit-inputs">
-            <input
-              type="text"
-              className="field-input commit-message-input"
-              aria-label="Commit message"
-              placeholder={
-                status.isClean
-                  ? 'No uncommitted changes'
-                  : 'Summarize these changes for local Git history…'
-              }
-              value={commitMessage}
-              onChange={(e) => setCommitMessage(e.target.value)}
-              disabled={status.isClean || committing}
-            />
-            <input
-              type="text"
-              className="field-input commit-author-input"
-              aria-label="Commit author name"
-              placeholder="Author name"
-              value={authorName}
-              onChange={(e) => setAuthorName(e.target.value)}
-              disabled={status.isClean || committing}
-            />
-            <button
-              type="submit"
-              className="btn btn-primary commit-submit-btn"
-              disabled={status.isClean || !commitMessage.trim() || committing}
-            >
-              {committing
-                ? 'Committing…'
-                : changedCount > 0
-                  ? `Commit ${changedCount} ${changedCount === 1 ? 'file' : 'files'}`
-                  : 'Commit changes'}
-            </button>
-          </div>
-        </form>
       </div>
     </div>
   );

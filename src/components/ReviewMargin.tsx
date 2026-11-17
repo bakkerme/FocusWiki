@@ -349,7 +349,7 @@ export function ReviewMargin(props: Props) {
 
   return (
     <aside
-      id="cairn-review-panel"
+      id="focus-review-panel"
       ref={panelRef}
       className={`review-sidebar ${isOverlay ? 'is-overlay is-overlay-open is-mobile-open' : 'is-docked'}`}
       role={isOverlay ? 'dialog' : undefined}

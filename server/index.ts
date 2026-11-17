@@ -8,11 +8,13 @@ import { createHubApp } from './app.js';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT_DIR = path.resolve(__dirname, __dirname.includes(`${path.sep}dist${path.sep}`) ? '../../..' : '..');
 
-function loadProjectsConfig(): ProjectConfig[] {
-  const configPath = process.env.PROJECTS_CONFIG
+function resolveConfigPath(): string {
+  return process.env.PROJECTS_CONFIG
     ? path.resolve(process.env.PROJECTS_CONFIG)
     : path.join(ROOT_DIR, 'config', 'projects.json');
+}
 
+function loadProjectsConfig(configPath: string): ProjectConfig[] {
   if (!fs.existsSync(configPath)) {
     throw new Error(
       `Missing projects config at ${configPath}. Run "npm run seed" first to initialize sample repositories.`
@@ -43,9 +45,31 @@ async function main(): Promise<void> {
     ? path.resolve(process.env.CLIENT_DIST_DIR)
     : path.join(ROOT_DIR, 'dist', 'client');
 
-  const projects = loadProjectsConfig();
+  const configPath = resolveConfigPath();
+  const rawCredPath = process.env.CAIRN_CREDENTIALS_FILE ?? process.env.FOCUSWIKI_CREDENTIALS_FILE;
+  const credentialsPath = rawCredPath
+    ? path.resolve(rawCredPath)
+    : path.join(path.dirname(configPath), '.git-credentials.enc.json');
+  const rawReposDir = process.env.FOCUSWIKI_REPOS_DIR ?? process.env.CAIRN_REPOS_DIR;
+  const managedReposDir = rawReposDir
+    ? path.resolve(rawReposDir)
+    : path.join(ROOT_DIR, 'repos');
+  const rawAllowedImportRoots =
+    process.env.FOCUSWIKI_ALLOWED_IMPORT_ROOTS ?? process.env.CAIRN_ALLOWED_IMPORT_ROOTS;
+  const allowedImportRoots = rawAllowedImportRoots
+    ? rawAllowedImportRoots
+        .split(',')
+        .map((p) => p.trim())
+        .filter(Boolean)
+    : [ROOT_DIR, managedReposDir, ...(fs.existsSync('/workspace') ? ['/workspace'] : [])];
+
+  const projects = loadProjectsConfig(configPath);
   const hub = createHubApp({
     projects,
+    configPath,
+    credentialsPath,
+    managedReposDir,
+    allowedImportRoots,
     clientDistDir,
     enableWatcher: true
   });
@@ -57,7 +81,7 @@ async function main(): Promise<void> {
       srv.once('error', (err: NodeJS.ErrnoException) => {
         // If optional secondary interface (e.g. Tailscale inside isolated container) isn't present, skip cleanly if 127.0.0.1/0.0.0.0 succeeds
         if (err.code === 'EADDRNOTAVAIL' && requestedHosts.length > 1) {
-          console.warn(`[cairn] Skipping unavailable interface ${host}:${port}`);
+          console.warn(`[focuswiki] Skipping unavailable interface ${host}:${port}`);
           resolve();
           return;
         }
@@ -65,7 +89,7 @@ async function main(): Promise<void> {
       });
       srv.listen(port, host, () => {
         servers.push(srv);
-        console.log(`[cairn] Listening on http://${host}:${port}`);
+        console.log(`[focuswiki] Listening on http://${host}:${port}`);
         resolve();
       });
     });
@@ -76,7 +100,7 @@ async function main(): Promise<void> {
   }
 
   const shutdown = async (signal: string) => {
-    console.log(`[cairn] Received ${signal}, shutting down...`);
+    console.log(`[focuswiki] Received ${signal}, shutting down...`);
     await hub.close();
     await Promise.all(
       servers.map(
@@ -94,6 +118,6 @@ async function main(): Promise<void> {
 }
 
 main().catch((err) => {
-  console.error('[cairn] Startup failed:', err);
+  console.error('[focuswiki] Startup failed:', err);
   process.exit(1);
 });

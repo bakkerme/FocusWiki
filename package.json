@@ -1,5 +1,5 @@
 {
-  "name": "cairn-wiki-hub",
+  "name": "focuswiki",
   "version": "0.1.0",
   "private": true,
   "description": "Self-hosted repository documentation hub with visual Markdown editing, sandboxed embeds, and portable anchored comments",

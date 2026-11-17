@@ -296,7 +296,7 @@
       return Math.max(140, Math.ceil(document.body.getBoundingClientRect().height));
     }
 
-    function reportHeight(msgType = 'cairn:embed:resize') {
+    function reportHeight(msgType = 'focus:embed:resize') {
       window.parent.postMessage(
         { type: msgType, instanceId, height: measureIntrinsicHeight() },
         '*'
@@ -361,10 +361,10 @@
       document.getElementById('stepCounter').textContent = `Beat ${index + 1} of ${BEATS.length} (fictional trace)`;
 
       window.parent.postMessage(
-        { type: 'cairn:embed:telemetry', instanceId, summary: `Beat ${index + 1}/${BEATS.length}: ${beat.short}` },
+        { type: 'focus:embed:telemetry', instanceId, summary: `Beat ${index + 1}/${BEATS.length}: ${beat.short}` },
         '*'
       );
-      reportHeight('cairn:embed:resize');
+      reportHeight('focus:embed:resize');
     }
 
     document.getElementById('prevBtn').addEventListener('click', () => {
@@ -383,7 +383,7 @@
     });
 
     window.addEventListener('message', (event) => {
-      if (event.data && event.data.type === 'cairn:embed:init') {
+      if (event.data && event.data.type === 'focus:embed:init') {
         if (typeof event.data.instanceId === 'string') {
           instanceId = event.data.instanceId;
         }
@@ -395,17 +395,17 @@
             return;
           }
         }
-        reportHeight('cairn:embed:resize');
+        reportHeight('focus:embed:resize');
       }
     });
 
     if (typeof ResizeObserver !== 'undefined') {
-      new ResizeObserver(() => reportHeight('cairn:embed:resize')).observe(document.body);
+      new ResizeObserver(() => reportHeight('focus:embed:resize')).observe(document.body);
     }
-    window.addEventListener('resize', () => reportHeight('cairn:embed:resize'));
+    window.addEventListener('resize', () => reportHeight('focus:embed:resize'));
 
     render();
-    reportHeight('cairn:embed:ready');
+    reportHeight('focus:embed:ready');
   </script>
 </body>
 </html>

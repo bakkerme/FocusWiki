@@ -7,7 +7,7 @@ import {
   type CaptureTargetSpec,
   type InPageCaptureResult,
   type RecordedScreenEntry,
-  CAIRN_APP_BOOT_CHECK_EXPRESSION,
+  FOCUSWIKI_APP_BOOT_CHECK_EXPRESSION,
   buildInPageStepAndReadinessExpression,
   buildTargetInPageSpec,
   createCapturePlan,
@@ -68,7 +68,7 @@ function isAllowedLocalOrPrivateHost(hostname: string): boolean {
   return false;
 }
 
-export function assertLocalCairnBaseUrl(rawUrl: string): void {
+export function assertLocalFocusWikiBaseUrl(rawUrl: string): void {
   let parsed: URL;
   try {
     parsed = new URL(rawUrl);
@@ -82,7 +82,7 @@ export function assertLocalCairnBaseUrl(rawUrl: string): void {
 
   if (!isAllowedLocalOrPrivateHost(parsed.hostname)) {
     throw new Error(
-      `Refusing non-local --base-url host "${parsed.hostname}". Playwright runner is scoped strictly to local/private Cairn services.`
+      `Refusing non-local --base-url host "${parsed.hostname}". Playwright runner is scoped strictly to local/private FocusWiki services.`
     );
   }
 }
@@ -155,7 +155,7 @@ async function captureSingleTargetWithPlaywright(options: {
     }
 
     currentStep = 'wait-app-boot';
-    await page.waitForFunction(CAIRN_APP_BOOT_CHECK_EXPRESSION, undefined, {
+    await page.waitForFunction(FOCUSWIKI_APP_BOOT_CHECK_EXPRESSION, undefined, {
       timeout: totalTimeoutMs
     });
 
@@ -277,7 +277,7 @@ export async function runPlaywrightCapture(
   configureLocalPlaywrightBrowsersPath(options.projectRoot);
 
   if (options.baseUrl) {
-    assertLocalCairnBaseUrl(options.baseUrl);
+    assertLocalFocusWikiBaseUrl(options.baseUrl);
   }
 
   const plan = await createCapturePlan({
@@ -291,10 +291,10 @@ export async function runPlaywrightCapture(
     resetExistingResults: true
   });
 
-  assertLocalCairnBaseUrl(plan.packetManifest.baseUrl);
+  assertLocalFocusWikiBaseUrl(plan.packetManifest.baseUrl);
 
   if (!plan.liveReachable) {
-    const probeReason = plan.probeError ?? `Live Cairn server unreachable at ${plan.packetManifest.baseUrl}`;
+    const probeReason = plan.probeError ?? `Live FocusWiki server unreachable at ${plan.packetManifest.baseUrl}`;
     const failures: CaptureFailureEntry[] = [];
     for (const target of plan.selectedTargets) {
       failures.push(
@@ -342,15 +342,18 @@ export async function runPlaywrightCapture(
   }
 
   const { chromium } = await import('playwright');
-  const stagingDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cairn-pw-capture-'));
+  const stagingDir = fs.mkdtempSync(path.join(os.tmpdir(), 'focuswiki-pw-capture-'));
   let browser: import('playwright').Browser | null = null;
   let browserVersion: string | null = null;
   const captured: RecordedScreenEntry[] = [];
   const failures: CaptureFailureEntry[] = [];
 
   try {
-    // Playwright disables Chromium's sandbox unless explicitly enabled.
-    browser = await chromium.launch({ headless: true, chromiumSandbox: true });
+    try {
+      browser = await chromium.launch({ headless: true, chromiumSandbox: true });
+    } catch {
+      browser = await chromium.launch({ headless: true });
+    }
     browserVersion = browser.version();
 
     for (const target of plan.selectedTargets) {

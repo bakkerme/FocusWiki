@@ -1,13 +1,13 @@
-# Cairn Screenshot Capture & Visual Review Packets
+# FocusWiki Screenshot Capture & Visual Review Packets
 
-Repeatable, manifest-driven screenshot workflow for generating visual review packets of Cairn (`http://127.0.0.1:8088` or `http://100.117.116.91:8088`) and importing user-provided competitor reference screenshots.
+Repeatable, manifest-driven screenshot workflow for generating visual review packets of FocusWiki (`http://127.0.0.1:8088` or `http://100.117.116.91:8088`) and importing user-provided competitor reference screenshots.
 
 ## Design & Safety Invariants
 
 - **Read-only UI staging:** Named states navigate via URL query params (`?project=...&doc=...`), switch view modes, open/collapse panels, toggle review history, and scroll containers/window without saving prose edits or writing to `.comments.json`. Every target asserts saved state (`.workbench[data-save-state="saved"]` in clean Read mode or `.save-badge.saved` in authoring modes).
 - **Preserves user working trees:** Never resets or re-seeds `/workspace/wiki-prototype/sample-repos/*`. When a clean seeded baseline is explicitly needed, `npm run capture -- isolated-fixture --port 8089` serves fresh temporary copies in `/tmp` bound only to `127.0.0.1`.
 - **Honest state labels:** App states are labeled as they actually behave (`read-default` for the default Read entry state, `visual-edit-explicit` for explicit Visual editor entry, `markdown-source-workspace` for full-workspace source editing), carrying `replacesTargetId` metadata when a redesigned state supersedes an earlier baseline ID.
-- **Local/private Playwright scope & sandboxing:** Unattended shell captures (`npm run capture -- run ...`) use a project-local headless Playwright Chromium binary (`.runtime/ms-playwright`, installed via `PLAYWRIGHT_BROWSERS_PATH=/workspace/wiki-prototype/.runtime/ms-playwright npx playwright install chromium`) with full browser sandboxing intact and an explicit host guard restricting `--base-url` to loopback/private/Tailscale Cairn listeners (`127.0.0.1`, `localhost`, RFC 1918, `100.64.0.0/10`). Interactive manual inspection remains optionally available through OpenBot's embedded browser (`openbot_browser`) using `plan` + `record`.
+- **Local/private Playwright scope & sandboxing:** Unattended shell captures (`npm run capture -- run ...`) use a project-local headless Playwright Chromium binary (`.runtime/ms-playwright`, installed via `PLAYWRIGHT_BROWSERS_PATH=/workspace/wiki-prototype/.runtime/ms-playwright npx playwright install chromium`) with full browser sandboxing intact and an explicit host guard restricting `--base-url` to loopback/private/Tailscale FocusWiki listeners (`127.0.0.1`, `localhost`, RFC 1918, `100.64.0.0/10`). Interactive manual inspection remains optionally available through OpenBot's embedded browser (`openbot_browser`) using `plan` + `record`.
 
 ## Named States (`config/capture-manifest.json`)
 
@@ -64,9 +64,9 @@ npm run capture -- run --packet review-subset-01 --targets doc-initial-read,narr
 
 `run` performs the full pipeline and exits `0` **only** when every selected target passes readiness and `validateCapturePacket` succeeds:
 
-1. Verifies `/healthz` and snapshots both the Cairn app Git revision and each content repository's Git `headSha`/dirty state (exiting `1` and recording a `live-server-probe` failure if unreachable).
+1. Verifies `/healthz` and snapshots both the FocusWiki app Git revision and each content repository's Git `headSha`/dirty state (exiting `1` and recording a `live-server-probe` failure if unreachable).
 2. Launches local headless Chromium with Chromium sandboxing explicitly enabled (`chromiumSandbox: true`) and creates an isolated `BrowserContext` per target (`width`, `height`, `deviceScaleFactor`, `colorScheme`, `reducedMotion`).
-3. Navigates to each route, waits for app boot, executes the shared read-only UI steps (`CAIRN_APP_BOOT_CHECK_EXPRESSION` + `buildInPageStepAndReadinessExpression` in `scripts/captureLib.ts`), awaits `document.fonts.ready`, verifies visible `iframe.embed-sandbox-iframe` child frames (`contentFrame().waitForLoadState('load')`), and asserts `.save-badge.saved`.
+3. Navigates to each route, waits for app boot, executes the shared read-only UI steps (`FOCUSWIKI_APP_BOOT_CHECK_EXPRESSION` + `buildInPageStepAndReadinessExpression` in `scripts/captureLib.ts`), awaits `document.fonts.ready`, verifies visible `iframe.embed-sandbox-iframe` child frames (`contentFrame().waitForLoadState('load')`), and asserts `.save-badge.saved`.
 4. Saves full-resolution PNGs (`animations: 'disabled'`), writes per-screen `.meta.json`, `packet.json`, and `SUMMARY.md`, and runs `validateCapturePacket`. Any missing state, failing selector, or partial packet exits `1`.
 
 If Playwright's Chromium binary is not yet present in `.runtime/ms-playwright`:
@@ -129,7 +129,7 @@ npm run capture -- import-reference \
 
 Each packet in `captures/packets/<packet-id>/` is self-contained for independent ACP visual review:
 
-- `packet.json` — Machine-readable packet manifest (capture timestamps, base URL, Cairn & content repo Git revisions, planned targets, per-screen readiness/viewport/hash records, failures, and imported competitor references).
+- `packet.json` — Machine-readable packet manifest (capture timestamps, base URL, FocusWiki & content repo Git revisions, planned targets, per-screen readiness/viewport/hash records, failures, and imported competitor references).
 - `SUMMARY.md` — Concise human/reviewer index table with honest current-state notes.
 - `screens/<nn>-<target-id>.png` — Full-resolution viewport PNGs validated against `IHDR` dimensions.
 - `screens/<nn>-<target-id>.meta.json` — Per-screenshot metadata sidecars.
@@ -138,6 +138,6 @@ Each packet in `captures/packets/<packet-id>/` is self-contained for independent
 
 ## Known Limitations
 
-- **Local/private host scope only:** `npm run capture -- run` intentionally rejects public/external domains (`assertLocalCairnBaseUrl`) because Playwright is authorized strictly for local/private Cairn capture automation, not general browsing or authenticated third-party sites.
+- **Local/private host scope only:** `npm run capture -- run` intentionally rejects public/external domains (`assertLocalFocusWikiBaseUrl`) because Playwright is authorized strictly for local/private FocusWiki capture automation, not general browsing or authenticated third-party sites.
 - **PNG-only reference importer:** `import-reference` validates and imports PNG files (`IHDR` + SHA-256); external WebP or animated GIF reference assets remain separate original files.
 - **Viewport-focused targets:** All 6 manifest targets use `captureScope: "viewport"` (`1440x900` desktop and `768x960` narrow) with explicit container/window scroll offsets rather than stitched full-document captures, matching real reader/toolbar viewport proportions (`.sheet-scroll` scrolls internally in desktop mode).
