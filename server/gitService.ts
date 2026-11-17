@@ -1,6 +1,11 @@
 import crypto from 'node:crypto';
 import { execFile } from 'node:child_process';
 import fs from 'node:fs';
+import dns from 'node:dns/promises';
+import { isIP } from 'node:net';
+import os from 'node:os';
+import { fileURLToPath } from 'node:url';
+import { PathBoundaryError, resolveSafeProjectPath } from './pathGuard.js';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import {
@@ -30,8 +35,6 @@ const execFileAsync = promisify(execFile);
 
 const MAX_REVIEW_FILE_BYTES = 256 * 1024;
 const GIT_NETWORK_TIMEOUT_MS = 60_000;
-const CREDENTIAL_HELPER_SCRIPT =
-  '!f() { if [ "$1" = "get" ]; then printf "username=%s\\npassword=%s\\n" "$CAIRN_GIT_USERNAME" "$CAIRN_GIT_TOKEN"; fi; }; f';
 
 export class WorkingTreeSnapshotMismatchError extends Error {
   readonly statusCode = 409;
@@ -78,72 +81,125 @@ export async function isSshClientAvailable(): Promise<boolean> {
   }
 }
 
-function buildGitEnv(credential?: ResolvedGitCredential | null): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = {
-    ...process.env,
-    GIT_TERMINAL_PROMPT: '0',
-    LC_ALL: 'C'
-  };
-  if (credential) {
-    env.CAIRN_GIT_USERNAME = credential.username;
-    env.CAIRN_GIT_TOKEN = credential.token;
+// Deliberately exclude inherited GIT_CONFIG_*, loaders, proxies, tokens and SSH overrides.
+export function buildGitEnv(askpass?: string): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  for (const key of ['PATH', 'HOME', 'TMPDIR', 'LANG', 'SSL_CERT_FILE', 'SSL_CERT_DIR']) {
+    if (process.env[key]) env[key] = process.env[key];
   }
-  return env;
+  return {
+    ...env,
+    LC_ALL: 'C',
+    GIT_TERMINAL_PROMPT: '0',
+    GIT_CONFIG_NOSYSTEM: '1',
+    GIT_CONFIG_GLOBAL: '/dev/null',
+    GIT_ATTR_NOSYSTEM: '1',
+    GIT_SSH_COMMAND: 'ssh -oBatchMode=yes -oPermitLocalCommand=no -oClearAllForwardings=yes',
+    GIT_ASKPASS: askpass ?? '/bin/false',
+    SSH_ASKPASS: '/bin/false'
+  };
+}
+
+interface RunGitOptions {
+  scopeSafeDir?: boolean;
+  timeoutMs?: number;
+  credential?: ResolvedGitCredential | null;
+  remoteUrl?: string;
+  allowedFileRoots?: string[];
 }
 
 function resolveSafeDirValue(cwd: string): string {
-  try {
-    return fs.existsSync(cwd) ? fs.realpathSync(cwd) : path.resolve(cwd);
-  } catch {
-    return path.resolve(cwd);
-  }
+  return fs.existsSync(cwd) ? fs.realpathSync(cwd) : path.resolve(cwd);
 }
 
-function buildGitArgs(
-  cwd: string,
-  args: string[],
-  options?: { scopeSafeDir?: boolean; credential?: ResolvedGitCredential | null }
-): string[] {
-  const prefix: string[] = [];
-  if (options?.scopeSafeDir ?? true) {
-    prefix.push('-c', `safe.directory=${resolveSafeDirValue(cwd)}`);
-  }
-  if (options?.credential) {
-    prefix.push('-c', 'credential.helper=', '-c', `credential.helper=${CREDENTIAL_HELPER_SCRIPT}`);
-  }
-  return [...prefix, ...args];
+export function buildGitArgs(cwd: string, args: string[], options?: RunGitOptions): string[] {
+  const settings = [
+    'core.hooksPath=/dev/null', 'core.fsmonitor=false', 'submodule.recurse=false',
+    'core.symlinks=false', 'http.followRedirects=false', 'transfer.fsckObjects=true',
+    'protocol.allow=never', 'protocol.https.allow=always', 'credential.helper=',
+    'core.gitProxy=', 'core.sshCommand=ssh -oBatchMode=yes -oPermitLocalCommand=no -oClearAllForwardings=yes',
+    'core.askPass=/bin/false', 'credential.interactive=false', 'http.proxy='
+  ];
+  if (process.env.FOCUSWIKI_ALLOW_INSECURE_GIT_HTTP === '1') settings.push('protocol.http.allow=always');
+  if (process.env.FOCUSWIKI_ALLOW_GIT_SSH !== '0') settings.push('protocol.ssh.allow=always');
+  if (options?.remoteUrl?.startsWith('file:')) settings.push('protocol.file.allow=always');
+  if (options?.scopeSafeDir ?? true) settings.push(`safe.directory=${resolveSafeDirValue(cwd)}`);
+  return [...settings.flatMap((setting) => ['-c', setting]), ...args];
 }
 
-async function runGitText(
-  cwd: string,
-  args: string[],
-  options?: { scopeSafeDir?: boolean; timeoutMs?: number; credential?: ResolvedGitCredential | null }
-): Promise<string> {
-  const fullArgs = buildGitArgs(cwd, args, options);
-  const { stdout } = await execFileAsync('git', fullArgs, {
-    cwd,
-    encoding: 'utf8',
-    maxBuffer: 8 * 1024 * 1024,
-    timeout: options?.timeoutMs ?? 30_000,
-    env: buildGitEnv(options?.credential)
-  });
-  return stdout;
+function scrubGitText(raw: string, secrets: string[] = []): string {
+  let result = raw.replace(/(https?:\/\/)[^/\s@]*@/gi, '$1***@');
+  for (const secret of secrets.filter(Boolean)) {
+    for (const value of new Set([secret, encodeURIComponent(secret)])) {
+      result = result.split(value).join('***');
+    }
+  }
+  return result;
 }
 
-async function runGitBuffer(
-  cwd: string,
-  args: string[],
-  options?: { scopeSafeDir?: boolean; timeoutMs?: number; credential?: ResolvedGitCredential | null }
+async function runGit(
+  cwd: string, args: string[], options: RunGitOptions = {}
 ): Promise<Buffer> {
-  const fullArgs = buildGitArgs(cwd, args, options);
-  const { stdout } = await execFileAsync('git', fullArgs, {
-    cwd,
-    encoding: 'buffer',
-    maxBuffer: 8 * 1024 * 1024,
-    timeout: options?.timeoutMs ?? 30_000,
-    env: buildGitEnv(options?.credential)
-  });
-  return stdout;
+  if (options.remoteUrl) {
+    validateGitRemoteUrl(options.remoteUrl, options.allowedFileRoots);
+    await assertGitRemoteHostAllowed(options.remoteUrl);
+    // A repo-local insteadOf rule must not redirect an inspected URL to another host/transport.
+    // Global and system Git configuration are disabled in buildGitEnv.
+    if (fs.existsSync(path.join(cwd, '.git'))) {
+      const rewrites = await runGitText(cwd, ['config', '--get-regexp', '^url\\..*\\.insteadof$'])
+        .catch((err) => {
+          if ((err as { code?: number }).code === 1) return '';
+          throw err;
+        });
+      if (rewrites.trim()) throw new GitOperationError('Repository URL rewrite rules are not permitted for remote operations.', 403);
+    }
+  }
+  let credentialDir: string | undefined;
+  const credential = options.credential;
+  const secrets = credential ? [credential.token, credential.username] : [];
+  // Also redact URL credentials supplied directly by a caller.
+  for (const arg of args) {
+    try {
+      const parsed = new URL(arg);
+      if (parsed.password) secrets.push(decodeURIComponent(parsed.password));
+      if (parsed.username && parsed.protocol.startsWith('http')) secrets.push(decodeURIComponent(parsed.username));
+    } catch { /* Not a URL. */ }
+  }
+  try {
+    let askpass: string | undefined;
+    if (credential) {
+      credentialDir = fs.mkdtempSync(path.join(os.tmpdir(), 'focuswiki-git-'));
+      fs.chmodSync(credentialDir, 0o700);
+      fs.writeFileSync(path.join(credentialDir, 'username'), credential.username, { mode: 0o600 });
+      fs.writeFileSync(path.join(credentialDir, 'token'), credential.token, { mode: 0o600 });
+      askpass = path.join(credentialDir, 'askpass');
+      fs.writeFileSync(askpass, '#!/bin/sh\ncase "$1" in\n*sername*) cat "$(dirname "$0")/username" ;;\n*) cat "$(dirname "$0")/token" ;;\nesac\n', { mode: 0o700 });
+    }
+    const { stdout } = await execFileAsync('git', buildGitArgs(cwd, args, options), {
+      cwd, encoding: 'buffer', maxBuffer: 8 * 1024 * 1024,
+      timeout: options.timeoutMs ?? 30_000, env: buildGitEnv(askpass)
+    });
+    return stdout;
+  } catch (err) {
+    const failure = err as Error & { stdout?: Buffer; stderr?: Buffer; code?: number | string };
+    const safeError = new Error(scrubGitText(failure.message, secrets)) as Error & {
+      stdout?: string; stderr?: string; code?: number | string;
+    };
+    safeError.stdout = scrubGitText(failure.stdout?.toString('utf8') ?? '', secrets);
+    safeError.stderr = scrubGitText(failure.stderr?.toString('utf8') ?? '', secrets);
+    safeError.code = failure.code;
+    throw safeError;
+  } finally {
+    if (credentialDir) fs.rmSync(credentialDir, { recursive: true, force: true });
+  }
+}
+
+async function runGitText(cwd: string, args: string[], options?: RunGitOptions): Promise<string> {
+  return (await runGit(cwd, args, options)).toString('utf8');
+}
+
+async function runGitBuffer(cwd: string, args: string[], options?: RunGitOptions): Promise<Buffer> {
+  return runGit(cwd, args, options);
 }
 
 export function sanitizeRemoteUrl(raw: string): string {
@@ -164,36 +220,173 @@ export function sanitizeRemoteUrl(raw: string): string {
   }
 }
 
-export function validateGitRemoteUrl(rawUrl: string): string {
-  const url = rawUrl.trim();
-  if (!url) {
-    throw new GitOperationError('Repository URL is required.', 400);
-  }
-  if (url.startsWith('-') || url.includes('\0') || /[\r\n]/.test(url)) {
-    throw new GitOperationError('Invalid repository URL.', 400);
-  }
-  if (/^ext::/i.test(url)) {
-    throw new GitOperationError('Unsupported Git transport.', 400);
-  }
+export interface InspectRemoteOptions {
+  credentialStore?: CredentialStore;
+  overrideCredential?: { username?: string; token?: string } | null;
+  allowedFileRoots?: string[];
+}
 
-  const isStandardScheme = /^(https?|ssh|git|file):\/\//i.test(url);
-  const isScpStyle = /^[a-zA-Z0-9._-]+@[a-zA-Z0-9._-]+:[^\s]+$/.test(url);
-  if (!isStandardScheme && !isScpStyle) {
-    throw new GitOperationError(
-      'Repository URL must use https://, http://, ssh://, git://, file://, or git@host:owner/repo.git syntax.',
-      400
-    );
-  }
+export interface CloneRepositoryOptions extends InspectRemoteOptions {
+  url: string;
+  destDir: string;
+  branch?: string;
+  prNumber?: number;
+  shallow?: boolean;
+}
 
-  return url;
+export function validateGitRemoteUrl(rawUrl: string, allowedFileRoots?: string[]): string {
+  if (typeof rawUrl !== 'string' || !rawUrl) throw new GitOperationError('Repository URL is required.', 400);
+  if (rawUrl.startsWith('-') || /[\s\x00-\x1f\x7f]/.test(rawUrl) || rawUrl.includes('\\')) {
+    throw new GitOperationError('Invalid repository URL: flags, whitespace and control characters are forbidden.', 400);
+  }
+  const scp = rawUrl.match(/^[a-zA-Z0-9._-]+@([a-zA-Z0-9._-]+|\[[a-fA-F0-9:]+\]):(.+)$/);
+  if (scp) {
+    if (scp[1].startsWith('-') || scp[2].startsWith('-')) throw new GitOperationError('Invalid SSH repository URL.', 400);
+    if (process.env.FOCUSWIKI_ALLOW_GIT_SSH === '0') throw new GitOperationError('SSH Git remotes are disabled.', 400);
+    return rawUrl;
+  }
+  let parsed: URL;
+  try { parsed = new URL(rawUrl); } catch { throw new GitOperationError('Invalid repository URL.', 400); }
+  if (!['https:', 'http:', 'ssh:', 'file:'].includes(parsed.protocol) || !rawUrl.includes('://')) {
+    throw new GitOperationError('Repository URL must use https://, ssh://, file://, or git@host:owner/repo.git syntax.', 400);
+  }
+  if (parsed.protocol === 'http:' && process.env.FOCUSWIKI_ALLOW_INSECURE_GIT_HTTP !== '1') {
+    throw new GitOperationError('HTTP Git remotes are disabled. Set FOCUSWIKI_ALLOW_INSECURE_GIT_HTTP=1 for trusted LAN HTTP Git hosts.', 400);
+  }
+  if (parsed.protocol === 'ssh:' && process.env.FOCUSWIKI_ALLOW_GIT_SSH === '0') throw new GitOperationError('SSH Git remotes are disabled.', 400);
+  if (parsed.protocol === 'ssh:') {
+    let username: string;
+    try { username = decodeURIComponent(parsed.username); }
+    catch { throw new GitOperationError('Invalid SSH username.', 400); }
+    if (username.startsWith('-') || /[\s\x00-\x1f\x7f]/.test(username)) throw new GitOperationError('Invalid SSH username.', 400);
+  }
+  if (parsed.hash || parsed.search) throw new GitOperationError('Git remote URLs cannot contain queries or fragments.', 400);
+  if (parsed.protocol === 'file:') {
+    if (process.env.FOCUSWIKI_ALLOW_FILE_REMOTES === '0') throw new PathBoundaryError('File Git remotes are disabled.');
+    let localPath: string;
+    try { localPath = fileURLToPath(parsed); } catch { throw new PathBoundaryError('Invalid local file Git URL.'); }
+    if (allowedFileRoots !== undefined) {
+      let allowed = false;
+      try {
+        const real = fs.realpathSync(localPath);
+        allowed = allowedFileRoots.some((root) => {
+          try {
+            const relative = path.relative(fs.realpathSync(root), real);
+            return relative !== '' && !relative.startsWith('..' + path.sep) && relative !== '..' && !path.isAbsolute(relative);
+          } catch { return false; }
+        });
+      } catch { /* Nonexistent/inaccessible targets fail closed. */ }
+      if (!allowed) throw new PathBoundaryError('File Git remote is outside the allowed repository roots.');
+    }
+  } else if (!parsed.hostname || parsed.hostname.startsWith('-')) {
+    throw new GitOperationError('Invalid Git remote hostname.', 400);
+  }
+  return parsed.toString();
+}
+
+function normalizedHost(host: string): string {
+  return host.replace(/^\[|\]$/g, '').replace(/\.$/, '').toLowerCase();
+}
+
+// IP-only classifier: no DNS or network side effects, including IPv4-mapped IPv6.
+export function isBlockedGitIp(raw: string): boolean {
+  const ip = normalizedHost(raw).split('%')[0];
+  const family = isIP(ip);
+  if (family === 4) {
+    const [a, b] = ip.split('.').map(Number);
+    return a === 0 || a === 10 || a === 127 || a >= 224 ||
+      (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) ||
+      (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127);
+  }
+  if (family !== 6) return true;
+  let value = ip;
+  const v4 = value.match(/(\d+\.\d+\.\d+\.\d+)$/);
+  if (v4) {
+    const octets = v4[1].split('.').map(Number);
+    value = value.slice(0, -v4[1].length) + ((octets[0] << 8) | octets[1]).toString(16) + ':' + ((octets[2] << 8) | octets[3]).toString(16);
+  }
+  const halves = value.split('::');
+  const left = halves[0] ? halves[0].split(':') : [];
+  const right = halves[1] ? halves[1].split(':') : [];
+  const words = halves.length === 1 ? left : [...left, ...Array(8 - left.length - right.length).fill('0'), ...right];
+  const parts = words.map((word) => Number.parseInt(word, 16));
+  if (parts.slice(0, 5).every((n) => n === 0) && (parts[5] === 0xffff || parts[5] === 0)) {
+    return isBlockedGitIp(`${parts[6] >> 8}.${parts[6] & 255}.${parts[7] >> 8}.${parts[7] & 255}`);
+  }
+  return (parts[0] & 0xfe00) === 0xfc00 || (parts[0] & 0xffc0) === 0xfe80 ||
+    (parts[0] & 0xff00) === 0xff00;
+}
+
+export function isGitHostAllowed(host: string, ip?: string, allowlist = process.env.FOCUSWIKI_ALLOWED_GIT_HOSTS ?? ''): boolean {
+  const candidates = [host, ...(ip ? [ip] : [])].map(normalizedHost);
+  return allowlist.split(',').map((entry) => normalizedHost(entry.trim())).filter(Boolean).some((entry) =>
+    entry === '*' || candidates.some((candidate) => entry.startsWith('.')
+      ? !isIP(candidate) && candidate.endsWith(entry) && candidate.length > entry.length
+      : candidate === entry || (isIP(candidate) === 6 && isIP(entry) === 6 && new URL(`https://[${candidate}]/`).hostname === new URL(`https://[${entry}]/`).hostname))
+  );
+}
+
+export async function assertGitRemoteHostAllowed(url: string): Promise<void> {
+  if (url.startsWith('file:')) return;
+  const scp = url.match(/^[^@/]+@(\[[^\]]+\]|[^:]+):/);
+  const host = normalizedHost(scp ? scp[1] : new URL(url).hostname);
+  let addresses: Array<{ address: string }>;
+  try { addresses = isIP(host) ? [{ address: host }] : await dns.lookup(host, { all: true }); }
+  catch { throw new GitOperationError('Unable to resolve Git remote hostname.', 400); }
+  if (!addresses.length) throw new GitOperationError('Git remote hostname has no addresses.', 400);
+  if (addresses.some(({ address }) => isBlockedGitIp(address) && !isGitHostAllowed(host, address))) {
+    throw new GitOperationError(`Git host ${host} resolves to a private or restricted address. Set FOCUSWIKI_ALLOWED_GIT_HOSTS to allowlist a trusted LAN Git hostname or IP.`, 403);
+  }
 }
 
 function validateGitRefToken(ref: string, label = 'ref'): string {
-  const trimmed = ref.trim();
-  if (!trimmed || trimmed.startsWith('-') || /[\s\0~^:?*[\\]/.test(trimmed) || trimmed.includes('..')) {
-    throw new GitOperationError(`Invalid Git ${label}: "${ref}".`, 400);
+  if (!ref || ref === 'HEAD' || ref === '@' || ref.startsWith('-') || /[\s\x00-\x1f\x7f~^:?*\[\\]/.test(ref) ||
+      ref.includes('..') || ref.includes('@{') || ref.split('/').some((part) => !part || part.startsWith('.') || part.endsWith('.') || part.endsWith('.lock'))) {
+    throw new GitOperationError(`Invalid Git ${label}.`, 400);
   }
-  return trimmed;
+  return ref;
+}
+
+// Queue mutations by canonical repository/destination, releasing even after failure.
+const mutationTails = new Map<string, Promise<void>>();
+async function withRepositoryLock<T>(root: string, action: () => Promise<T>): Promise<T> {
+  const key = resolveSafeDirValue(root);
+  const previous = mutationTails.get(key) ?? Promise.resolve();
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const tail = previous.then(() => gate);
+  mutationTails.set(key, tail);
+  await previous;
+  try { return await action(); }
+  finally { release(); if (mutationTails.get(key) === tail) mutationTails.delete(key); }
+}
+
+export const MAX_CONCURRENT_CLONES = 2;
+let activeClones = 0;
+const cloneWaiters: Array<() => void> = [];
+async function withCloneSlot<T>(action: () => Promise<T>): Promise<T> {
+  const configured = Number(process.env.FOCUSWIKI_MAX_CONCURRENT_CLONES ?? MAX_CONCURRENT_CLONES);
+  const limit = Number.isInteger(configured) && configured > 0 ? configured : MAX_CONCURRENT_CLONES;
+  if (activeClones >= limit) await new Promise<void>((resolve) => cloneWaiters.push(resolve));
+  else activeClones++;
+  try { return await action(); }
+  finally { const next = cloneWaiters.shift(); if (next) next(); else activeClones--; }
+}
+
+async function ensureInternalExcludes(projectRoot: string): Promise<void> {
+  const excludePath = (await runGitText(projectRoot, ['rev-parse', '--git-path', 'info/exclude'])).trim();
+  const absolute = path.resolve(projectRoot, excludePath);
+  fs.mkdirSync(path.dirname(absolute), { recursive: true });
+  const existing = fs.existsSync(absolute) ? fs.readFileSync(absolute, 'utf8') : '';
+  const missing = ['.focuswiki/', '.cairn/'].filter((entry) => !existing.split(/\r?\n/).includes(entry));
+  if (missing.length) fs.appendFileSync(absolute, `${existing && !existing.endsWith('\n') ? '\n' : ''}${missing.join('\n')}\n`);
+}
+
+async function sanitizeClonedConfig(projectRoot: string): Promise<void> {
+  for (const key of ['core.hooksPath', 'core.fsmonitor', 'core.sshCommand', 'core.gitProxy', 'core.askPass', 'credential.helper']) {
+    try { await runGitText(projectRoot, ['config', '--local', '--unset-all', key]); }
+    catch (err) { if ((err as { code?: number }).code !== 5) throw err; }
+  }
 }
 
 function extractGitErrorDetail(
@@ -209,12 +402,10 @@ function extractGitErrorDetail(
       raw = text.trim().split(/\r?\n/).slice(-4).join(' ');
     }
   }
-  if (credentialStore) {
-    return credentialStore.scrubText(raw, extraSecrets);
-  }
-  let scrubbed = raw.replace(/(https?:\/\/)([^/\s:@]+):([^/\s@]+)@/gi, '$1***:***@');
+  if (credentialStore) return scrubGitText(credentialStore.scrubText(raw, extraSecrets), extraSecrets);
+  let scrubbed = scrubGitText(raw, extraSecrets);
   for (const s of extraSecrets) {
-    if (s && s.length >= 4 && scrubbed.includes(s)) {
+    if (s && s.length > 0 && scrubbed.includes(s)) {
       scrubbed = scrubbed.split(s).join('***');
     }
   }
@@ -694,45 +885,68 @@ export async function commitWorkingTree(
   message: string,
   authorName?: string,
   authorEmail?: string,
-  expectedSnapshotDigest?: string
+  expectedSnapshotDigest?: string,
+  paths?: string[]
 ): Promise<{ sha: string; subject: string; status: GitRepoStatus }> {
-  const before = await getGitRepoStatus(projectRoot);
-  if (before.isClean) {
-    throw new Error('Working tree has no uncommitted changes to commit.');
-  }
-
-  if (expectedSnapshotDigest && expectedSnapshotDigest.trim()) {
-    const currentDigest = await computeWorkingTreeSnapshotDigest(projectRoot, before);
-    if (currentDigest !== expectedSnapshotDigest.trim()) {
-      throw new WorkingTreeSnapshotMismatchError(
-        'Working files changed since this review was loaded. Review the updated changes before committing.'
-      );
+  return withRepositoryLock(projectRoot, async () => {
+    const selectedPaths = paths?.length ? paths.map((relative) => {
+      if (relative.split('/').includes('..') || relative.split('/').some((part) => ['.git', '.focuswiki', '.cairn'].includes(part))) {
+        throw new PathBoundaryError('Cannot commit protected or parent-relative paths.');
+      }
+      return resolveSafeProjectPath(projectRoot, relative).normalizedRelPath;
+    }) : undefined;
+    await ensureInternalExcludes(projectRoot);
+    const before = await getGitRepoStatus(projectRoot);
+    if (before.isClean) {
+      throw new Error('Working tree has no uncommitted changes to commit.');
     }
-  }
 
-  const formattedMessage = normalizeCommitMessage(message);
-  const configured = await readConfiguredGitIdentity(projectRoot);
-  const resolvedName = authorName?.trim() || configured.name || 'Workspace Author';
-  const resolvedEmail = authorEmail?.trim() || configured.email || 'author@local.invalid';
+    if (expectedSnapshotDigest && expectedSnapshotDigest.trim()) {
+      const currentDigest = await computeWorkingTreeSnapshotDigest(projectRoot, before);
+      if (currentDigest !== expectedSnapshotDigest.trim()) {
+        throw new WorkingTreeSnapshotMismatchError(
+          'Working files changed since this review was loaded. Review the updated changes before committing.'
+        );
+      }
+    }
 
-  await runGitText(projectRoot, ['add', '-A']);
-  await runGitText(projectRoot, [
-    '-c',
-    `user.name=${resolvedName}`,
-    '-c',
-    `user.email=${resolvedEmail}`,
-    'commit',
-    '--cleanup=verbatim',
-    '-m',
-    formattedMessage
-  ]);
+    const formattedMessage = normalizeCommitMessage(message);
+    const configured = await readConfiguredGitIdentity(projectRoot);
+    const resolvedName = authorName?.trim() || configured.name || 'Workspace Author';
+    const resolvedEmail = authorEmail?.trim() || configured.email || 'author@local.invalid';
 
-  const after = await getGitRepoStatus(projectRoot);
-  return {
-    sha: after.headSha,
-    subject: after.headSubject,
-    status: after
-  };
+    // Remove app-private state from the index, including mistakenly tracked metadata.
+    const indexedPaths = (await runGitText(projectRoot, ['ls-files', '-z'])).split('\0').filter(Boolean);
+    const privatePaths = indexedPaths.filter((file) => file.split('/').some((part) => part === '.focuswiki' || part === '.cairn'));
+    if (privatePaths.length) await runGitText(projectRoot, ['--literal-pathspecs', 'rm', '-f', '--cached', '--', ...privatePaths]);
+    const exclusions = [':(exclude)**/.focuswiki/**', ':(exclude)**/.cairn/**'];
+    const selectedPathspecs = selectedPaths?.map((file) => `:(literal)${file}`);
+    if (selectedPathspecs) {
+      // --only also prevents unrelated files already staged by another client being committed.
+      await runGitText(projectRoot, ['add', '--', ...selectedPathspecs, ...exclusions]);
+    } else {
+      await runGitText(projectRoot, ['add', '-A', '--', '.', ...exclusions]);
+    }
+    await runGitText(projectRoot, [
+      '-c',
+      `user.name=${resolvedName}`,
+      '-c',
+      `user.email=${resolvedEmail}`,
+      'commit',
+      ...(selectedPaths ? ['--only'] : []),
+      '--cleanup=verbatim',
+      '-m',
+      formattedMessage,
+      ...(selectedPathspecs ? ['--', ...selectedPathspecs, ...exclusions] : [])
+    ]);
+
+    const after = await getGitRepoStatus(projectRoot);
+    return {
+      sha: after.headSha,
+      subject: after.headSubject,
+      status: after
+    };
+  });
 }
 
 function resolveCredentialForTarget(
@@ -756,12 +970,10 @@ function resolveCredentialForTarget(
 
 export async function inspectRemoteRepository(
   rawUrl: string,
-  options?: {
-    credentialStore?: CredentialStore;
-    overrideCredential?: { username?: string; token?: string } | null;
-  }
+  options?: InspectRemoteOptions
 ): Promise<RemoteInspectResult> {
-  const url = validateGitRemoteUrl(rawUrl);
+  const url = validateGitRemoteUrl(rawUrl, options?.allowedFileRoots);
+  await assertGitRemoteHostAllowed(url);
   const credential = resolveCredentialForTarget(
     url,
     options?.credentialStore,
@@ -772,9 +984,10 @@ export async function inspectRemoteRepository(
     output = await runGitText(
       process.cwd(),
       ['ls-remote', '--symref', '--', url, 'HEAD', 'refs/heads/*', 'refs/pull/*/head', 'refs/merge-requests/*/head'],
-      { scopeSafeDir: false, timeoutMs: GIT_NETWORK_TIMEOUT_MS, credential }
+      { scopeSafeDir: false, timeoutMs: GIT_NETWORK_TIMEOUT_MS, credential, remoteUrl: url, allowedFileRoots: options?.allowedFileRoots }
     );
   } catch (err) {
+    if (err instanceof GitOperationError || err instanceof PathBoundaryError) throw err;
     const detail = extractGitErrorDetail(
       err,
       options?.credentialStore,
@@ -831,80 +1044,56 @@ export async function inspectRemoteRepository(
   };
 }
 
-export async function cloneRepository(options: {
-  url: string;
-  destDir: string;
-  branch?: string;
-  prNumber?: number;
-  credentialStore?: CredentialStore;
-  overrideCredential?: { username?: string; token?: string } | null;
-}): Promise<GitRepoStatus> {
-  const url = validateGitRemoteUrl(options.url);
-  if (fs.existsSync(options.destDir)) {
-    throw new GitOperationError(`Destination already exists at ${options.destDir}.`, 409);
+export async function cloneRepository(options: CloneRepositoryOptions): Promise<GitRepoStatus> {
+  const url = validateGitRemoteUrl(options.url, options.allowedFileRoots);
+  const branch = options.branch !== undefined ? validateGitRefToken(options.branch, 'branch') : undefined;
+  const prNumber = options.prNumber;
+  if (prNumber !== undefined && (!Number.isSafeInteger(prNumber) || prNumber <= 0)) {
+    throw new GitOperationError('Pull request number must be a positive integer.', 400);
   }
+  await assertGitRemoteHostAllowed(url);
   fs.mkdirSync(path.dirname(options.destDir), { recursive: true, mode: 0o770 });
-
-  const branch = options.branch?.trim() ? validateGitRefToken(options.branch, 'branch') : undefined;
-  const prNumber =
-    typeof options.prNumber === 'number' && Number.isInteger(options.prNumber) && options.prNumber > 0
-      ? options.prNumber
-      : undefined;
-  const credential = resolveCredentialForTarget(
-    url,
-    options.credentialStore,
-    options.overrideCredential
-  );
-
-  const cloneArgs = ['clone'];
-  if (branch && !prNumber) {
-    cloneArgs.push('--branch', branch);
-  }
-  cloneArgs.push('--', url, options.destDir);
-
-  try {
-    await runGitText(path.dirname(options.destDir), cloneArgs, {
-      scopeSafeDir: false,
-      timeoutMs: GIT_NETWORK_TIMEOUT_MS,
-      credential
-    });
-  } catch (err) {
-    if (fs.existsSync(options.destDir)) {
-      fs.rmSync(options.destDir, { recursive: true, force: true });
+  const destDir = path.join(fs.realpathSync(path.dirname(options.destDir)), path.basename(options.destDir));
+  return withRepositoryLock(destDir, () => withCloneSlot(async () => {
+    if (fs.existsSync(destDir) || fs.lstatSync(destDir, { throwIfNoEntry: false })) {
+      throw new GitOperationError(`Destination already exists at ${destDir}.`, 409);
     }
-    const detail = extractGitErrorDetail(
-      err,
-      options.credentialStore,
-      credential ? [credential.token] : []
-    );
-    if (isGitAuthFailure(detail)) {
-      throw new GitAuthError(
-        `Authentication required to clone ${extractHttpsHost(url) ?? 'repository'}: ${detail}`,
-        extractHttpsHost(url)
-      );
-    }
-    throw new GitOperationError(`Git clone failed: ${detail}`, 400);
-  }
-
-  if (prNumber) {
+    const stagingDir = path.join(path.dirname(destDir), `.cloning-${path.basename(destDir)}-${crypto.randomUUID()}`);
+    const credential = resolveCredentialForTarget(url, options.credentialStore, options.overrideCredential);
     try {
-      await checkoutGitPrNumber(
-        options.destDir,
-        prNumber,
-        'origin',
-        credential,
-        url,
-        options.credentialStore
-      );
-    } catch (err) {
-      if (fs.existsSync(options.destDir)) {
-        fs.rmSync(options.destDir, { recursive: true, force: true });
+      const args = ['clone', '--no-local', '--template='];
+      if (options.shallow) args.push('--depth', '1', '--single-branch');
+      if (branch && !prNumber) args.push('--branch', branch);
+      args.push('--', url, stagingDir);
+      await runGitText(path.dirname(destDir), args, {
+        scopeSafeDir: false, timeoutMs: GIT_NETWORK_TIMEOUT_MS, credential,
+        remoteUrl: url, allowedFileRoots: options.allowedFileRoots
+      });
+      await sanitizeClonedConfig(stagingDir);
+      await ensureInternalExcludes(stagingDir);
+      if (prNumber) {
+        await checkoutGitPrNumber(stagingDir, prNumber, 'origin', credential, url,
+          options.credentialStore, options.shallow, options.allowedFileRoots);
       }
-      throw err;
+      // Don't persist credentials embedded in the caller's URL to the cloned config.
+      await runGitText(stagingDir, ['remote', 'set-url', 'origin', sanitizeRemoteUrl(url)]);
+      const status = await getGitRepoStatus(stagingDir);
+      if (fs.lstatSync(destDir, { throwIfNoEntry: false })) {
+        throw new GitOperationError(`Destination already exists at ${destDir}.`, 409);
+      }
+      fs.renameSync(stagingDir, destDir);
+      return status;
+    } catch (err) {
+      if (err instanceof GitOperationError || err instanceof PathBoundaryError) throw err;
+      const detail = extractGitErrorDetail(err, options.credentialStore, credential ? [credential.token, credential.username] : []);
+      if (isGitAuthFailure(detail)) {
+        throw new GitAuthError(`Authentication required to clone ${extractHttpsHost(url) ?? 'repository'}: ${detail}`, extractHttpsHost(url));
+      }
+      throw new GitOperationError(`Git clone failed: ${detail}`, 400);
+    } finally {
+      fs.rmSync(stagingDir, { recursive: true, force: true });
     }
-  }
-
-  return getGitRepoStatus(options.destDir);
+  }));
 }
 
 export async function initNewWikiRepository(options: {
@@ -929,6 +1118,7 @@ export async function initNewWikiRepository(options: {
     { encoding: 'utf8', mode: 0o660 }
   );
 
+  fs.writeFileSync(path.join(options.destDir, '.gitignore'), '.focuswiki/\n.cairn/\n', { mode: 0o660 });
   await runGitText(options.destDir, ['init', '-b', 'main']);
   await runGitText(options.destDir, ['add', '-A']);
   await runGitText(options.destDir, [
@@ -1062,174 +1252,189 @@ export async function getGitRefs(projectRoot: string): Promise<GitRefsPayload> {
 export async function fetchGitRemote(
   projectRoot: string,
   credentialStore?: CredentialStore,
-  options?: { includePrRefs?: boolean }
+  options?: { includePrRefs?: boolean; allowedFileRoots?: string[] }
 ): Promise<GitRefsPayload> {
-  if (!fs.existsSync(path.join(projectRoot, '.git'))) {
-    throw new GitOperationError('Directory is not a Git repository.', 400);
-  }
-  const remote = await resolvePrimaryRemote(projectRoot);
-  if (!remote.name) {
-    throw new GitOperationError('No Git remote is configured for this repository.', 400);
-  }
-
-  const credential = resolveCredentialForTarget(remote.url, credentialStore);
-  const includePrRefs = options?.includePrRefs ?? true;
-
-  try {
-    await runGitText(projectRoot, ['fetch', '--prune', remote.name], {
-      timeoutMs: GIT_NETWORK_TIMEOUT_MS,
-      credential
-    });
-  } catch (err) {
-    const detail = extractGitErrorDetail(
-      err,
-      credentialStore,
-      credential ? [credential.token] : []
-    );
-    if (isGitAuthFailure(detail)) {
-      throw new GitAuthError(
-        `Authentication required for ${extractHttpsHost(remote.url ?? '') ?? 'remote'}: ${detail}`,
-        extractHttpsHost(remote.url ?? '')
-      );
+  return withRepositoryLock(projectRoot, async () => {
+    if (!fs.existsSync(path.join(projectRoot, '.git'))) {
+      throw new GitOperationError('Directory is not a Git repository.', 400);
     }
-    throw new GitOperationError(`Git fetch failed: ${detail}`, 502);
-  }
+    const remote = await resolvePrimaryRemote(projectRoot);
+    if (!remote.name || !remote.url) {
+      throw new GitOperationError('No Git remote is configured for this repository.', 400);
+    }
+    const allowedFileRoots = options?.allowedFileRoots;
+    validateGitRemoteUrl(remote.url, allowedFileRoots);
+    await assertGitRemoteHostAllowed(remote.url);
 
-  // Also fetch PR / MR heads if enabled and the remote advertises them (GitHub, Gitea/Forgejo, GitLab)
-  if (includePrRefs) {
+    const credential = resolveCredentialForTarget(remote.url, credentialStore);
+    const includePrRefs = options?.includePrRefs ?? true;
+
     try {
-      const lsPr = await runGitText(
-        projectRoot,
-        ['ls-remote', remote.name, 'refs/pull/*/head', 'refs/merge-requests/*/head'],
-        { timeoutMs: GIT_NETWORK_TIMEOUT_MS, credential }
+      await runGitText(projectRoot, ['fetch', '--prune', '--', remote.url, `+refs/heads/*:refs/remotes/${remote.name}/*`], {
+        timeoutMs: GIT_NETWORK_TIMEOUT_MS,
+        credential, remoteUrl: remote.url, allowedFileRoots
+      });
+    } catch (err) {
+      if (err instanceof GitOperationError || err instanceof PathBoundaryError) throw err;
+      const detail = extractGitErrorDetail(
+        err,
+        credentialStore,
+        credential ? [credential.token] : []
       );
-      const hasPull = lsPr.includes('refs/pull/');
-      const hasMr = lsPr.includes('refs/merge-requests/');
-      if (hasPull) {
-        await runGitText(
-          projectRoot,
-          ['fetch', remote.name, `+refs/pull/*/head:refs/remotes/${remote.name}/pr/*`],
-          { timeoutMs: GIT_NETWORK_TIMEOUT_MS, credential }
+      if (isGitAuthFailure(detail)) {
+        throw new GitAuthError(
+          `Authentication required for ${extractHttpsHost(remote.url ?? '') ?? 'remote'}: ${detail}`,
+          extractHttpsHost(remote.url ?? '')
         );
       }
-      if (hasMr) {
-        await runGitText(
-          projectRoot,
-          ['fetch', remote.name, `+refs/merge-requests/*/head:refs/remotes/${remote.name}/mr/*`],
-          { timeoutMs: GIT_NETWORK_TIMEOUT_MS, credential }
-        );
-      }
-    } catch {
-      // Non-fatal: standard Git bare remotes may not support PR ref namespaces
+      throw new GitOperationError(`Git fetch failed: ${detail}`, 502);
     }
-  }
 
-  return getGitRefs(projectRoot);
+    // Also fetch PR / MR heads if enabled and the remote advertises them (GitHub, Gitea/Forgejo, GitLab)
+    if (includePrRefs) {
+      try {
+        const lsPr = await runGitText(
+          projectRoot,
+          ['ls-remote', '--', remote.url, 'refs/pull/*/head', 'refs/merge-requests/*/head'],
+          { timeoutMs: GIT_NETWORK_TIMEOUT_MS, credential, remoteUrl: remote.url, allowedFileRoots }
+        );
+        const hasPull = lsPr.includes('refs/pull/');
+        const hasMr = lsPr.includes('refs/merge-requests/');
+        if (hasPull) {
+          await runGitText(
+            projectRoot,
+            ['fetch', '--', remote.url, `+refs/pull/*/head:refs/remotes/${remote.name}/pr/*`],
+            { timeoutMs: GIT_NETWORK_TIMEOUT_MS, credential, remoteUrl: remote.url, allowedFileRoots }
+          );
+        }
+        if (hasMr) {
+          await runGitText(
+            projectRoot,
+            ['fetch', '--', remote.url, `+refs/merge-requests/*/head:refs/remotes/${remote.name}/mr/*`],
+            { timeoutMs: GIT_NETWORK_TIMEOUT_MS, credential, remoteUrl: remote.url, allowedFileRoots }
+          );
+        }
+      } catch (err) {
+        if (err instanceof GitOperationError || err instanceof PathBoundaryError) throw err;
+        // Non-fatal: standard Git bare remotes may not support PR ref namespaces
+      }
+    }
+
+    return getGitRefs(projectRoot);
+  });
 }
 
 export async function pullGitRemote(
   projectRoot: string,
-  credentialStore?: CredentialStore
+  credentialStore?: CredentialStore,
+  options?: { allowedFileRoots?: string[] }
 ): Promise<{
   status: GitRepoStatus;
   summary: string;
   updated: boolean;
 }> {
-  const before = await getGitRepoStatus(projectRoot);
-  if (!before.isClean) {
-    throw new WorkingTreeDirtyError(
-      'Commit or revert uncommitted working-tree changes before pulling from remote.'
-    );
-  }
-
-  const remote = await resolvePrimaryRemote(projectRoot);
-  if (!remote.name) {
-    throw new GitOperationError('No Git remote is configured for this repository.', 400);
-  }
-
-  const credential = resolveCredentialForTarget(remote.url, credentialStore);
-
-  try {
-    await runGitText(projectRoot, ['fetch', '--prune', remote.name], {
-      timeoutMs: GIT_NETWORK_TIMEOUT_MS,
-      credential
-    });
-  } catch (err) {
-    const detail = extractGitErrorDetail(
-      err,
-      credentialStore,
-      credential ? [credential.token] : []
-    );
-    if (isGitAuthFailure(detail)) {
-      throw new GitAuthError(
-        `Authentication required for ${extractHttpsHost(remote.url ?? '') ?? 'remote'}: ${detail}`,
-        extractHttpsHost(remote.url ?? '')
+  return withRepositoryLock(projectRoot, async () => {
+    const before = await getGitRepoStatus(projectRoot);
+    if (!before.isClean) {
+      throw new WorkingTreeDirtyError(
+        'Commit or revert uncommitted working-tree changes before pulling from remote.'
       );
     }
-    throw new GitOperationError(`Git fetch failed: ${detail}`, 502);
-  }
 
-  // Determine upstream or matching remote branch
-  let pullTargetArgs: string[] = ['pull', '--ff-only'];
-  let hasUpstream = false;
-  try {
-    await runGitText(projectRoot, ['rev-parse', '--abbrev-ref', '@{upstream}']);
-    hasUpstream = true;
-  } catch {
-    hasUpstream = false;
-  }
+    const remote = await resolvePrimaryRemote(projectRoot);
+    if (!remote.name || !remote.url) {
+      throw new GitOperationError('No Git remote is configured for this repository.', 400);
+    }
+    const allowedFileRoots = options?.allowedFileRoots;
+    validateGitRemoteUrl(remote.url, allowedFileRoots);
+    await assertGitRemoteHostAllowed(remote.url);
 
-  if (!hasUpstream) {
-    const candidateRemoteRef = `${remote.name}/${before.branch}`;
+    const credential = resolveCredentialForTarget(remote.url, credentialStore);
+
     try {
-      await runGitText(projectRoot, ['rev-parse', '--verify', `refs/remotes/${candidateRemoteRef}`]);
-      pullTargetArgs = ['pull', '--ff-only', remote.name, before.branch];
-    } catch {
-      throw new GitOperationError(
-        `Branch "${before.branch}" has no upstream tracking branch on "${remote.name}".`,
-        400
-      );
-    }
-  }
-
-  let output = '';
-  try {
-    output = (
-      await runGitText(projectRoot, pullTargetArgs, {
+      await runGitText(projectRoot, ['fetch', '--prune', '--', remote.url, `+refs/heads/*:refs/remotes/${remote.name}/*`], {
         timeoutMs: GIT_NETWORK_TIMEOUT_MS,
-        credential
-      })
-    ).trim();
-  } catch (err) {
-    const detail = extractGitErrorDetail(
-      err,
-      credentialStore,
-      credential ? [credential.token] : []
-    );
-    if (detail.includes('Not possible to fast-forward')) {
-      throw new GitOperationError(
-        'Remote branch has diverged from local commits and cannot fast-forward cleanly.',
-        409
+        credential, remoteUrl: remote.url, allowedFileRoots
+      });
+    } catch (err) {
+      if (err instanceof GitOperationError || err instanceof PathBoundaryError) throw err;
+      const detail = extractGitErrorDetail(
+        err,
+        credentialStore,
+        credential ? [credential.token] : []
       );
+      if (isGitAuthFailure(detail)) {
+        throw new GitAuthError(
+          `Authentication required for ${extractHttpsHost(remote.url ?? '') ?? 'remote'}: ${detail}`,
+          extractHttpsHost(remote.url ?? '')
+        );
+      }
+      throw new GitOperationError(`Git fetch failed: ${detail}`, 502);
     }
-    if (isGitAuthFailure(detail)) {
-      throw new GitAuthError(
-        `Authentication required for ${extractHttpsHost(remote.url ?? '') ?? 'remote'}: ${detail}`,
-        extractHttpsHost(remote.url ?? '')
-      );
-    }
-    throw new GitOperationError(`Git pull failed: ${detail}`, 502);
-  }
 
-  const after = await getGitRepoStatus(projectRoot);
-  const updated = before.headSha !== after.headSha;
-  return {
-    status: after,
-    updated,
-    summary: updated
-      ? `Updated ${after.branch} (${before.headSha || 'init'} → ${after.headSha})`
-      : output || `${after.branch} is already up to date`
-  };
+    // Determine upstream or matching remote branch
+    let pullTargetArgs: string[] = ['merge', '--ff-only', '@{upstream}'];
+    let hasUpstream = false;
+    try {
+      await runGitText(projectRoot, ['rev-parse', '--abbrev-ref', '@{upstream}']);
+      hasUpstream = true;
+    } catch {
+      hasUpstream = false;
+    }
+
+    if (!hasUpstream) {
+      const candidateRemoteRef = `${remote.name}/${before.branch}`;
+      try {
+        await runGitText(projectRoot, ['rev-parse', '--verify', `refs/remotes/${candidateRemoteRef}`]);
+        pullTargetArgs = ['merge', '--ff-only', `refs/remotes/${remote.name}/${before.branch}`];
+      } catch {
+        throw new GitOperationError(
+          `Branch "${before.branch}" has no upstream tracking branch on "${remote.name}".`,
+          400
+        );
+      }
+    }
+
+    let output = '';
+    try {
+      output = (
+        await runGitText(projectRoot, pullTargetArgs, {
+          timeoutMs: GIT_NETWORK_TIMEOUT_MS,
+          credential, remoteUrl: remote.url, allowedFileRoots
+        })
+      ).trim();
+    } catch (err) {
+      if (err instanceof GitOperationError || err instanceof PathBoundaryError) throw err;
+      const detail = extractGitErrorDetail(
+        err,
+        credentialStore,
+        credential ? [credential.token] : []
+      );
+      if (detail.includes('Not possible to fast-forward')) {
+        throw new GitOperationError(
+          'Remote branch has diverged from local commits and cannot fast-forward cleanly.',
+          409
+        );
+      }
+      if (isGitAuthFailure(detail)) {
+        throw new GitAuthError(
+          `Authentication required for ${extractHttpsHost(remote.url ?? '') ?? 'remote'}: ${detail}`,
+          extractHttpsHost(remote.url ?? '')
+        );
+      }
+      throw new GitOperationError(`Git pull failed: ${detail}`, 502);
+    }
+
+    const after = await getGitRepoStatus(projectRoot);
+    const updated = before.headSha !== after.headSha;
+    return {
+      status: after,
+      updated,
+      summary: updated
+        ? `Updated ${after.branch} (${before.headSha || 'init'} → ${after.headSha})`
+        : output || `${after.branch} is already up to date`
+    };
+  });
 }
 
 async function checkoutGitPrNumber(
@@ -1238,12 +1443,17 @@ async function checkoutGitPrNumber(
   remoteName: string,
   credential?: ResolvedGitCredential | null,
   remoteUrl?: string | null,
-  credentialStore?: CredentialStore
+  credentialStore?: CredentialStore,
+  shallow?: boolean,
+  allowedFileRoots?: string[]
 ): Promise<void> {
   if (!Number.isInteger(prNumber) || prNumber <= 0) {
     throw new GitOperationError('Pull request number must be a positive integer.', 400);
   }
 
+  if (!remoteUrl) throw new GitOperationError('No Git remote is configured for this repository.', 400);
+  validateGitRemoteUrl(remoteUrl, allowedFileRoots);
+  await assertGitRemoteHostAllowed(remoteUrl);
   const localBranch = `pr/${prNumber}`;
   const remotePrRef = `refs/remotes/${remoteName}/pr/${prNumber}`;
   const remoteMrRef = `refs/remotes/${remoteName}/mr/${prNumber}`;
@@ -1255,13 +1465,14 @@ async function checkoutGitPrNumber(
     [`+refs/merge-requests/${prNumber}/head:${remoteMrRef}`, remoteMrRef]
   ]) {
     try {
-      await runGitText(projectRoot, ['fetch', remoteName, remotePattern], {
+      await runGitText(projectRoot, ['fetch', ...(shallow ? ['--depth', '1'] : []), '--', remoteUrl, remotePattern], {
         timeoutMs: GIT_NETWORK_TIMEOUT_MS,
-        credential
+        credential, remoteUrl, allowedFileRoots
       });
       fetchedRef = localTarget;
       break;
     } catch (err) {
+      if (err instanceof GitOperationError || err instanceof PathBoundaryError) throw err;
       const detail = extractGitErrorDetail(
         err,
         credentialStore,
@@ -1307,75 +1518,80 @@ async function checkoutGitPrNumber(
 export async function checkoutGitTarget(
   projectRoot: string,
   target: { kind: 'local' | 'remote' | 'pr'; ref: string; prNumber?: number },
-  credentialStore?: CredentialStore
+  credentialStore?: CredentialStore,
+  options?: { allowedFileRoots?: string[] }
 ): Promise<{ status: GitRepoStatus; branch: string }> {
-  const before = await getGitRepoStatus(projectRoot);
-  if (!before.isClean) {
-    throw new WorkingTreeDirtyError(
-      'Commit or revert uncommitted working-tree changes before switching branches or PRs.'
-    );
-  }
-
-  const remote = await resolvePrimaryRemote(projectRoot);
-  const credential = resolveCredentialForTarget(remote.url, credentialStore);
-
-  if (target.kind === 'pr') {
-    const parsedNum =
-      typeof target.prNumber === 'number'
-        ? target.prNumber
-        : Number.parseInt(target.ref.replace(/^(?:pr|mr)\//, '').replace(/^#/, ''), 10);
-    if (!Number.isInteger(parsedNum) || parsedNum <= 0) {
-      throw new GitOperationError('Valid pull request number is required.', 400);
+  return withRepositoryLock(projectRoot, async () => {
+    const before = await getGitRepoStatus(projectRoot);
+    if (!before.isClean) {
+      throw new WorkingTreeDirtyError(
+        'Commit or revert uncommitted working-tree changes before switching branches or PRs.'
+      );
     }
-    await checkoutGitPrNumber(
-      projectRoot,
-      parsedNum,
-      remote.name ?? 'origin',
-      credential,
-      remote.url,
-      credentialStore
-    );
-    const after = await getGitRepoStatus(projectRoot);
-    return { status: after, branch: after.branch };
-  }
 
-  const safeRef = validateGitRefToken(target.ref, 'branch');
+    const remote = await resolvePrimaryRemote(projectRoot);
+    const credential = resolveCredentialForTarget(remote.url, credentialStore);
 
-  if (target.kind === 'local') {
+    if (target.kind === 'pr') {
+      const parsedNum =
+        typeof target.prNumber === 'number'
+          ? target.prNumber
+          : Number.parseInt(target.ref.replace(/^(?:pr|mr)\//, '').replace(/^#/, ''), 10);
+      if (!Number.isInteger(parsedNum) || parsedNum <= 0) {
+        throw new GitOperationError('Valid pull request number is required.', 400);
+      }
+      await checkoutGitPrNumber(
+        projectRoot,
+        parsedNum,
+        remote.name ?? 'origin',
+        credential,
+        remote.url,
+        credentialStore,
+        undefined,
+        options?.allowedFileRoots
+      );
+      const after = await getGitRepoStatus(projectRoot);
+      return { status: after, branch: after.branch };
+    }
+
+    const safeRef = validateGitRefToken(target.ref, 'branch');
+
+    if (target.kind === 'local') {
+      try {
+        await runGitText(projectRoot, ['checkout', safeRef, '--']);
+      } catch (err) {
+        throw new GitOperationError(`Could not switch to branch "${safeRef}": ${extractGitErrorDetail(err)}`, 400);
+      }
+      const after = await getGitRepoStatus(projectRoot);
+      return { status: after, branch: after.branch };
+    }
+
+    // target.kind === 'remote' (e.g. "origin/feature-docs")
+    const slashIdx = safeRef.indexOf('/');
+    const localBranchName = validateGitRefToken(slashIdx > 0 ? safeRef.slice(slashIdx + 1) : safeRef, 'branch');
+    let localExists = false;
     try {
-      await runGitText(projectRoot, ['checkout', safeRef, '--']);
-    } catch (err) {
-      throw new GitOperationError(`Could not switch to branch "${safeRef}": ${extractGitErrorDetail(err)}`, 400);
+      await runGitText(projectRoot, ['rev-parse', '--verify', `refs/heads/${localBranchName}`]);
+      localExists = true;
+    } catch {
+      localExists = false;
     }
+
+    try {
+      if (localExists) {
+        await runGitText(projectRoot, ['checkout', localBranchName, '--']);
+      } else {
+        await runGitText(projectRoot, ['checkout', '-b', localBranchName, '--track', safeRef, '--']);
+      }
+    } catch (err) {
+      throw new GitOperationError(
+        `Could not check out remote branch "${safeRef}": ${extractGitErrorDetail(err)}`,
+        400
+      );
+    }
+
     const after = await getGitRepoStatus(projectRoot);
     return { status: after, branch: after.branch };
-  }
-
-  // target.kind === 'remote' (e.g. "origin/feature-docs")
-  const slashIdx = safeRef.indexOf('/');
-  const localBranchName = slashIdx > 0 ? safeRef.slice(slashIdx + 1) : safeRef;
-  let localExists = false;
-  try {
-    await runGitText(projectRoot, ['rev-parse', '--verify', `refs/heads/${localBranchName}`]);
-    localExists = true;
-  } catch {
-    localExists = false;
-  }
-
-  try {
-    if (localExists) {
-      await runGitText(projectRoot, ['checkout', localBranchName, '--']);
-    } else {
-      await runGitText(projectRoot, ['checkout', '-b', localBranchName, '--track', safeRef, '--']);
-    }
-  } catch (err) {
-    throw new GitOperationError(
-      `Could not check out remote branch "${safeRef}": ${extractGitErrorDetail(err)}`,
-      400
-    );
-  }
-
-  const after = await getGitRepoStatus(projectRoot);
-  return { status: after, branch: after.branch };
+  });
 }
 

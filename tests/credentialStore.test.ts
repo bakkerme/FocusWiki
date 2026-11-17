@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   CredentialStore,
   extractHttpsHost,
@@ -19,6 +19,7 @@ describe('CredentialStore & HTTPS PAT Security', () => {
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     fs.rmSync(tmpRoot, { recursive: true, force: true });
   });
 
@@ -129,4 +130,54 @@ describe('CredentialStore & HTTPS PAT Security', () => {
     expect(scrubbed).not.toContain('x-access-token:');
     expect(scrubbed).toContain('***');
   });
+
+  it('stores file-backed keys separately with FOCUSWIKI_SECRETS_DIR and preserves legacy keys', () => {
+    const secretsDir = path.join(tmpRoot, 'separate-secrets');
+    const store = new CredentialStore({ credentialsPath: credsPath, env: { FOCUSWIKI_SECRETS_DIR: secretsDir } });
+    store.upsert({ host: 'example.com', token: 'fictional_separate_key_token' });
+    expect(store.keyFilePath).toBe(path.join(secretsDir, '.credential-master.key'));
+    expect(fs.existsSync(path.join(path.dirname(credsPath), '.credential-master.key'))).toBe(false);
+    expect(new CredentialStore({ credentialsPath: credsPath, env: { FOCUSWIKI_SECRETS_DIR: secretsDir } })
+      .resolveForRemoteUrl('https://example.com/repo')?.token).toBe('fictional_separate_key_token');
+    const legacyPath = path.join(tmpRoot, 'legacy', '.git-credentials.enc.json');
+    const legacy = new CredentialStore({ credentialsPath: legacyPath, env: {} });
+    legacy.upsert({ host: 'example.com', token: 'fictional_legacy_token' });
+    const upgraded = new CredentialStore({ credentialsPath: legacyPath, env: { FOCUSWIKI_SECRETS_DIR: path.join(tmpRoot, 'new-secrets') } });
+    expect(upgraded.keyFilePath).toBe(legacy.keyFilePath);
+    expect(upgraded.resolveForRemoteUrl('https://example.com/repo')?.token).toBe('fictional_legacy_token');
+  });
+
+  it('prefers FOCUSWIKI_CREDENTIAL_KEY and never writes a disk key in env-key mode', () => {
+    const env = { FOCUSWIKI_CREDENTIAL_KEY: 'fictional-focus-key', CAIRN_CREDENTIAL_KEY: 'legacy-key' };
+    const store = new CredentialStore({ credentialsPath: credsPath, env });
+    store.upsert({ host: 'example.com', token: 'fictional_env_token' });
+    expect(store.getEncryptionMode()).toBe('env-key');
+    expect(fs.existsSync(store.keyFilePath!)).toBe(false);
+    expect(new CredentialStore({ credentialsPath: credsPath, env: { FOCUSWIKI_CREDENTIAL_KEY: env.FOCUSWIKI_CREDENTIAL_KEY } })
+      .resolveForRemoteUrl('https://example.com/repo')?.token).toBe('fictional_env_token');
+  });
+
+  it('retains the last complete credentials file and cleans the temp file when atomic rename fails', () => {
+    const store = new CredentialStore({ credentialsPath: credsPath, env: { FOCUSWIKI_CREDENTIAL_KEY: 'fictional-key' } });
+    store.upsert({ host: 'example.com', token: 'original_fictional_token' });
+    const original = fs.readFileSync(credsPath, 'utf8');
+    const rename = vi.spyOn(fs, 'renameSync').mockImplementation(() => { throw Object.assign(new Error('simulated rename failure'), { code: 'EACCES' }); });
+    expect(() => store.upsert({ host: 'example.com', token: 'replacement_fictional_token' })).toThrow(/Cannot persist/);
+    expect(rename).toHaveBeenCalledWith(expect.stringMatching(/\.tmp-\d+-[0-9a-f-]+$/), credsPath);
+    expect(fs.readFileSync(credsPath, 'utf8')).toBe(original);
+    expect(fs.readdirSync(path.dirname(credsPath)).filter((entry) => entry.includes('.tmp-'))).toEqual([]);
+    expect(store.resolveForRemoteUrl('https://example.com/repo')?.token).toBe('original_fictional_token');
+  });
+  it('warns once when file-backed keys are first generated or used', async () => {
+    vi.resetModules();
+    const { CredentialStore: FreshCredentialStore } = await import('../server/credentialStore.js');
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const first = new FreshCredentialStore({ credentialsPath: credsPath, env: {} });
+    first.upsert({ host: 'example.com', token: 'fictional_warning_token' });
+    const second = new FreshCredentialStore({ credentialsPath: credsPath, env: {} });
+    expect(second.resolveForRemoteUrl('https://example.com/repo')?.token).toBe('fictional_warning_token');
+    expect(warning).toHaveBeenCalledTimes(1);
+    expect(warning).toHaveBeenCalledWith(expect.stringContaining('FOCUSWIKI_CREDENTIAL_KEY'));
+  });
+
 });

@@ -86,6 +86,8 @@ export interface CredentialStoreOptions {
   env?: NodeJS.ProcessEnv;
 }
 
+let warnedAboutFileKey = false;
+
 export class CredentialStore {
   public readonly credentialsPath: string | null;
   public readonly keyFilePath: string | null;
@@ -96,9 +98,12 @@ export class CredentialStore {
   constructor(options: CredentialStoreOptions = {}) {
     this.env = options.env ?? process.env;
     this.credentialsPath = options.credentialsPath ? path.resolve(options.credentialsPath) : null;
-    this.keyFilePath = this.credentialsPath
-      ? path.join(path.dirname(this.credentialsPath), '.credential-master.key')
-      : null;
+    const legacyKeyPath = this.credentialsPath
+      ? path.join(path.dirname(this.credentialsPath), '.credential-master.key') : null;
+    const secretsKeyPath = this.env.FOCUSWIKI_SECRETS_DIR
+      ? path.resolve(this.env.FOCUSWIKI_SECRETS_DIR, '.credential-master.key') : null;
+    this.keyFilePath = secretsKeyPath && (fs.existsSync(secretsKeyPath) || !legacyKeyPath || !fs.existsSync(legacyKeyPath))
+      ? secretsKeyPath : legacyKeyPath;
 
     this.loadFromDisk();
   }
@@ -111,8 +116,8 @@ export class CredentialStore {
 
   private readEnvMasterKey(): Buffer | null {
     const raw =
-      this.env.CAIRN_CREDENTIAL_KEY ??
       this.env.FOCUSWIKI_CREDENTIAL_KEY ??
+      this.env.CAIRN_CREDENTIAL_KEY ??
       '';
     const trimmed = raw.trim();
     if (!trimmed) return null;
@@ -130,6 +135,10 @@ export class CredentialStore {
       return this.ephemeralKey;
     }
 
+    if (!warnedAboutFileKey) {
+      console.warn('[FocusWiki] FOCUSWIKI_CREDENTIAL_KEY is unset; using a file-backed credential key. Set FOCUSWIKI_CREDENTIAL_KEY or protect FOCUSWIKI_SECRETS_DIR separately from config backups.');
+      warnedAboutFileKey = true;
+    }
     if (fs.existsSync(this.keyFilePath)) {
       const hex = fs.readFileSync(this.keyFilePath, 'utf8').trim();
       const buf = Buffer.from(hex, 'hex');
@@ -184,7 +193,7 @@ export class CredentialStore {
 
     const tmp = path.join(
       dir,
-      `.git-credentials.${process.pid}.${crypto.randomBytes(4).toString('hex')}.tmp`
+      `${path.basename(this.credentialsPath)}.tmp-${process.pid}-${crypto.randomUUID()}`
     );
     try {
       fs.writeFileSync(tmp, `${JSON.stringify(payload, null, 2)}\n`, {
@@ -396,7 +405,7 @@ export class CredentialStore {
     let result = text;
     const all = [...this.getAllActiveSecrets(), ...extraSecrets]
       .map((s) => s.trim())
-      .filter((s) => s.length >= 4);
+      .filter((s) => s.length > 0);
     for (const secret of all) {
       if (result.includes(secret)) {
         result = result.split(secret).join('***');

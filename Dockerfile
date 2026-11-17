@@ -3,7 +3,7 @@ FROM node:22-bookworm-slim AS builder
 
 WORKDIR /app
 COPY package.json package-lock.json ./
-RUN npm ci --no-audit --no-fund
+RUN npm ci --no-fund
 
 COPY tsconfig.json tsconfig.server.json vite.config.ts index.html ./
 COPY shared ./shared
@@ -26,23 +26,23 @@ RUN git config --system --add safe.directory /app/sample-repos/cindervault-rpg \
 WORKDIR /app
 ENV NODE_ENV=production
 ENV PORT=8088
-ENV BIND_HOSTS=0.0.0.0
+ENV FOCUSWIKI_BIND_HOST=0.0.0.0
 
 COPY package.json package-lock.json ./
-RUN npm ci --omit=dev --no-audit --no-fund
+RUN npm ci --omit=dev --no-fund
 
 COPY --from=builder /app/dist ./dist
 COPY seeds ./seeds
-COPY config ./config
+COPY config/projects.default.json ./config/projects.default.json
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod 0755 /usr/local/bin/docker-entrypoint.sh \
-  && mkdir -p /app/sample-repos /app/repos \
-  && chmod 0770 /app/sample-repos /app/repos
+  && mkdir -p /app/sample-repos /app/repos /app/config \
+  && chmod 0770 /app/sample-repos /app/repos /app/config
 
 EXPOSE 8088
 
 HEALTHCHECK --interval=15s --timeout=5s --start-period=10s --retries=3 \
-  CMD curl -fsS http://127.0.0.1:8088/healthz || exit 1
+  CMD curl -fsS http://127.0.0.1:8088/api/health || exit 1
 
 # Note: Under rootless Docker owned by ubuntu (uid 1000), container uid 0 maps directly to
 # unprivileged host uid 1000 (matching the POSIX ACLs on /workspace/wiki-prototype/sample-repos),

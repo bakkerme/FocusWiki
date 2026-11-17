@@ -120,9 +120,12 @@ describe('Directory-aware document tree & long-sidebar scroll/footer layout', ()
     let browser: import('playwright').Browser | null = null;
 
     beforeAll(async () => {
-      const localCache = path.join(PROJECT_ROOT, '.runtime', 'ms-playwright');
-      if (!process.env.PLAYWRIGHT_BROWSERS_PATH && fs.existsSync(localCache)) {
-        process.env.PLAYWRIGHT_BROWSERS_PATH = localCache;
+      if (!process.env.PLAYWRIGHT_BROWSERS_PATH) {
+        const cache = [
+          path.join(PROJECT_ROOT, '.runtime', 'ms-playwright'),
+          '/workspace/wiki-prototype/.runtime/ms-playwright'
+        ].find((candidate) => fs.existsSync(candidate));
+        if (cache) process.env.PLAYWRIGHT_BROWSERS_PATH = cache;
       }
 
       tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'focuswiki-long-sidebar-test-'));
@@ -213,7 +216,7 @@ describe('Directory-aware document tree & long-sidebar scroll/footer layout', ()
       } catch {
         browser = await chromium.launch({ headless: true });
       }
-    }, 25000);
+    });
 
     afterAll(async () => {
       if (browser) await browser.close();
@@ -224,6 +227,7 @@ describe('Directory-aware document tree & long-sidebar scroll/footer layout', ()
 
     it('renders directory groups, keeps Settings visible and non-overlapping across scroll on desktop, portrait, and short landscape', async () => {
       const context = await browser!.newContext({ viewport: { width: 1440, height: 900 } });
+      context.setDefaultTimeout(15000);
       const page = await context.newPage();
 
       try {
@@ -248,7 +252,7 @@ describe('Directory-aware document tree & long-sidebar scroll/footer layout', ()
         await logToggle.click();
         await evalsToggle.click();
         expect(await decisionsToggle.getAttribute('aria-expanded')).toBe('true');
-        expect(await page.locator('.nav-sidebar .doc-item').count()).toBeGreaterThanOrEqual(54);
+        await page.waitForFunction(() => document.querySelectorAll('.nav-sidebar .doc-item').length >= 54);
 
         // Verify folder README appears first inside docs/decisions before ADR 0001
         const firstDecisionTitle = await page
@@ -308,7 +312,7 @@ describe('Directory-aware document tree & long-sidebar scroll/footer layout', ()
         // Collapse all folders button collapses the tree cleanly, then Expand all restores
         await page.locator('button[aria-label="Collapse all folders"]').click();
         expect(await docsToggle.getAttribute('aria-expanded')).toBe('false');
-        expect(await page.locator('.nav-sidebar .doc-item').count()).toBe(1); // Only root README.md
+        await page.waitForFunction(() => document.querySelectorAll('.nav-sidebar .doc-item').length === 1); // Only root README.md
 
         // Navigating to a nested doc via URL automatically opens its ancestor folders
         await page.goto(
@@ -341,6 +345,6 @@ describe('Directory-aware document tree & long-sidebar scroll/footer layout', ()
       } finally {
         await context.close();
       }
-    }, 25000);
+    });
   });
 });

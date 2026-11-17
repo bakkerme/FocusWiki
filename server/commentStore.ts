@@ -6,7 +6,17 @@ import type {
   CommentSidecarFile,
   CommentThread
 } from '../shared/types.js';
+import { writeFileAtomicSync } from './fileLock.js';
 import { resolveSafeProjectPath } from './pathGuard.js';
+
+export class CommentNotFoundError extends Error {
+  public readonly statusCode = 404;
+
+  constructor(threadId: string) {
+    super(`Comment thread "${threadId}" not found.`);
+    this.name = 'CommentNotFoundError';
+  }
+}
 
 export function getCommentSidecarRelPath(docRelPath: string): string {
   if (docRelPath.endsWith('.md')) {
@@ -50,10 +60,7 @@ export function writeCommentSidecar(
   const sidecarRel = getCommentSidecarRelPath(docRelPath);
   const { absolutePath } = resolveSafeProjectPath(projectRoot, sidecarRel);
   fs.mkdirSync(path.dirname(absolutePath), { recursive: true, mode: 0o770 });
-  fs.writeFileSync(absolutePath, `${JSON.stringify(sidecar, null, 2)}\n`, {
-    encoding: 'utf8',
-    mode: 0o660
-  });
+  writeFileAtomicSync(absolutePath, `${JSON.stringify(sidecar, null, 2)}\n`, 0o660);
 }
 
 function makeId(prefix: string): string {
@@ -120,7 +127,7 @@ export function addCommentReply(
   const sidecar = readCommentSidecar(projectRoot, docRelPath);
   const thread = sidecar.threads.find((t) => t.id === threadId);
   if (!thread) {
-    throw new Error(`Comment thread "${threadId}" not found.`);
+    throw new CommentNotFoundError(threadId);
   }
   const actor = input.author.trim() || 'Reviewer';
   thread.messages.push({
@@ -156,7 +163,7 @@ export function updateCommentStatus(
   const sidecar = readCommentSidecar(projectRoot, docRelPath);
   const thread = sidecar.threads.find((t) => t.id === threadId);
   if (!thread) {
-    throw new Error(`Comment thread "${threadId}" not found.`);
+    throw new CommentNotFoundError(threadId);
   }
   const actor = input.actor.trim() || 'Reviewer';
   thread.status = input.status;

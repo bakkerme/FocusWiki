@@ -6,18 +6,17 @@ services:
     image: focuswiki:latest
     container_name: focuswiki
     restart: unless-stopped
+    init: true
     environment:
       NODE_ENV: production
       PORT: "8088"
-      BIND_HOSTS: "0.0.0.0"
+      FOCUSWIKI_BIND_HOST: "0.0.0.0"
       PROJECTS_CONFIG: "/app/config/projects.json"
       FOCUSWIKI_REPOS_DIR: "/app/repos"
       FOCUSWIKI_ALLOWED_IMPORT_ROOTS: "/app/repos,/app/sample-repos"
-    # Rootless Docker needs distinct published ports for these two host addresses.
-    # Keep host exposure restricted to loopback and the private Tailscale interface.
+    # Choose a private LAN address explicitly when access beyond loopback is needed.
     ports:
-      - "127.0.0.1:8089:8088"
-      - "100.117.116.91:8088:8088"
+      - "${FOCUSWIKI_BIND_HOST:-127.0.0.1}:8088:8088"
     volumes:
       - ./sample-repos:/app/sample-repos
       - ./repos:/app/repos
@@ -27,7 +26,7 @@ services:
     cap_drop:
       - ALL
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8088/healthz"]
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8088/api/health"]
       interval: 15s
       timeout: 5s
       retries: 3
