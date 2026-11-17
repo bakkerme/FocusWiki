@@ -14,6 +14,48 @@ import type {
 } from 'mdast';
 import type { EmbedDescriptor, ProseMirrorMark, ProseMirrorNode } from './types.js';
 
+/** Resolve a decoded repository path without allowing traversal outside its root. */
+export function resolveRepoRelativePath(docPath: string, href: string): string | null {
+  let decoded: string;
+  try { decoded = decodeURIComponent(href); } catch { return null; }
+  if (!decoded || /[\\\u0000-\u001f\u007f]/.test(decoded) || /^[a-z][a-z\d+.-]*:/i.test(decoded) || decoded.startsWith('//')) return null;
+  const parts = decoded.startsWith('/') ? [] : docPath.split('/').slice(0, -1);
+  for (const part of decoded.split('/')) {
+    if (!part || part === '.') continue;
+    if (part === '..') {
+      if (!parts.length) return null;
+      parts.pop();
+    } else {
+      if (part === '.git') return null;
+      parts.push(part);
+    }
+  }
+  return parts.length ? parts.join('/') : null;
+}
+
+export function resolveMarkdownLink(docPath: string, href: string): { path: string; fragment: string | null } | null {
+  const hashIndex = href.indexOf('#');
+  const pathPart = hashIndex === -1 ? href : href.slice(0, hashIndex);
+  let fragment: string | null = null;
+  try { fragment = hashIndex === -1 ? null : decodeURIComponent(href.slice(hashIndex + 1)); } catch { return null; }
+  if (!pathPart) return hashIndex === -1 ? null : { path: docPath, fragment };
+  const path = resolveRepoRelativePath(docPath, pathPart);
+  return path && /\.md$/i.test(path) ? { path, fragment } : null;
+}
+
+/** A new slugger per document, including collision handling for duplicate headings. */
+export function createHeadingSlugger(): (heading: string) => string {
+  const used = new Set<string>();
+  return (heading) => {
+    const base = heading.toLowerCase().replace(/[^\p{L}\p{M}\p{N}_\-\s]/gu, '').replace(/\s/g, '-');
+    let slug = base;
+    let suffix = 0;
+    while (used.has(slug)) slug = `${base}-${++suffix}`;
+    used.add(slug);
+    return slug;
+  };
+}
+
 export function parseEmbedBlockText(rawValue: string): EmbedDescriptor | null {
   const trimmed = rawValue.trim();
   if (!trimmed) return null;
@@ -170,6 +212,14 @@ export function markdownToProseMirror(markdown: string): ProseMirrorNode {
             }
           };
           out.push(...convertInline(node.children, [...activeMarks, linkMark]));
+          break;
+        }
+        case 'image': {
+          out.push({
+            type: 'image',
+            attrs: { src: node.url, alt: node.alt ?? '', title: node.title ?? null },
+            ...(activeMarks.length ? { marks: [...activeMarks] } : {})
+          });
           break;
         }
         case 'break': {
@@ -437,6 +487,13 @@ function convertPmInlineToMdast(nodes: ProseMirrorNode[] | undefined): PhrasingC
   const runs: MarkedInlineRun[] = [];
 
   for (const node of nodes) {
+    if (node.type === 'image') {
+      runs.push({
+        leaf: { type: 'image', url: String(node.attrs?.src ?? ''), alt: String(node.attrs?.alt ?? ''), title: node.attrs?.title == null ? null : String(node.attrs.title) },
+        wrapperMarks: node.marks ?? []
+      });
+      continue;
+    }
     if (node.type === 'hardBreak') {
       runs.push({ leaf: { type: 'break' }, wrapperMarks: [] });
       continue;
@@ -475,6 +532,10 @@ function convertPmBlocksToMdast(nodes: ProseMirrorNode[] | undefined): RootConte
           depth: level,
           children: convertPmInlineToMdast(node.content)
         });
+        break;
+      }
+      case 'image': {
+        out.push({ type: 'paragraph', children: convertPmInlineToMdast([node]) });
         break;
       }
       case 'paragraph': {

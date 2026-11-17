@@ -1,4 +1,5 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
+import { useModalOverlayFocus } from '../utils/overlayModal';
 import type { EmbedAssetEntry, EmbedDescriptor } from '../../shared/types';
 
 interface Props {
@@ -73,6 +74,8 @@ export function InsertEmbedModal({
   onCreatedNewEmbedFile,
   onClose
 }: Props) {
+  const modalRef = useRef<HTMLDivElement>(null);
+  useModalOverlayFocus({ active: true, containerRef: modalRef, onDismiss: onClose });
   const [tab, setTab] = useState<'existing' | 'new'>('existing');
   const [selectedSrc, setSelectedSrc] = useState<string>(existingEmbeds[0]?.src ?? '');
   const [title, setTitle] = useState<string>(existingEmbeds[0]?.name ?? 'Interactive Widget');
@@ -144,9 +147,17 @@ export function InsertEmbedModal({
 
   return (
     <div className="modal-backdrop" onClick={onClose}>
-      <div className="modal-panel" onClick={(e) => e.stopPropagation()} role="dialog" aria-label="Insert or create project embed">
+      <div
+        className="modal-panel"
+        ref={modalRef}
+        tabIndex={-1}
+        aria-modal="true"
+        aria-labelledby="insert-embed-title"
+        onClick={(e) => e.stopPropagation()}
+        role="dialog"
+      >
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <h2 style={{ margin: 0, fontSize: 17 }}>Insert project-authored embed</h2>
+          <h2 id="insert-embed-title" style={{ margin: 0, fontSize: 17 }}>Insert project-authored embed</h2>
           <button type="button" className="btn" onClick={onClose}>
             Close
           </button>

@@ -1,4 +1,6 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import './styles.css';
+import { createPortal } from 'react-dom';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   Check,
   GitBranch,
@@ -99,6 +101,9 @@ export function App() {
   const [liveMarkdown, setLiveMarkdown] = useState<string>('');
   const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>(readInitialModeFromUrl);
   const [saveState, setSaveState] = useState<SaveStateKind>('saved');
+  const [commentAlertTarget, setCommentAlertTarget] = useState<HTMLElement | null>(null);
+  const [commentError, setCommentError] = useState<string | null>(null);
+  const [navigationFragment, setNavigationFragment] = useState<string | null>(null);
   const [statusNotice, setStatusNotice] = useState<string | null>(null);
   const [editSessionBaseline, setEditSessionBaseline] = useState<EditSessionBaseline | null>(null);
   const [sessionActionPending, setSessionActionPending] = useState<'done' | 'revert' | null>(null);
@@ -180,6 +185,12 @@ export function App() {
   const isOverlayLayout = layoutTier === 'overlay';
   const effectiveNavVisible = isOverlayLayout ? overlayDrawer === 'nav' : desktopNavOpen;
   const effectiveReviewVisible = isOverlayLayout ? overlayDrawer === 'review' : desktopReviewOpen;
+  // Keep the alert in the Review focus trap when the drawer mounts or closes.
+  useLayoutEffect(() => {
+    setCommentAlertTarget(
+      (effectiveReviewVisible ? document.getElementById('focus-review-panel') : null) ?? document.body
+    );
+  }, [effectiveReviewVisible]);
   const isOverlayModalOpen = isOverlayLayout && overlayDrawer !== null;
   const anyDialogOpen =
     readingSettingsOpen ||
@@ -392,6 +403,7 @@ export function App() {
         setExpandedHistory({});
         setActiveThreadId(null);
       }
+      setNavigationFragment(null);
       setDocSessionNonce((n) => n + 1);
 
       const modeForUrl = workspaceModeRef.current;
@@ -799,52 +811,69 @@ export function App() {
   }
 
   async function handleCreateComment(author: string, body: string) {
-    if (!activeProjectId || !activeDocPath || !pendingAnchor) return;
-    if (liveMdRef.current !== lastSavedMdRef.current) {
-      await performSave(liveMdRef.current, false);
-    }
-    const res = await fetch(`/api/projects/${encodeURIComponent(activeProjectId)}/comments`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        path: activeDocPath,
-        anchor: pendingAnchor,
-        author,
-        role: 'human',
-        body
-      })
-    });
-    if (res.ok) {
-      const { thread } = (await res.json()) as { thread: ResolvedCommentThread };
-      setThreads((prev) => [...prev, thread]);
-      setActiveThreadId(thread.id);
-      setPendingAnchor(null);
-      setComposerOpen(false);
-      setCommentDraft('');
-      window.getSelection()?.removeAllRanges();
-      void refreshProjects();
-    }
-  }
-
-  async function handleReplyComment(threadId: string, author: string, body: string) {
-    if (!activeProjectId || !activeDocPath) return;
-    const res = await fetch(
-      `/api/projects/${encodeURIComponent(activeProjectId)}/comments/${encodeURIComponent(threadId)}/replies`,
-      {
+    try {
+      if (!activeProjectId || !activeDocPath || !pendingAnchor) return;
+      if (liveMdRef.current !== lastSavedMdRef.current) {
+        const outcome = await performSave(liveMdRef.current, false);
+        if (outcome !== 'saved') throw new Error('Save the document successfully before adding this comment.');
+      }
+      const res = await fetch(`/api/projects/${encodeURIComponent(activeProjectId)}/comments`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           path: activeDocPath,
+          anchor: pendingAnchor,
           author,
           role: 'human',
           body
         })
+      });
+      if (!res.ok) {
+        const failure = await res.json().catch(() => ({})) as { message?: string };
+        throw new Error(failure.message ?? `Comment update failed (${res.status}). Your draft is retained.`);
       }
-    );
-    if (res.ok) {
-      const { thread } = (await res.json()) as { thread: ResolvedCommentThread };
-      setThreads((prev) => prev.map((t) => (t.id === thread.id ? thread : t)));
-      setReplyDrafts((prev) => ({ ...prev, [threadId]: '' }));
+      if (res.ok) {
+        const { thread } = (await res.json()) as { thread: ResolvedCommentThread };
+        setThreads((prev) => [...prev, thread]);
+        setActiveThreadId(thread.id);
+        setPendingAnchor(null);
+        setComposerOpen(false);
+        setCommentDraft('');
+        window.getSelection()?.removeAllRanges();
+        void refreshProjects();
+      }
+    } catch (err) {
+      setCommentError(err instanceof Error ? err.message : 'Could not save comment changes. Your draft is retained.');
+    }
+  }
+
+  async function handleReplyComment(threadId: string, author: string, body: string) {
+    try {
+      if (!activeProjectId || !activeDocPath) return;
+      const res = await fetch(
+        `/api/projects/${encodeURIComponent(activeProjectId)}/comments/${encodeURIComponent(threadId)}/replies`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            path: activeDocPath,
+            author,
+            role: 'human',
+            body
+          })
+        }
+      );
+      if (!res.ok) {
+        const failure = await res.json().catch(() => ({})) as { message?: string };
+        throw new Error(failure.message ?? `Comment update failed (${res.status}). Your draft is retained.`);
+      }
+      if (res.ok) {
+        const { thread } = (await res.json()) as { thread: ResolvedCommentThread };
+        setThreads((prev) => prev.map((t) => (t.id === thread.id ? thread : t)));
+        setReplyDrafts((prev) => ({ ...prev, [threadId]: '' }));
+      }
+    } catch (err) {
+      setCommentError(err instanceof Error ? err.message : 'Could not save comment changes. Your draft is retained.');
     }
   }
 
@@ -853,27 +882,35 @@ export function App() {
     status: 'open' | 'resolved',
     actor: string
   ) {
-    if (!activeProjectId || !activeDocPath) return;
-    const res = await fetch(
-      `/api/projects/${encodeURIComponent(activeProjectId)}/comments/${encodeURIComponent(threadId)}/status`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          path: activeDocPath,
-          status,
-          actor,
-          role: 'human'
-        })
+    try {
+      if (!activeProjectId || !activeDocPath) return;
+      const res = await fetch(
+        `/api/projects/${encodeURIComponent(activeProjectId)}/comments/${encodeURIComponent(threadId)}/status`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            path: activeDocPath,
+            status,
+            actor,
+            role: 'human'
+          })
+        }
+      );
+      if (!res.ok) {
+        const failure = await res.json().catch(() => ({})) as { message?: string };
+        throw new Error(failure.message ?? `Comment update failed (${res.status}). Your draft is retained.`);
       }
-    );
-    if (res.ok) {
-      const { thread } = (await res.json()) as { thread: ResolvedCommentThread };
-      setThreads((prev) => prev.map((t) => (t.id === thread.id ? thread : t)));
-      if (status === 'resolved' && !showResolvedComments && activeThreadId === threadId) {
-        setActiveThreadId(null);
+      if (res.ok) {
+        const { thread } = (await res.json()) as { thread: ResolvedCommentThread };
+        setThreads((prev) => prev.map((t) => (t.id === thread.id ? thread : t)));
+        if (status === 'resolved' && !showResolvedComments && activeThreadId === threadId) {
+          setActiveThreadId(null);
+        }
+        void refreshProjects();
       }
-      void refreshProjects();
+    } catch (err) {
+      setCommentError(err instanceof Error ? err.message : 'Could not save comment changes. Your draft is retained.');
     }
   }
 
@@ -1461,6 +1498,8 @@ export function App() {
               ref={visualEditorRef}
               docKey={`${activeProjectId}:${activeDocPath}:${docSessionNonce}`}
               projectName={activeProject?.name}
+              projectSlug={activeProjectId}
+              navigationFragment={navigationFragment}
               docPath={activeDocPath}
               editable={workspaceMode === 'visual'}
               initialMarkdown={initialDocMarkdown}
@@ -1491,9 +1530,11 @@ export function App() {
               }}
               onOpenInsertEmbedModal={() => setEmbedModalOpen(true)}
               onOpenRepoDetails={() => void handleOpenGitModal()}
-              onNavigateDoc={(targetPath) => {
+              onNavigateDoc={(targetPath, fragment) => {
                 if (activeProjectId) {
-                  void handleSelectDoc(activeProjectId, targetPath);
+                  void handleSelectDoc(activeProjectId, targetPath).then(() => setNavigationFragment(fragment ?? null)).catch((err: unknown) => {
+                    setStatusNotice(err instanceof Error ? err.message : 'Could not open linked document.');
+                  });
                 }
               }}
               onTriggerImmediateSave={() => void performSave(liveMdRef.current, false)}
@@ -1554,6 +1595,14 @@ export function App() {
             </div>
           )}
         </main>
+
+        {commentError && createPortal(
+          <div className="notice-banner conflict comment-error-banner" role="alert">
+            <span>{commentError}</span>
+            <button type="button" className="btn btn-compact" onClick={() => setCommentError(null)}>Dismiss</button>
+          </div>,
+          commentAlertTarget ?? document.body
+        )}
 
         {effectiveReviewVisible && (
           <ReviewMargin

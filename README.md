@@ -35,6 +35,18 @@ You do not need to edit `config/projects.json` or restart the server to add repo
   - `POST /api/projects/import` (`mode`: `"clone" | "local" | "init"`) & `DELETE /api/projects/:projectId`
   - `GET /api/projects/:projectId/git/refs`, `POST /api/projects/:projectId/git/fetch`, `POST /api/projects/:projectId/git/pull`, `POST /api/projects/:projectId/git/checkout`
 
+## Images, Links, and Visual Editing
+
+In **Edit → Visual**, use **Image** for a repository path or HTTP(S) URL, alternative text, and an optional title. Inline and standalone Markdown images remain editable and retain their original `src`, `alt`, and `title` when saved. Repository image URLs resolve against the current document directory and render through `/api/projects/:projectId/assets/:path`; they are never rewritten into API URLs in Markdown. Remote images load directly from their host with no referrer.
+
+The link button opens a keyboard-accessible form (**Apply**, **Remove Link**, **Cancel**, or Escape). Document links such as `../overview.md#authentication` resolve relative to the current document; `#heading` links scroll within it. Headings have deterministic GitHub-style anchors, including duplicate suffixes. Selecting a table cell reveals row, column, and table deletion controls. These controls appear only in Edit mode.
+
+Clone imports now send an optional `shallow` boolean. The Git review defaults to all changed files checked; selecting a subset sends `paths` with the commit request, and selecting all omits it. **Integration dependency:** this UI branch requires the sibling server implementation of the assets route, shallow cloning, and selected-path commits. The base server does not yet implement those contracts. Its review UI has no re-anchor request to wrap; all existing create/reply/resolve/reopen failures now produce a dismissible alert and retain drafts.
+
+### TipTap dependency limitation
+
+All TipTap packages are pinned together to `2.27.3`, the latest published v2 release verified on 2026-11-17. There is **no published patched v2** for [GHSA-cp6q-959q-f8rh](https://github.com/advisories/GHSA-cp6q-959q-f8rh): npm identifies every release below `3.30.4` as affected. `npm audit --omit=dev` therefore reports **33 moderate vulnerabilities** (one core advisory and dependent packages), rather than zero. A coordinated migration to patched v3 or an upstream v2 backport is required; audit reporting has not been suppressed.
+
 ## Rootless Docker Packaging & Deployment (`ubuntu` uid 1000)
 
 `Dockerfile` and `compose.yaml` package the production build with persistent bind mounts for `./sample-repos`, `./repos` (`FOCUSWIKI_REPOS_DIR=/app/repos`), and `./config` (writable so UI/API imports persist in `projects.json`), dropped Linux capabilities (`cap_drop: [ALL]`), `no-new-privileges`, a `/healthz` healthcheck, and `restart: unless-stopped`.

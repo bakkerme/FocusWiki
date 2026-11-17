@@ -1,3 +1,5 @@
+import { useRef } from 'react';
+import { useModalOverlayFocus } from '../utils/overlayModal';
 import type { ConflictErrorPayload } from '../../shared/types';
 
 interface Props {
@@ -13,16 +15,22 @@ export function ConflictModal({
   onOverwriteWithMine,
   onDismiss
 }: Props) {
+  const modalRef = useRef<HTMLDivElement>(null);
+  useModalOverlayFocus({ active: true, containerRef: modalRef, onDismiss });
   return (
     <div className="modal-backdrop" onClick={onDismiss}>
       <div
         className="modal-panel"
+        ref={modalRef}
+        tabIndex={-1}
+        aria-modal="true"
+        aria-labelledby="conflict-modal-title"
         onClick={(e) => e.stopPropagation()}
         role="dialog"
         aria-label="Concurrent file edit conflict resolution"
       >
         <div>
-          <h2 style={{ margin: 0, fontSize: 17, color: 'var(--conflict-garnet)' }}>
+          <h2 id="conflict-modal-title" style={{ margin: 0, fontSize: 17, color: 'var(--conflict-garnet)' }}>
             External file edit detected — both versions preserved
           </h2>
           <p style={{ margin: '6px 0 0 0', fontSize: 13, color: 'var(--ink-secondary)' }}>

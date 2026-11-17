@@ -7,10 +7,14 @@ import {
   useState
 } from 'react';
 import { EditorContent, useEditor, type JSONContent } from '@tiptap/react';
+import { Extension } from '@tiptap/core';
+import { Plugin } from '@tiptap/pm/state';
+import { Decoration, DecorationSet } from '@tiptap/pm/view';
+import Image from '@tiptap/extension-image';
 import StarterKit from '@tiptap/starter-kit';
 import Link from '@tiptap/extension-link';
 import Placeholder from '@tiptap/extension-placeholder';
-import Table from '@tiptap/extension-table';
+import { Table } from '@tiptap/extension-table';
 import TableRow from '@tiptap/extension-table-row';
 import TableHeader from '@tiptap/extension-table-header';
 import TableCell from '@tiptap/extension-table-cell';
@@ -25,6 +29,7 @@ import {
   Heading2,
   Heading3,
   Italic,
+  ImagePlus,
   Link2,
   List,
   ListOrdered,
@@ -40,7 +45,7 @@ import type {
   ProseMirrorNode,
   ResolvedCommentThread
 } from '../../shared/types';
-import { markdownToProseMirror, proseMirrorToMarkdown } from '../../shared/markdownCodec';
+import { createHeadingSlugger, resolveMarkdownLink, resolveRepoRelativePath, markdownToProseMirror, proseMirrorToMarkdown } from '../../shared/markdownCodec';
 import { EmbedBlockExtension } from './EmbedBlockExtension';
 import {
   RawMarkdownBlockExtension,
@@ -54,6 +59,34 @@ import {
   extractLiveProseBlocks
 } from './CommentHighlightExtension';
 import { buildAnchorFromBlockSelection } from '../../shared/anchorResolver';
+
+// Decorations add navigation targets without introducing presentation attributes into Markdown.
+const HeadingAnchors = Extension.create({
+  name: 'headingAnchors',
+  addProseMirrorPlugins() {
+    return [new Plugin({ props: {
+      decorations(state) {
+        const slug = createHeadingSlugger();
+        const headings: Decoration[] = [];
+        state.doc.descendants((node, pos) => {
+          if (node.type.name === 'heading') headings.push(Decoration.node(pos, pos + node.nodeSize, { id: slug(node.textContent) }));
+        });
+        return DecorationSet.create(state.doc, headings);
+      }
+    } })];
+  }
+});
+
+function imageDisplaySource(src: string, projectSlug: string, docPath: string): string | null {
+  if (/^https?:\/\//i.test(src)) return src;
+  const path = resolveRepoRelativePath(docPath, src);
+  return path && projectSlug ? `/api/projects/${encodeURIComponent(projectSlug)}/assets/${path.split('/').map(encodeURIComponent).join('/')}` : null;
+}
+
+function scrollToHeading(root: HTMLElement | null, fragment: string) {
+  const heading = Array.from(root?.querySelectorAll<HTMLElement>('h1[id],h2[id],h3[id],h4[id],h5[id],h6[id]') ?? []).find((el) => el.id === fragment);
+  heading?.scrollIntoView({ behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth', block: 'start' });
+}
 
 const AlignedTableHeader = TableHeader.extend({
   addAttributes() {
@@ -82,6 +115,8 @@ export interface VisualEditorHandle {
 interface Props {
   docKey: string;
   projectName?: string;
+  projectSlug: string;
+  navigationFragment?: string | null;
   docPath?: string;
   editable: boolean;
   initialMarkdown: string;
@@ -94,7 +129,7 @@ interface Props {
   onSelectThread: (threadId: string) => void;
   onOpenInsertEmbedModal: () => void;
   onOpenRepoDetails?: () => void;
-  onNavigateDoc: (docPath: string) => void;
+  onNavigateDoc: (docPath: string, fragment?: string | null) => void;
   onTriggerImmediateSave: () => void;
 }
 
@@ -109,6 +144,8 @@ export const VisualMarkdownEditor = forwardRef<VisualEditorHandle, Props>(
     const {
       docKey,
       projectName,
+      projectSlug,
+      navigationFragment,
       docPath,
       editable,
       initialMarkdown,
@@ -132,6 +169,16 @@ export const VisualMarkdownEditor = forwardRef<VisualEditorHandle, Props>(
     const sheetScrollRef = useRef<HTMLDivElement | null>(null);
     const proseContainerRef = useRef<HTMLDivElement | null>(null);
 
+    const imageContextRef = useRef({ projectSlug, docPath: docPath ?? '' });
+    imageContextRef.current = { projectSlug, docPath: docPath ?? '' };
+    const navigationRef = useRef({ docPath: docPath ?? '', onNavigateDoc });
+    navigationRef.current = { docPath: docPath ?? '', onNavigateDoc };
+    const [authoringPopover, setAuthoringPopover] = useState<'link' | 'image' | null>(null);
+    const [urlInput, setUrlInput] = useState('');
+    const [imageAlt, setImageAlt] = useState('');
+    const [imageTitle, setImageTitle] = useState('');
+    const [popoverError, setPopoverError] = useState<string | null>(null);
+    const savedSelectionRef = useRef<{ from: number; to: number } | null>(null);
     const [selectionPopover, setSelectionPopover] = useState<FloatingSelectionState | null>(null);
     const [, forceToolbarTick] = useState<number>(0);
 
@@ -141,8 +188,36 @@ export const VisualMarkdownEditor = forwardRef<VisualEditorHandle, Props>(
       editable,
       extensions: [
         StarterKit.configure({
-          heading: { levels: [1, 2, 3, 4] }
+          heading: { levels: [1, 2, 3, 4, 5, 6] },
+          link: false,
+          underline: false,
+          trailingNode: false
         }),
+        HeadingAnchors,
+        Image.extend({
+          addNodeView() {
+            return ({ node }) => {
+              const dom = document.createElement('img');
+              const updateImage = (attrs: Record<string, unknown>) => {
+                const context = imageContextRef.current;
+                const src = imageDisplaySource(String(attrs.src ?? ''), context.projectSlug, context.docPath);
+                if (src) dom.setAttribute('src', src);
+                else dom.removeAttribute('src');
+                dom.alt = String(attrs.alt ?? '');
+                if (attrs.title != null) dom.title = String(attrs.title);
+                else dom.removeAttribute('title');
+                dom.loading = 'lazy';
+                dom.referrerPolicy = 'no-referrer';
+              };
+              updateImage(node.attrs);
+              return { dom, update(next) {
+                if (next.type !== node.type) return false;
+                updateImage(next.attrs);
+                return true;
+              } };
+            };
+          }
+        }).configure({ inline: true, allowBase64: false }),
         Link.configure({
           openOnClick: false,
           autolink: true
@@ -170,6 +245,12 @@ export const VisualMarkdownEditor = forwardRef<VisualEditorHandle, Props>(
         const nextMd = proseMirrorToMarkdown(json, baseMarkdownRef.current);
         onMarkdownEdited(nextMd);
       },
+      onSelectionUpdate() {
+        forceToolbarTick((n) => n + 1);
+      },
+      onTransaction() {
+        forceToolbarTick((n) => n + 1);
+      },
       onFocus() {
         forceToolbarTick((n) => n + 1);
       },
@@ -192,27 +273,48 @@ export const VisualMarkdownEditor = forwardRef<VisualEditorHandle, Props>(
           }
           return false;
         },
-        handleClick(_view, _pos, event) {
-          const target = event.target as HTMLElement | null;
-          if (!editableRef.current && target?.closest?.('input[type="checkbox"]')) {
-            event.preventDefault();
-            return true;
-          }
-          const anchorEl = target?.closest?.('a') as HTMLAnchorElement | null;
-          const href = anchorEl?.getAttribute('href');
-          if (href && (!editableRef.current || event.metaKey || event.ctrlKey)) {
-            event.preventDefault();
-            if (href.startsWith('http://') || href.startsWith('https://')) {
-              window.open(href, '_blank', 'noopener,noreferrer');
-            } else if (href.endsWith('.md')) {
-              onNavigateDoc(href);
+        handleDOMEvents: {
+          // Cancel the native click as well as navigating; ProseMirror handleClick
+          // receives mouseup, whose preventDefault does not stop an anchor navigation.
+          click(_view, event) {
+            const target = event.target as HTMLElement | null;
+            if (!editableRef.current && target?.closest?.('input[type="checkbox"]')) {
+              event.preventDefault();
+              return true;
             }
-            return true;
+            const anchorEl = target?.closest?.('a') as HTMLAnchorElement | null;
+            const href = anchorEl?.getAttribute('href');
+            if (href) {
+              event.preventDefault();
+              if (editableRef.current && !event.metaKey && !event.ctrlKey) return true;
+              if (href.startsWith('http://') || href.startsWith('https://')) {
+                window.open(href, '_blank', 'noopener,noreferrer');
+              } else {
+                const context = navigationRef.current;
+                const resolved = resolveMarkdownLink(context.docPath, href);
+                if (resolved?.path === context.docPath && resolved.fragment !== null) {
+                  scrollToHeading(proseContainerRef.current, resolved.fragment);
+                } else if (resolved) {
+                  context.onNavigateDoc(resolved.path, resolved.fragment);
+                } else if (/^(mailto:|tel:)/i.test(href)) {
+                  window.location.href = href;
+                }
+              }
+              return true;
+            }
+            return false;
           }
-          return false;
         }
       }
     });
+
+    useEffect(() => {
+      if (!editor || !navigationFragment) return;
+      const frame = window.requestAnimationFrame(() => scrollToHeading(proseContainerRef.current, navigationFragment));
+      return () => window.cancelAnimationFrame(frame);
+    }, [editor, navigationFragment, docKey]);
+
+    useEffect(() => { setAuthoringPopover(null); }, [editable, docKey]);
 
     // Keep editable state synced cleanly without emitting synthetic document updates
     useEffect(() => {
@@ -231,7 +333,7 @@ export const VisualMarkdownEditor = forwardRef<VisualEditorHandle, Props>(
         activeDocKeyRef.current = docKey;
         baseMarkdownRef.current = initialMarkdown;
         suppressUpdateRef.current = true;
-        editor.commands.setContent(markdownToProseMirror(initialMarkdown) as JSONContent, false);
+        editor.commands.setContent(markdownToProseMirror(initialMarkdown) as JSONContent, { emitUpdate: false });
         suppressUpdateRef.current = false;
         setSelectionPopover(null);
         onSelectionAnchorChange(null);
@@ -389,7 +491,7 @@ export const VisualMarkdownEditor = forwardRef<VisualEditorHandle, Props>(
         if (!editor) return;
         baseMarkdownRef.current = markdown;
         suppressUpdateRef.current = true;
-        editor.commands.setContent(markdownToProseMirror(markdown) as JSONContent, false);
+        editor.commands.setContent(markdownToProseMirror(markdown) as JSONContent, { emitUpdate: false });
         suppressUpdateRef.current = false;
       },
       scrollToThreadAnchor(threadId: string) {
@@ -428,19 +530,25 @@ export const VisualMarkdownEditor = forwardRef<VisualEditorHandle, Props>(
         ? String(editor.getAttributes('link').href ?? '')
         : '';
 
-    function promptForLink() {
+    function openAuthoringPopover(kind: 'link' | 'image') {
       if (!editor) return;
-      const previousUrl = String(editor.getAttributes('link').href ?? '');
-      const url = window.prompt(
-        'Link URL or relative document path (leave empty to remove):',
-        previousUrl
-      );
-      if (url === null) return;
-      if (url.trim() === '') {
-        editor.chain().focus().extendMarkRange('link').unsetLink().run();
-        return;
-      }
-      editor.chain().focus().extendMarkRange('link').setLink({ href: url.trim() }).run();
+      savedSelectionRef.current = { from: editor.state.selection.from, to: editor.state.selection.to };
+      setUrlInput(kind === 'link' ? String(editor.getAttributes('link').href ?? '') : '');
+      setImageAlt('');
+      setImageTitle('');
+      setPopoverError(null);
+      setAuthoringPopover(kind);
+    }
+
+    function restoreSelection() {
+      if (!editor) return;
+      const chain = editor.chain().focus();
+      return savedSelectionRef.current ? chain.setTextSelection(savedSelectionRef.current) : chain;
+    }
+
+    function closeAuthoringPopover() {
+      setAuthoringPopover(null);
+      restoreSelection()?.run();
     }
 
     function triggerCommentFromCurrentSelection() {
@@ -538,15 +646,19 @@ export const VisualMarkdownEditor = forwardRef<VisualEditorHandle, Props>(
                 aria-label="Insert or edit link"
                 aria-pressed={activeOnFocus('link')}
                 title="Insert or edit link"
-                onClick={promptForLink}
+                onClick={() => openAuthoringPopover('link')}
               >
                 <Link2 size={15} />
               </button>
-              {activeLinkHref && activeLinkHref.endsWith('.md') && (
+              {activeLinkHref && resolveMarkdownLink(docPath ?? '', activeLinkHref) && (
                 <button
                   type="button"
                   className="btn btn-compact"
-                  onClick={() => onNavigateDoc(activeLinkHref)}
+                  onClick={() => {
+                    const resolved = resolveMarkdownLink(docPath ?? '', activeLinkHref);
+                    if (resolved && resolved.path === docPath && resolved.fragment !== null) scrollToHeading(proseContainerRef.current, resolved.fragment);
+                    else if (resolved) onNavigateDoc(resolved.path, resolved.fragment);
+                  }}
                   title={`Open linked document ${activeLinkHref}`}
                 >
                   <ExternalLink size={12} />
@@ -624,6 +736,9 @@ export const VisualMarkdownEditor = forwardRef<VisualEditorHandle, Props>(
             <div className="tool-divider" />
 
             <div className="toolbar-actions-right">
+              <button type="button" className="btn btn-compact" onClick={() => openAuthoringPopover('image')} title="Insert image">
+                <ImagePlus size={13} aria-hidden="true" /><span>Image</span>
+              </button>
               <button
                 type="button"
                 className="btn btn-compact"
@@ -642,6 +757,58 @@ export const VisualMarkdownEditor = forwardRef<VisualEditorHandle, Props>(
                 <span>Comment</span>
               </button>
             </div>
+          </div>
+        )}
+
+        {editable && authoringPopover && (
+          <form className="editor-authoring-bar" aria-label={authoringPopover === 'link' ? 'Edit link' : 'Insert image'} onKeyDown={(e) => {
+            if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeAuthoringPopover(); }
+          }} onSubmit={(e) => {
+            e.preventDefault();
+            const href = urlInput.trim();
+            if (!href) { setPopoverError('Enter a URL or repository path.'); return; }
+            if (/^[a-z][a-z\d+.-]*:/i.test(href) && !/^(https?:|mailto:|tel:)/i.test(href) || /^\/\//.test(href) || /[\u0000-\u001f\u007f]/.test(href)) {
+              setPopoverError('Use an HTTP(S) URL, email, telephone, or repository path.'); return;
+            }
+            if (authoringPopover === 'image') {
+              if (!imageDisplaySource(href, projectSlug, docPath ?? '')) { setPopoverError('Use an HTTP(S) URL or an image path inside this repository.'); return; }
+              restoreSelection()?.setImage({ src: href, alt: imageAlt, title: imageTitle || undefined }).run();
+            } else {
+              const chain = restoreSelection()?.extendMarkRange('link');
+              if (editor.state.selection.empty && !editor.isActive('link')) {
+                chain?.insertContent({ type: 'text', text: href, marks: [{ type: 'link', attrs: { href } }] }).run();
+              } else {
+                const applied = chain?.setLink({ href }).run();
+                if (!applied) { setPopoverError('Use a valid link URL or repository path.'); return; }
+              }
+            }
+            setAuthoringPopover(null);
+          }}>
+            <label>{authoringPopover === 'link' ? 'Link URL or document path' : 'Image URL or repository path'}
+              <input autoFocus className="field-input" value={urlInput} onChange={(e) => setUrlInput(e.target.value)} placeholder={authoringPopover === 'link' ? './guide.md#overview' : './images/diagram.png'} />
+            </label>
+            {authoringPopover === 'image' && <>
+              <label>Alternative text<input className="field-input" value={imageAlt} onChange={(e) => setImageAlt(e.target.value)} /></label>
+              <label>Title (optional)<input className="field-input" value={imageTitle} onChange={(e) => setImageTitle(e.target.value)} /></label>
+            </>}
+            <button className="btn btn-primary btn-compact" type="submit">{authoringPopover === 'link' ? 'Apply' : 'Insert image'}</button>
+            {authoringPopover === 'link' && <button className="btn btn-compact" type="button" onClick={() => {
+              restoreSelection()?.extendMarkRange('link').unsetLink().run(); setAuthoringPopover(null);
+            }}>Remove Link</button>}
+            <button className="btn btn-compact" type="button" onClick={closeAuthoringPopover}>Cancel</button>
+            {popoverError && <span role="alert">{popoverError}</span>}
+          </form>
+        )}
+        {editable && editor.isActive('table') && (
+          <div className="editor-table-controls" role="group" aria-label="Table controls" onMouseDown={(e) => { if ((e.target as HTMLElement).closest('button')) e.preventDefault(); }}>
+            <span>Table</span>
+            <button className="btn btn-compact" onClick={() => editor.chain().focus().addRowBefore().run()}>Row above</button>
+            <button className="btn btn-compact" onClick={() => editor.chain().focus().addRowAfter().run()}>Row below</button>
+            <button className="btn btn-compact" onClick={() => editor.chain().focus().deleteRow().run()}>Delete row</button>
+            <button className="btn btn-compact" onClick={() => editor.chain().focus().addColumnBefore().run()}>Column before</button>
+            <button className="btn btn-compact" onClick={() => editor.chain().focus().addColumnAfter().run()}>Column after</button>
+            <button className="btn btn-compact" onClick={() => editor.chain().focus().deleteColumn().run()}>Delete column</button>
+            <button className="btn btn-compact" onClick={() => editor.chain().focus().deleteTable().run()}>Delete table</button>
           </div>
         )}
 

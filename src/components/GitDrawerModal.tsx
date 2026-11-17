@@ -26,7 +26,7 @@ import type {
   InertReviewBlock,
   MarkdownReviewEntry
 } from '../../shared/changeReview';
-import type { GitRefsPayload, GitRepoStatus, ProjectSummary } from '../../shared/types';
+import type { GitCommitSelection, GitRefsPayload, GitRepoStatus, ProjectSummary } from '../../shared/types';
 import { useModalOverlayFocus } from '../utils/overlayModal';
 
 interface Props {
@@ -441,6 +441,7 @@ export function GitDrawerModal({
   const [branchFilter, setBranchFilter] = useState<string>('');
   const [prNumberInput, setPrNumberInput] = useState<string>('');
   const [syncingAction, setSyncingAction] = useState<'fetch' | 'pull' | 'checkout' | null>(null);
+  const [selectedPaths, setSelectedPaths] = useState<string[]>([]);
   const [selectedPath, setSelectedPath] = useState<string>('');
   const [viewMode, setViewMode] = useState<'rich' | 'raw-file' | 'raw-all'>('rich');
   const [commitMessage, setCommitMessage] = useState<string>('');
@@ -466,6 +467,7 @@ export function GitDrawerModal({
       if (!res.ok) throw new Error(`Failed to read working-tree changes (${res.status})`);
       const data = (await res.json()) as GitChangeReviewPayload;
       setReview(data);
+      setSelectedPaths(data.status.changedFiles.map((file) => file.path));
       const candidates = data.files.map((f) => f.path);
       setSelectedPath((prev) => {
         if (preferredPath && candidates.includes(preferredPath)) return preferredPath;
@@ -623,11 +625,14 @@ export function GitDrawerModal({
 
   async function handleCommit(e: React.FormEvent) {
     e.preventDefault();
-    if (!commitMessage.trim() || review.status.isClean) return;
+    if (!commitMessage.trim() || review.status.isClean || !selectedPaths.length) return;
     setCommitting(true);
     setError(null);
     setAuthPromptHost(null);
     try {
+      const selection: GitCommitSelection = {
+        paths: selectedPaths.length === review.status.changedFiles.length ? undefined : selectedPaths
+      };
       const res = await fetch(`/api/projects/${encodeURIComponent(project.id)}/git/commit`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -635,6 +640,7 @@ export function GitDrawerModal({
           message: commitMessage.trim(),
           authorName: authorName.trim() || 'Workspace Author',
           ...(defaultAuthorEmail?.trim() ? { authorEmail: defaultAuthorEmail.trim() } : {}),
+          ...selection,
           expectedSnapshotDigest: review.snapshotDigest
         })
       });
@@ -650,6 +656,7 @@ export function GitDrawerModal({
 
       if (res.status === 409 && payload.latestReview) {
         setReview(payload.latestReview);
+        setSelectedPaths((previous) => previous.filter((path) => payload.latestReview!.status.changedFiles.some((file) => file.path === path)));
         const nextFiles = payload.latestReview.files.map((f) => f.path);
         if (!nextFiles.includes(selectedPath)) {
           setSelectedPath(nextFiles[0] ?? '');
@@ -1019,35 +1026,39 @@ export function GitDrawerModal({
                     {review.files.map((file) => {
                       const active = selectedFile?.path === file.path && viewMode !== 'raw-all';
                       return (
-                        <button
-                          key={file.path}
-                          type="button"
-                          className={`change-file-item ${active ? 'active' : ''}`}
-                          onClick={() => {
-                            setSelectedPath(file.path);
-                            if (viewMode === 'raw-all') {
-                              setViewMode('rich');
-                            }
-                          }}
-                        >
-                          <div className="change-file-item-top">
-                            {renderFileIcon(file)}
-                            <span className="change-file-human">{file.humanTitle}</span>
-                          </div>
-                          <div className="change-file-path">
-                            {file.oldPath ? `${file.oldPath} → ${file.path}` : file.path}
-                          </div>
-                          <div className="change-file-meta-row">
-                            <span
-                              className={`change-status-tag is-${
-                                file.formattingOnly ? 'formatting' : file.status
-                              }`}
-                            >
-                              {file.formattingOnly ? 'formatting' : file.status}
-                            </span>
-                            <span className="change-file-summary">{file.summaryLabel}</span>
-                          </div>
-                        </button>
+                        <div className="change-file-select-row" key={file.path}>
+                          <input type="checkbox" aria-label={`Include ${file.path} in commit`} checked={selectedPaths.includes(file.path)} disabled={committing} onChange={(e) => {
+                            setSelectedPaths((previous) => e.target.checked ? [...previous, file.path] : previous.filter((path) => path !== file.path));
+                          }} />
+                          <button
+                            type="button"
+                            className={`change-file-item ${active ? 'active' : ''}`}
+                            onClick={() => {
+                              setSelectedPath(file.path);
+                              if (viewMode === 'raw-all') {
+                                setViewMode('rich');
+                              }
+                            }}
+                          >
+                            <div className="change-file-item-top">
+                              {renderFileIcon(file)}
+                              <span className="change-file-human">{file.humanTitle}</span>
+                            </div>
+                            <div className="change-file-path">
+                              {file.oldPath ? `${file.oldPath} → ${file.path}` : file.path}
+                            </div>
+                            <div className="change-file-meta-row">
+                              <span
+                                className={`change-status-tag is-${
+                                  file.formattingOnly ? 'formatting' : file.status
+                                }`}
+                              >
+                                {file.formattingOnly ? 'formatting' : file.status}
+                              </span>
+                              <span className="change-file-summary">{file.summaryLabel}</span>
+                            </div>
+                          </button>
+                        </div>
                       );
                     })}
                   </div>
@@ -1120,7 +1131,7 @@ export function GitDrawerModal({
               <div className="change-commit-scope">
                 <FileDiff size={13} aria-hidden="true" />
                 <span>
-                  {review.commitScopeNote || `Local branch ${status.branch} (never pushes).`}
+                  {`${selectedPaths.length} of ${changedCount} changed files selected. Local branch ${status.branch} (never pushes).`}
                 </span>
               </div>
               <div className="change-commit-inputs">
@@ -1149,12 +1160,12 @@ export function GitDrawerModal({
                 <button
                   type="submit"
                   className="btn btn-primary commit-submit-btn"
-                  disabled={status.isClean || !commitMessage.trim() || committing}
+                  disabled={status.isClean || !selectedPaths.length || !commitMessage.trim() || committing}
                 >
                   {committing
                     ? 'Committing…'
-                    : changedCount > 0
-                      ? `Commit ${changedCount} ${changedCount === 1 ? 'file' : 'files'}`
+                    : selectedPaths.length > 0
+                      ? `Commit ${selectedPaths.length} ${selectedPaths.length === 1 ? 'file' : 'files'}`
                       : 'Commit changes'}
                 </button>
               </div>
