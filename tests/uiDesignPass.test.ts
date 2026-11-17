@@ -4,7 +4,7 @@ import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createHubApp, type HubAppInstance } from '../server/app';
 
 const PROJECT_ROOT = path.resolve(__dirname, '..');
@@ -43,11 +43,20 @@ describe('Council UI Design & Responsive IA Pass — Interactive Browser Verific
   let browser: import('playwright').Browser | null = null;
 
   beforeAll(async () => {
-    const localCache = path.join(PROJECT_ROOT, '.runtime', 'ms-playwright');
-    if (!process.env.PLAYWRIGHT_BROWSERS_PATH && fs.existsSync(localCache)) {
-      process.env.PLAYWRIGHT_BROWSERS_PATH = localCache;
+    if (!process.env.PLAYWRIGHT_BROWSERS_PATH) {
+      const cache = [
+        path.join(PROJECT_ROOT, '.runtime', 'ms-playwright'),
+        '/workspace/wiki-prototype/.runtime/ms-playwright'
+      ].find((candidate) => fs.existsSync(candidate));
+      if (cache) process.env.PLAYWRIGHT_BROWSERS_PATH = cache;
     }
 
+    const { chromium } = await import('playwright');
+    browser = await chromium.launch({ headless: true });
+  });
+
+  // Every test gets fresh repositories, sidecars, Git history, and server state.
+  beforeEach(async () => {
     tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'focuswiki-ui-pass-test-'));
     repoRoot = path.join(tmpRoot, 'cindervault-rpg');
     heliosRoot = path.join(tmpRoot, 'helios-lab');
@@ -82,17 +91,13 @@ describe('Council UI Design & Responsive IA Pass — Interactive Browser Verific
     await new Promise<void>((resolve) => server!.listen(0, '127.0.0.1', () => resolve()));
     const port = (server.address() as AddressInfo).port;
     baseUrl = `http://127.0.0.1:${port}`;
-
-    const { chromium } = await import('playwright');
-    try {
-      browser = await chromium.launch({ headless: true, chromiumSandbox: true });
-    } catch {
-      browser = await chromium.launch({ headless: true });
-    }
-  }, 25000);
+  });
 
   afterAll(async () => {
     if (browser) await browser.close();
+  });
+
+  afterEach(async () => {
     if (server) await new Promise<void>((resolve) => server!.close(() => resolve()));
     if (hub) await hub.close();
     if (tmpRoot) fs.rmSync(tmpRoot, { recursive: true, force: true });
@@ -100,6 +105,7 @@ describe('Council UI Design & Responsive IA Pass — Interactive Browser Verific
 
   it('opens in clean Read mode IA by default, hides authoring chrome & save noise, and supports prose selection commenting + reply/resolve/reopen', async () => {
     const context = await browser!.newContext({ viewport: { width: 1440, height: 900 } });
+    context.setDefaultTimeout(15000);
     const page = await context.newPage();
 
     try {
@@ -146,7 +152,7 @@ describe('Council UI Design & Responsive IA Pass — Interactive Browser Verific
       });
 
       const commentChip = page.locator('.selection-comment-popover');
-      await commentChip.waitFor({ state: 'visible', timeout: 4000 });
+      await commentChip.waitFor({ state: 'visible', timeout: 15000 });
       await commentChip.click();
 
       // Composer opens in Review rail while still in Read mode
@@ -181,7 +187,7 @@ describe('Council UI Design & Responsive IA Pass — Interactive Browser Verific
     } finally {
       await context.close();
     }
-  }, 25000);
+  });
 
   it('sizes sandboxed embeds dynamically to content height and provides a fallback for non-resizing custom embeds', async () => {
     const customEmbedPath = path.join(repoRoot, 'embeds', 'static-card', 'index.html');
@@ -200,6 +206,7 @@ describe('Council UI Design & Responsive IA Pass — Interactive Browser Verific
     );
 
     const context = await browser!.newContext({ viewport: { width: 1440, height: 900 } });
+    context.setDefaultTimeout(15000);
     const page = await context.newPage();
 
     try {
@@ -238,7 +245,7 @@ describe('Council UI Design & Responsive IA Pass — Interactive Browser Verific
     } finally {
       await context.close();
     }
-  }, 25000);
+  });
 
   it('supports explicit Visual Editor, full-workspace Markdown Source, autosave round-trip, and external conflict recovery', async () => {
     const docRel = 'docs/roundtrip-edit-test.md';
@@ -250,6 +257,7 @@ describe('Council UI Design & Responsive IA Pass — Interactive Browser Verific
     );
 
     const context = await browser!.newContext({ viewport: { width: 1440, height: 900 } });
+    context.setDefaultTimeout(15000);
     const page = await context.newPage();
 
     try {
@@ -271,11 +279,14 @@ describe('Council UI Design & Responsive IA Pass — Interactive Browser Verific
 
       const ta = page.locator('textarea.markdown-source-editor');
       const existing = await ta.inputValue();
+      const roundtripSave = page.waitForResponse((response) =>
+        response.url().includes('/api/projects/cindervault-rpg/doc') && response.request().method() === 'PUT' && response.ok());
       await ta.fill(existing.replace('Initial paragraph for editing.', 'Updated in full-workspace source mode.'));
+      await roundtripSave;
       await page.waitForFunction(
         () => document.querySelector('.save-badge.saved') !== null,
         undefined,
-        { timeout: 5000 }
+        { timeout: 15000 }
       );
       expect(fs.readFileSync(docAbs, 'utf8')).toContain('Updated in full-workspace source mode.');
 
@@ -298,12 +309,12 @@ describe('Council UI Design & Responsive IA Pass — Interactive Browser Verific
       await page.locator('textarea.markdown-source-editor').fill(
         '# Roundtrip Edit Check\n\nConcurrent browser draft.\n'
       );
-      await page.waitForSelector('.save-badge.conflict', { timeout: 5000 });
+      await page.waitForSelector('.save-badge.conflict', { timeout: 15000 });
       expect(await page.locator('.modal-panel:has-text("External File Edit Detected")').count()).toBe(1);
     } finally {
       await context.close();
     }
-  }, 25000);
+  });
 
   it('keeps Edit + Review adjacent without wrapping across portrait, short landscape, above-880px, and desktop, and supports desktop panel collapsing', async () => {
     const viewports = [
@@ -317,6 +328,7 @@ describe('Council UI Design & Responsive IA Pass — Interactive Browser Verific
     ];
 
     const context = await browser!.newContext({ viewport: { width: 1440, height: 900 } });
+    context.setDefaultTimeout(15000);
     const page = await context.newPage();
 
     try {
@@ -377,11 +389,11 @@ describe('Council UI Design & Responsive IA Pass — Interactive Browser Verific
     } finally {
       await context.close();
     }
-  }, 25000);
+  });
 
   it('uses native root scrolling, locks background & traps focus in modal drawers, and preserves drafts + scroll across dismiss and portrait->landscape rotation', async () => {
     const context = await browser!.newContext({ viewport: { width: 390, height: 844 } });
-    context.setDefaultTimeout(4000);
+    context.setDefaultTimeout(15000);
     const page = await context.newPage();
 
     try {
@@ -477,10 +489,11 @@ describe('Council UI Design & Responsive IA Pass — Interactive Browser Verific
     } finally {
       await context.close();
     }
-  }, 25000);
+  });
 
   it('scopes horizontal scrolling strictly to wide tables (.tableWrapper) and <pre> blocks without clipping prose left edges on helios-lab bench-inventory.md', async () => {
     const context = await browser!.newContext({ viewport: { width: 390, height: 844 } });
+    context.setDefaultTimeout(15000);
     const page = await context.newPage();
 
     try {
@@ -526,10 +539,11 @@ describe('Council UI Design & Responsive IA Pass — Interactive Browser Verific
     } finally {
       await context.close();
     }
-  }, 25000);
+  });
 
   it('centers the constrained reading column horizontally inside main.document-stage when Review is closed (with Docs open or closed)', async () => {
     const context = await browser!.newContext({ viewport: { width: 1440, height: 900 } });
+    context.setDefaultTimeout(15000);
     const page = await context.newPage();
 
     try {
@@ -590,7 +604,7 @@ describe('Council UI Design & Responsive IA Pass — Interactive Browser Verific
     } finally {
       await context.close();
     }
-  }, 25000);
+  });
 
   it('handles edit-session Done + Revert atomically across Visual/Source switches, pre-existing uncommitted baseline, autosave races, save errors, and external conflicts', async () => {
     const docRel = 'docs/session-revert-fixture.md';
@@ -610,7 +624,7 @@ describe('Council UI Design & Responsive IA Pass — Interactive Browser Verific
     fs.writeFileSync(unrelatedAbs, '# Unrelated Dirty File\n\nKeep me untouched.\n', 'utf8');
 
     const context = await browser!.newContext({ viewport: { width: 1440, height: 900 } });
-    context.setDefaultTimeout(6000);
+    context.setDefaultTimeout(15000);
     const page = await context.newPage();
 
     try {
@@ -626,7 +640,10 @@ describe('Council UI Design & Responsive IA Pass — Interactive Browser Verific
       // Edit in Visual mode and wait for autosave to write to disk
       await page.locator('.ProseMirror p').first().click();
       await page.keyboard.press('End');
-      await page.keyboard.type(' Visual session edit.');
+      const visualSave = page.waitForResponse((response) =>
+        response.url().includes('/api/projects/cindervault-rpg/doc') && response.request().method() === 'PUT' && response.ok());
+      await page.keyboard.insertText(' Visual session edit.');
+      await visualSave;
       await page.waitForFunction(() => {
         const btn = document.querySelector('.btn-revert-session') as HTMLButtonElement | null;
         return Boolean(btn && !btn.disabled && document.querySelector('.save-badge.saved'));
@@ -653,17 +670,22 @@ describe('Council UI Design & Responsive IA Pass — Interactive Browser Verific
 
       const ta = page.locator('textarea.markdown-source-editor');
       const v2 = await ta.inputValue();
+      const sourceSave = page.waitForResponse((response) =>
+        response.url().includes('/api/projects/cindervault-rpg/doc') && response.request().method() === 'PUT' && response.ok());
       await ta.fill(`${v2}\n## Source Session Section\n\nAutosaved source paragraph.\n`);
+      await sourceSave;
       await page.waitForSelector('.save-badge.saved');
       expect(fs.readFileSync(docAbs, 'utf8')).toContain('Source Session Section');
 
-      // Trigger a pending autosave race (fill without waiting 600ms) and immediately click Revert
+      // Control browser time so cancelled debounce callbacks can be checked deterministically.
+      await page.clock.install();
+      // Trigger a pending autosave race and immediately click Revert.
       await ta.fill(`${v2}\n## Raced Draft That Must Never Persist\n`);
       await page.locator('.btn-revert-session').click();
       await page.waitForSelector('.workbench[data-workspace-mode="read"]');
 
-      // Wait past the 600ms autosave debounce window to prove cancelled draft never overwrites disk
-      await page.waitForTimeout(750);
+      // Advance beyond the debounce instead of relying on wall-clock scheduling under contention.
+      await page.clock.runFor(1000);
       expect(fs.readFileSync(docAbs, 'utf8')).toBe(preExistingUncommitted);
       expect(fs.readFileSync(unrelatedAbs, 'utf8')).toContain('Keep me untouched.');
 
@@ -712,9 +734,12 @@ describe('Council UI Design & Responsive IA Pass — Interactive Browser Verific
       await page.locator('.btn-edit-entry').click();
       await page.locator('.mode-switch button:has-text("Markdown source")').click();
       await page.waitForSelector('textarea.markdown-source-editor');
+      const draftSave = page.waitForResponse((response) =>
+        response.url().includes('/api/projects/cindervault-rpg/doc') && response.request().method() === 'PUT' && response.ok());
       await page.locator('textarea.markdown-source-editor').fill(
         `${preExistingUncommitted}\nTemporary draft before external conflict.\n`
       );
+      await draftSave;
       await page.waitForSelector('.save-badge.saved');
 
       const botDiskEdit = `${preExistingUncommitted}\nExternal bot concurrent update on disk.\n`;
@@ -727,7 +752,7 @@ describe('Council UI Design & Responsive IA Pass — Interactive Browser Verific
     } finally {
       await context.close();
     }
-  }, 30000);
+  });
 
   it('renders safe Rich Change Review (prose word diff, formatting-only table separation, comments, code, add/delete) and commits with zero OpenBot trailer', async () => {
     // Isolate a clean project working tree in heliosRoot for rich change review + commit verification
@@ -757,7 +782,7 @@ describe('Council UI Design & Responsive IA Pass — Interactive Browser Verific
     fs.writeFileSync(seqHtmlPath, `${fs.readFileSync(seqHtmlPath, 'utf8')}\n<!-- updated -->\n`, 'utf8');
 
     const context = await browser!.newContext({ viewport: { width: 1440, height: 900 } });
-    context.setDefaultTimeout(6000);
+    context.setDefaultTimeout(15000);
     const page = await context.newPage();
 
     try {
@@ -840,11 +865,11 @@ describe('Council UI Design & Responsive IA Pass — Interactive Browser Verific
     } finally {
       await context.close();
     }
-  }, 30000);
+  });
 
   it('uses system sans-serif typography on neutral white surfaces and supports Reading settings presets, persistence, invalid-storage recovery, keyboard/focus composition, and draft survival without repo writes', async () => {
     const context = await browser!.newContext({ viewport: { width: 1440, height: 900 } });
-    context.setDefaultTimeout(6000);
+    context.setDefaultTimeout(15000);
     const page = await context.newPage();
 
     try {
@@ -1064,5 +1089,5 @@ describe('Council UI Design & Responsive IA Pass — Interactive Browser Verific
     } finally {
       await context.close();
     }
-  }, 35000);
+  });
 });

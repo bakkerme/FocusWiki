@@ -60,6 +60,25 @@ describe('Automatic dark mode tokens, embeds, and contrast invariants', () => {
     }
   });
 
+  it('keeps automatic and explicit dark palettes identical and covers every light color token', () => {
+    const css = readProjectFile('src/styles/workspace.css');
+    const light = css.match(/:root\s*\{([\s\S]*?)\}/)![1];
+    const automatic = css.match(/:root:not\(\[data-theme="light"\]\)\s*\{([\s\S]*?)\}/)![1];
+    const explicit = css.match(/:root\[data-theme="dark"\]\s*\{([\s\S]*?)\}/)![1];
+    const tokens = (block: string) => Object.fromEntries(
+      [...block.matchAll(/(--[a-z0-9-]+):\s*([^;]+);/g)].map(([, name, value]) => [name, value.trim()])
+    );
+    const darkTokens = tokens(automatic);
+    expect(tokens(explicit)).toEqual({ ...darkTokens });
+    for (const [name, value] of Object.entries(tokens(light))) {
+      if (/^(#|rgba?\()/.test(value)) {
+        expect(darkTokens, `Missing dark override for ${name}`).toHaveProperty(name);
+      }
+    }
+    expect(explicit).toContain('color-scheme: dark;');
+    expect(css).toMatch(/:root\[data-theme="light"\]\s*\{\s*color-scheme: light;/);
+  });
+
   it('eliminates non-token hardcoded light surfaces and colors outside token definitions', () => {
     const css = readProjectFile('src/styles/workspace.css');
     const lines = css.split('\n');
