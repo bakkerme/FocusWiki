@@ -1,12 +1,28 @@
 # Review Handoff & Five-Minute Walkthrough
 
+## Internal LAN Readiness & Hardening Verification — 2026-11-17
+
+Summary of integrated hardening, Git clone lifecycle, authoring, and test verification:
+
+- **Git Cloning & Repository Security (`server/gitService.ts`, `server/credentialStore.ts`, `server/pathGuard.ts`, `server/projectRegistry.ts`):**
+  - Hardened every `git` invocation with `core.hooksPath=/dev/null`, `core.fsmonitor=false`, `submodule.recurse=false`, `core.symlinks=false`, `http.followRedirects=false`, `transfer.fsckObjects=true`, `protocol.allow=never` + explicit per-protocol allowlisting, URL-rewrite (`insteadOf`) blocking, minimal child environments (`GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=/dev/null`), and `0700` ephemeral credential helpers with stderr/stdout secret scrubbing.
+  - Added DNS/IP SSRF classification blocking loopback, link-local, metadata, multicast, CGNAT, and RFC1918/ULA targets unless explicitly allowlisted via `FOCUSWIKI_ALLOWED_GIT_HOSTS`, plus strict `allowedImportRoots` enforcement on `file://` remotes.
+  - Added atomic `.cloning-*` staging-directory clones with post-clone `.git/config` sanitization, `.git/info/exclude` rules for `.focuswiki/` and `.cairn/`, concurrency/per-repo locks, optional `--depth 1 --single-branch` shallow cloning, and selective per-file `paths` commit staging.
+- **Zero-Auth LAN HTTP Hardening, Atomic Storage & Ops (`server/httpSecurity.ts`, `server/fileLock.ts`, `server/app.ts`, `server/watcher.ts`, `Dockerfile`, `.github/workflows/ci.yml`):**
+  - Enforced `Host` header syntax/DNS-rebinding checks, `Origin` / `Sec-Fetch-Site` CSRF blocking on mutating `/api/*` endpoints, validated `/embed-sandbox/*` CSP headers, rate limiting on expensive endpoints, bounded `/api/events` SSE clients, per-file mutex + atomic writes for documents/comments (`404` on missing threads), and sandboxed `/api/projects/:projectId/assets/*` image serving.
+- **Editor, Dependencies & UI Polish (`package.json`, `shared/markdownCodec.ts`, `src/editor/VisualMarkdownEditor.tsx`, `src/App.tsx`, modals):**
+  - Upgraded `@tiptap/*` to `3.34.0` (`npm audit --omit=dev` -> **0 vulnerabilities**) and configured Vite vendor chunking (largest chunk ~256 kB).
+  - Added lossless Markdown image (`![alt](src "title")`) round-tripping and rendering, nested relative `.md#fragment` link resolution and heading anchor scrolling, inline link/image authoring popovers, contextual table row/column controls, modal focus traps, visible comment mutation error banners, shallow-clone toggle, and selective commit checkboxes.
+- **Automated Test Suite (`vitest.config.ts`, `tests/*`):**
+  - Added automatic stale-bundle rebuilds (`tests/setupBuildClient.ts`), isolated test fixtures eliminating parallel browser flakiness, and expanded coverage to **17 test files / 226 tests** including Playwright coverage for `SettingsModal`, `ImportRepoModal`, and `GitDrawerModal`.
+
 ## Service & Access Summary
 
 - **Private Tailscale Review URL:** `http://100.117.116.91:8088/`
 - **Localhost Docker Review URL:** `http://127.0.0.1:8089/`
-- **Health Endpoint:** `http://100.117.116.91:8088/healthz` (`{"status":"ok","service":"cairn-wiki-hub","projectCount":2,...}`)
+- **Health Endpoint:** `http://100.117.116.91:8088/healthz` (`{"status":"ok","service":"focuswiki","projectCount":2,...}`)
 - **Network Exposure:** Bound exclusively to `127.0.0.1:8089` and `100.117.116.91:8088` (not bound to `0.0.0.0` or LAN `192.168.88.227`; no public tunnels). Distinct host ports avoid the verified rootless Docker conflict when publishing both addresses on the same port.
-- **Service Lifetime:** Running as detached Compose container `cairn-wiki-hub`, with `restart: unless-stopped`, using `ubuntu`'s existing rootless daemon. Container restart and recreation were verified; host reboot was not tested.
+- **Service Lifetime:** Running as detached Compose container `focuswiki`, with `restart: unless-stopped`, using `ubuntu`'s existing rootless daemon. Container restart and recreation were verified; host reboot was not tested.
 
 ### Start / Stop / Status Commands
 
@@ -55,7 +71,7 @@ The image build also reports that Git provenance could not be captured from the 
 
 1. **Minute 1 — Read-First RPG Doc & Content-Sized Interactive Embeds (`Scenario 1`):**
    - Open `http://100.117.116.91:8088/`. It loads **Cindervault RPG** (`docs/vault-breach-action.md`) in **Read** mode by default—no formatting toolbar or embed arrangement chrome competes with reading. Click the `main · 1 uncommitted` badge in the top bar at any time to inspect the full checkout path and `git diff HEAD`.
-   - Scroll down and operate all three sandboxed widgets in Read mode (each sizes dynamically to its actual rendered content via instance-validated `cairn:embed:ready`/`cairn:embed:resize` messages while preserving `sandbox="allow-scripts"` + strict CSP):
+   - Scroll down and operate all three sandboxed widgets in Read mode (each sizes dynamically to its actual rendered content via instance-validated `focus:embed:ready`/`focus:embed:resize` (with legacy `cairn:embed:*` support) messages while preserving `sandbox="allow-scripts"` + strict CSP):
      1. *Ward-Breach State & Transition Explorer*: click **Commit Lantern Oil** -> **Roll 2d6 Check** -> **Total 7–9 (Strained)** and inspect the live engine state JSON.
      2. *Sunken Reliquary Step-Through Walkthrough*: step through Beats 1–5 and toggle the Beat 5 `7–9` consequence cost.
      3. *Stat & Ward Difficulty Outcome Playground*: adjust Rigging/Oil sliders, toggle **Assisted Pry-Bar**, and click **Roll sample check**.
@@ -73,7 +89,7 @@ The image build also reports that Git provenance could not be captured from the 
 
 4. **Minute 4 — External Edits, Conflict Protection & Local Git Commit (`Scenarios 2, 6, 8`):**
    - Edit `sample-repos/cindervault-rpg/docs/vault-breach-action.md` externally on disk while clean (`Saved locally`): the browser reloads the external edit via SSE before any commit.
-   - Trigger a simultaneous edit conflict: Cairn refuses to overwrite disk, backs up the editor buffer under `.cairn/conflicts/`, and opens the side-by-side **Conflict resolution** modal.
+   - Trigger a simultaneous edit conflict: FocusWiki refuses to overwrite disk, backs up the editor buffer under `.focuswiki/conflicts/`, and opens the side-by-side **Conflict resolution** modal.
    - Click the `main · ... uncommitted` badge in the top bar to open **Review working changes**: inspect structured Markdown diffs (which highlight inline prose additions while separating formatting-only table pipe alignment from real cell changes), human-readable `.comments.json` updates, code diffs, or secondary **Raw diff**, enter a commit message, and click **Commit N files** (commits locally on `main` preserving your exact message and author identity; never pushes).
 
 5. **Minute 5 — Cross-Project Search, Lab Runbook & Responsive Portrait/Landscape Drawers:**
@@ -92,7 +108,7 @@ The following results were recorded by earlier application work. Current deploym
 | `npm run typecheck` | Passed (`tsc --noEmit`, 0 errors) |
 | `npm run build` | Passed (`dist/client` Vite bundle + self-hosted WOFF2 fonts; `dist/server` compiled Node ESM) |
 | `npm test` | Passed (`7` test files, `33/33` Vitest + Supertest + Playwright Chromium E2E tests covering Scenarios 1–9, block-preserving Markdown table/prose serialization, Rich Change Review comparators, capture pipeline validation, Read-mode IA + centered reading column with Review closed, edit-session `Done` + `Revert` across Visual/Source + autosave race/save-error/409 conflict, Rich Change Review UI + clean human commits without forced OpenBot trailers, and responsive drawers/tables) |
-| `./scripts/server-ctl.sh restart && curl -fsS http://100.117.116.91:8088/healthz` | Passed (`{"status":"ok","service":"cairn-wiki-hub","projectCount":2,...}`; verified sockets exclusively on `127.0.0.1:8088` and `100.117.116.91:8088` via `ss -lntp`) |
+| `./scripts/server-ctl.sh restart && curl -fsS http://100.117.116.91:8088/healthz` | Passed (`{"status":"ok","service":"focuswiki","projectCount":2,...}`; verified sockets exclusively on `127.0.0.1:8088` and `100.117.116.91:8088` via `ss -lntp`) |
 | `npm run capture -- run --packet review-pass-04 --all --base-url http://100.117.116.91:8088` | Passed (`20/20` screenshots captured & validated in `captures/packets/review-pass-04`, `valid: true`, `0` issues) |
 
 ---
@@ -107,7 +123,7 @@ The following results were recorded by earlier application work. Current deploym
 1. **Current browser-test blocker:** Chromium launched by Playwright reports `No usable sandbox!` on this host. The Docker audit did not disable AppArmor or Chromium's sandbox. The non-browser tests and live HTTP/container checks passed, but UI browser flows need re-verification with an approved sandboxed browser installation.
 2. **Prose-only comments & block-level embeds:** As scoped in `SPEC.md`, inline comments anchor to document prose (not inside iframe widget internals or code blocks), and simultaneous edits use optimistic revision conflict recovery rather than CRDT realtime co-editing.
 3. **Table cell complexity:** Visual table cells edit single-paragraph inline formatting cleanly; multi-block content inside table cells is better authored in Markdown source mode or collapsible raw HTML blocks.
-4. **Capture pipeline scope & Safari/WebKit browser chrome:** `npm run capture` restricts automated Playwright runs to local/private Cairn URLs (`127.0.0.1`, `localhost`, `100.117.116.91`) using local Playwright Chromium (`159.0.8154.6`; Playwright WebKit is not installed on this Linux host). Switching Read/Visual modes to native root document scrolling enables standard mobile browser scroll mechanics, whereas Safari's own address/tab bar collapsing behavior remains controlled by iOS Safari on physical hardware rather than web-page CSS/JS.
+4. **Capture pipeline scope & Safari/WebKit browser chrome:** `npm run capture` restricts automated Playwright runs to local/private FocusWiki URLs (`127.0.0.1`, `localhost`, `100.117.116.91`) using local Playwright Chromium (`159.0.8154.6`; Playwright WebKit is not installed on this Linux host). Switching Read/Visual modes to native root document scrolling enables standard mobile browser scroll mechanics, whereas Safari's own address/tab bar collapsing behavior remains controlled by iOS Safari on physical hardware rather than web-page CSS/JS.
 
 ## Prior Reading Settings Refresh
 

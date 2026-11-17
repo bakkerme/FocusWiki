@@ -22,8 +22,23 @@ export type HubSseEvent = WorkspaceChangeEvent | ProjectsUpdatedEvent;
 
 const IGNORED_AGENT_DOC_NAMES = new Set(['AGENTS.md', 'CLAUDE.md', 'GEMINI.md']);
 
+export interface WatcherHubOptions {
+  maxClients?: number;
+  heartbeatMs?: number;
+}
+
 export class ProjectWatcherHub {
-  private clients = new Set<Response>();
+  private clients = new Map<Response, () => void>();
+  private readonly maxClients: number;
+  private readonly heartbeatMs: number;
+
+  constructor(options: WatcherHubOptions = {}) {
+    const positive = (value: number, fallback: number) => Number.isFinite(value) && value >= 1 ? Math.floor(value) : fallback;
+    this.maxClients = positive(options.maxClients ?? Number(process.env.FOCUSWIKI_SSE_MAX_CLIENTS ?? 64), 64);
+    this.heartbeatMs = positive(options.heartbeatMs ?? Number(process.env.FOCUSWIKI_SSE_HEARTBEAT_MS ?? 15000), 15000);
+  }
+
+  public get clientCount(): number { return this.clients.size; }
   private watchers = new Map<string, FSWatcher>();
 
   public start(projects: ProjectConfig[]): void {
@@ -90,26 +105,48 @@ export class ProjectWatcherHub {
     await existing.close();
   }
 
-  public addClient(res: Response): void {
-    this.clients.add(res);
-    res.on('close', () => {
+  /** Reserve capacity before the route sends stream headers. */
+  public addClient(res: Response): boolean {
+    if (this.clients.has(res)) return true;
+    if (this.clients.size >= this.maxClients || res.destroyed || res.writableEnded) return false;
+    const cleanup = () => {
+      clearInterval(heartbeat);
       this.clients.delete(res);
-    });
+      res.off('close', cleanup);
+      res.off('error', disconnect);
+    };
+    const disconnect = () => {
+      cleanup();
+      res.destroy();
+    };
+    const heartbeat = setInterval(() => {
+      this.writeClient(res, ': heartbeat\n\n');
+    }, this.heartbeatMs);
+    heartbeat.unref();
+    this.clients.set(res, cleanup);
+    res.once('close', cleanup);
+    res.once('error', disconnect);
+    return true;
+  }
+
+  private writeClient(client: Response, payload: string): void {
+    try {
+      if (!client.destroyed && !client.writableEnded && client.write(payload)) return;
+    } catch {
+      // Broken sockets and slow consumers must not retain buffered events indefinitely.
+    }
+    this.clients.get(client)?.();
+    client.destroy();
   }
 
   public broadcast(event: HubSseEvent): void {
     const payload = `data: ${JSON.stringify(event)}\n\n`;
-    for (const client of this.clients) {
-      try {
-        client.write(payload);
-      } catch {
-        this.clients.delete(client);
-      }
-    }
+    for (const client of this.clients.keys()) this.writeClient(client, payload);
   }
 
   public async close(): Promise<void> {
-    for (const client of this.clients) {
+    for (const [client, cleanup] of this.clients) {
+      cleanup();
       try {
         client.end();
       } catch {

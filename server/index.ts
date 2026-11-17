@@ -37,16 +37,7 @@ function loadProjectsConfig(configPath: string): ProjectConfig[] {
 
 async function main(): Promise<void> {
   const port = Number(process.env.PORT ?? 8088);
-  // Default to private loopback + host Tailscale IP if available, never 0.0.0.0 on bare host unless explicitly set in container
-  const rawBindHosts = process.env.BIND_HOSTS ?? '127.0.0.1,100.117.116.91';
-  const requestedHosts = Array.from(
-    new Set(
-      rawBindHosts
-        .split(',')
-        .map((h) => h.trim())
-        .filter(Boolean)
-    )
-  );
+  const host = process.env.FOCUSWIKI_BIND_HOST || '127.0.0.1';
 
   const clientDistDir = process.env.CLIENT_DIST_DIR
     ? path.resolve(process.env.CLIENT_DIST_DIR)
@@ -63,12 +54,12 @@ async function main(): Promise<void> {
     : path.join(ROOT_DIR, 'repos');
   const rawAllowedImportRoots =
     process.env.FOCUSWIKI_ALLOWED_IMPORT_ROOTS ?? process.env.CAIRN_ALLOWED_IMPORT_ROOTS;
-  const allowedImportRoots = rawAllowedImportRoots
+  const allowedImportRoots = rawAllowedImportRoots !== undefined
     ? rawAllowedImportRoots
         .split(',')
         .map((p) => p.trim())
         .filter(Boolean)
-    : [ROOT_DIR, managedReposDir, ...(fs.existsSync('/workspace') ? ['/workspace'] : [])];
+    : [managedReposDir];
 
   const projects = loadProjectsConfig(configPath);
   const hub = createHubApp({
@@ -81,42 +72,24 @@ async function main(): Promise<void> {
     enableWatcher: true
   });
 
-  const servers: http.Server[] = [];
-  for (const host of requestedHosts) {
-    const srv = http.createServer(hub.app);
-    await new Promise<void>((resolve, reject) => {
-      srv.once('error', (err: NodeJS.ErrnoException) => {
-        // If optional secondary interface (e.g. Tailscale inside isolated container) isn't present, skip cleanly if 127.0.0.1/0.0.0.0 succeeds
-        if (err.code === 'EADDRNOTAVAIL' && requestedHosts.length > 1) {
-          console.warn(`[focuswiki] Skipping unavailable interface ${host}:${port}`);
-          resolve();
-          return;
-        }
-        reject(err);
-      });
-      srv.listen(port, host, () => {
-        servers.push(srv);
-        console.log(`[focuswiki] Listening on http://${host}:${port}`);
-        resolve();
-      });
+  const server = http.createServer(hub.app);
+  server.requestTimeout = 30000;
+  server.headersTimeout = 10000;
+  server.keepAliveTimeout = 5000;
+  server.maxConnections = 256;
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(port, host, () => {
+      server.off('error', reject);
+      console.log(`[focuswiki] Listening on http://${host.includes(':') ? `[${host}]` : host}:${port}`);
+      resolve();
     });
-  }
-
-  if (servers.length === 0) {
-    throw new Error(`Failed to bind any requested host (${requestedHosts.join(', ')}) on port ${port}.`);
-  }
+  });
 
   const shutdown = async (signal: string) => {
     console.log(`[focuswiki] Received ${signal}, shutting down...`);
     await hub.close();
-    await Promise.all(
-      servers.map(
-        (s) =>
-          new Promise<void>((resolve) => {
-            s.close(() => resolve());
-          })
-      )
-    );
+    await new Promise<void>((resolve) => { server.close(() => resolve()); });
     process.exit(0);
   };
 

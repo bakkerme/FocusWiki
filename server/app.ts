@@ -48,6 +48,7 @@ import {
 } from './gitService.js';
 import { CredentialStore, extractHttpsHost } from './credentialStore.js';
 import {
+  CommentNotFoundError,
   addCommentReply,
   createCommentThread,
   readCommentSidecar,
@@ -59,7 +60,9 @@ import {
   deriveSlugFromRemoteUrl,
   slugifyProjectId
 } from './projectRegistry.js';
-import { ProjectWatcherHub } from './watcher.js';
+import { ProjectWatcherHub, type WatcherHubOptions } from './watcher.js';
+import { withKeyLock, writeFileAtomicSync } from './fileLock.js';
+import { createHttpSecurity, createExpensiveRequestLimiter, validateHost, type RateLimitOptions } from './httpSecurity.js';
 
 export function computeRevision(content: string): string {
   return crypto.createHash('sha256').update(content, 'utf8').digest('hex').slice(0, 16);
@@ -77,6 +80,8 @@ const MIME_BY_EXT: Record<string, string> = {
   '.jpeg': 'image/jpeg',
   '.gif': 'image/gif',
   '.webp': 'image/webp',
+  '.avif': 'image/avif',
+  '.ico': 'image/x-icon',
   '.woff': 'font/woff',
   '.woff2': 'font/woff2',
   '.txt': 'text/plain; charset=utf-8'
@@ -207,7 +212,7 @@ export interface HubAppInstance {
   close: () => Promise<void>;
 }
 
-export function createHubApp(options: {
+export interface HubAppOptions {
   projects?: ProjectConfig[];
   registry?: ProjectRegistry;
   configPath?: string;
@@ -217,7 +222,12 @@ export function createHubApp(options: {
   allowedImportRoots?: string[];
   clientDistDir?: string;
   enableWatcher?: boolean;
-}): HubAppInstance {
+  allowedHosts?: string[];
+  rateLimit?: RateLimitOptions | false;
+  sse?: WatcherHubOptions;
+}
+
+export function createHubApp(options: HubAppOptions): HubAppInstance {
   const app = express();
   const startedAt = Date.now();
   const registry =
@@ -240,12 +250,14 @@ export function createHubApp(options: {
     });
   const watcherEnabled = options.enableWatcher !== false;
 
-  const watcherHub = new ProjectWatcherHub();
+  const watcherHub = new ProjectWatcherHub(options.sse);
   if (watcherEnabled) {
     watcherHub.start(registry.list());
   }
 
   app.disable('x-powered-by');
+  app.use(createHttpSecurity({ allowedHosts: options.allowedHosts }));
+  if (options.rateLimit !== false) app.use(createExpensiveRequestLimiter(options.rateLimit));
   app.use(express.json({ limit: '4mb' }));
 
   function getProjectOrThrow(projectId: string): ProjectConfig {
@@ -302,6 +314,8 @@ export function createHubApp(options: {
     };
   }
 
+  app.get('/api/health', (_req, res) => { res.json({ ok: true }); });
+
   // Healthcheck
   app.get('/healthz', (_req, res) => {
     res.json({
@@ -314,15 +328,16 @@ export function createHubApp(options: {
 
   // SSE stream for external file & comment updates
   app.get('/api/events', (req, res) => {
+    if (!watcherHub.addClient(res)) {
+      res.setHeader('Retry-After', '5');
+      res.status(503).json({ error: 'sse_capacity', message: 'Too many event streams. Retry shortly.' });
+      return;
+    }
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache, no-transform');
     res.setHeader('Connection', 'keep-alive');
     res.flushHeaders?.();
     res.write(`data: ${JSON.stringify({ type: 'connected', at: new Date().toISOString() })}\n\n`);
-    watcherHub.addClient(res);
-    req.on('close', () => {
-      res.end();
-    });
   });
 
   // Import configuration hints for UI
@@ -736,30 +751,88 @@ export function createHubApp(options: {
       const needle = q.toLowerCase();
       const results: SearchResultItem[] = [];
 
-      for (const project of registry.list()) {
-        const docs = scanMarkdownDocs(project);
-        for (const doc of docs) {
-          const { absolutePath } = resolveSafeProjectPath(project.rootPath, doc.path);
-          const raw = fs.readFileSync(absolutePath, 'utf8');
-          const lines = raw.split(/\r?\n/);
-          for (let idx = 0; idx < lines.length; idx++) {
-            if (lines[idx].toLowerCase().includes(needle)) {
-              results.push({
-                projectId: project.id,
-                projectName: project.name,
-                path: doc.path,
-                title: doc.title,
-                line: idx + 1,
-                snippet: lines[idx].trim().slice(0, 180)
-              });
-              if (results.length >= 60) break;
+      let scanned = 0;
+      let visited = 0;
+      let remainingBytes = 32 * 1024 * 1024;
+      const maxDocBytes = 2 * 1024 * 1024;
+      const atLimit = () => scanned >= 1000 || visited >= 20000 || remainingBytes <= 0 || results.length >= 60;
+      function searchDirectory(project: ProjectConfig, dir: string, depth = 0): void {
+        if (atLimit() || depth > 32) return;
+        const handle = fs.opendirSync(dir);
+        try {
+          let entry;
+          while (!atLimit() && (entry = handle.readSync())) {
+            visited++;
+            if (entry.name.startsWith('.') || ['node_modules', 'embeds'].includes(entry.name)) continue;
+            const full = path.join(dir, entry.name);
+            if (entry.isDirectory()) {
+              searchDirectory(project, full, depth + 1);
+              continue;
+            }
+            if (!entry.isFile() || !entry.name.endsWith('.md') || IGNORED_AGENT_DOC_NAMES.has(entry.name)) continue;
+            scanned++;
+            const size = fs.statSync(full).size;
+            if (size > maxDocBytes || size > remainingBytes) continue;
+            remainingBytes -= size;
+            const docPath = path.relative(project.rootPath, full).split(path.sep).join('/');
+            const raw = fs.readFileSync(full, 'utf8');
+            const title = extractDocumentTitle(raw, docPath);
+            const lines = raw.split(/\r?\n/);
+            for (let idx = 0; idx < lines.length && results.length < 60; idx++) {
+              if (lines[idx].toLowerCase().includes(needle)) {
+                results.push({ projectId: project.id, projectName: project.name, path: docPath,
+                  title, line: idx + 1, snippet: lines[idx].trim().slice(0, 180) });
+              }
             }
           }
-          if (results.length >= 60) break;
+        } finally {
+          handle.closeSync();
         }
+      }
+      for (const project of registry.list()) {
+        if (atLimit()) break;
+        if (fs.existsSync(project.rootPath)) searchDirectory(project, project.rootPath);
       }
 
       res.json({ results });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // Repository-local images only; executable documents belong in the embed sandbox.
+  app.get('/api/projects/:projectId/assets/*', (req, res, next) => {
+    try {
+      const project = getProjectOrThrow(req.params.projectId);
+      const assetPath = (req.params as Record<string, string>)[0] ?? '';
+      const segments = assetPath.split('/');
+      if (!assetPath || assetPath.includes('\0')) throw new PathBoundaryError('Invalid asset path.', 400);
+      if (segments.some((segment) => ['..', '.git', '.focuswiki', '.cairn'].includes(segment.toLowerCase())) || /\.comments\.json(?:$|\/)/i.test(assetPath)) {
+        throw new PathBoundaryError('Protected asset path.', 403);
+      }
+      const { absolutePath, normalizedRelPath } = resolveSafeProjectPath(project.rootPath, assetPath);
+      if (normalizedRelPath.split('/').some((seg) => seg.startsWith('.'))) {
+        throw new PathBoundaryError('Hidden dotfiles may not be served as assets.', 403);
+      }
+      const ext = path.extname(normalizedRelPath).toLowerCase();
+      if (!['.png', '.jpg', '.jpeg', '.gif', '.webp', '.avif', '.ico', '.svg'].includes(ext)) {
+        throw new PathBoundaryError('Only safe image assets may be served here.', 403);
+      }
+      if (!fs.existsSync(absolutePath) || !fs.statSync(absolutePath).isFile()) {
+        res.status(404).json({ error: 'not_found', message: 'Asset not found.' });
+        return;
+      }
+      // Also reject aliases into protected metadata directories inside the repository.
+      const realRoot = fs.realpathSync(project.rootPath);
+      const realRelative = path.relative(realRoot, fs.realpathSync(absolutePath));
+      if (realRelative.split(path.sep).some((part) => !part || part.startsWith('.') || ['.git', '.focuswiki', '.cairn'].includes(part.toLowerCase())) || /\.comments\.json$/i.test(realRelative)) {
+        throw new PathBoundaryError('Protected asset target.', 403);
+      }
+      res.setHeader('Content-Type', MIME_BY_EXT[ext]);
+      res.setHeader('Cache-Control', 'private, max-age=60');
+      res.setHeader('X-Content-Type-Options', 'nosniff');
+      if (ext === '.svg') res.setHeader('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; sandbox");
+      res.sendFile(realRelative.split(path.sep).join('/'), { root: realRoot, dotfiles: 'deny' }, (err) => { if (err) next(err); });
     } catch (err) {
       next(err);
     }
@@ -835,7 +908,7 @@ export function createHubApp(options: {
   });
 
   // Save / autosave Markdown document with optimistic revision check & recoverable conflict handling
-  app.put('/api/projects/:projectId/doc', (req, res, next) => {
+  app.put('/api/projects/:projectId/doc', async (req, res, next) => {
     try {
       const project = getProjectOrThrow(req.params.projectId);
       const rawPath = String(req.body?.path ?? '');
@@ -849,54 +922,56 @@ export function createHubApp(options: {
       }
 
       const { absolutePath, normalizedRelPath } = resolveSafeProjectPath(project.rootPath, rawPath);
-      if (!normalizedRelPath.endsWith('.md')) {
-        throw new PathBoundaryError('Only Markdown (.md) files can be written via document save.', 400);
-      }
-
-      if (fs.existsSync(absolutePath)) {
-        const diskMarkdown = fs.readFileSync(absolutePath, 'utf8');
-        const diskRevision = computeRevision(diskMarkdown);
-
-        if (!forceOverwrite && baseRevision !== diskRevision && diskMarkdown !== markdown) {
-          const conflictDir = resolveInternalMetadataDir(project.rootPath, '.focuswiki/conflicts');
-          fs.mkdirSync(conflictDir, { recursive: true, mode: 0o770 });
-          const safePrefix = normalizedRelPath.replace(/[^a-zA-Z0-9._-]/g, '__');
-          const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-          const conflictFileName = `${safePrefix}.${stamp}.md`;
-          const conflictAbsPath = path.join(conflictDir, conflictFileName);
-          fs.writeFileSync(conflictAbsPath, markdown, { encoding: 'utf8', mode: 0o660 });
-
-          const conflictPayload: ConflictErrorPayload = {
-            error: 'revision_conflict',
-            message:
-              'File changed externally on disk since this editor loaded it. Both versions are preserved.',
-            path: normalizedRelPath,
-            diskRevision,
-            diskMarkdown,
-            yourMarkdown: markdown,
-            savedConflictCopyPath: `.focuswiki/conflicts/${conflictFileName}`
-          };
-          res.status(409).json(conflictPayload);
-          return;
+      await withKeyLock(fs.existsSync(absolutePath) ? fs.realpathSync(absolutePath) : absolutePath, async () => {
+        if (!normalizedRelPath.endsWith('.md')) {
+          throw new PathBoundaryError('Only Markdown (.md) files can be written via document save.', 400);
         }
-      } else {
-        fs.mkdirSync(path.dirname(absolutePath), { recursive: true, mode: 0o770 });
-      }
 
-      fs.writeFileSync(absolutePath, markdown, { encoding: 'utf8', mode: 0o660 });
-      const stat = fs.statSync(absolutePath);
-      const docJson = markdownToProseMirror(markdown);
-      const sidecar = readCommentSidecar(project.rootPath, normalizedRelPath);
-      const comments = resolveThreadsAgainstDoc(sidecar.threads, docJson);
+        if (fs.existsSync(absolutePath)) {
+          const diskMarkdown = fs.readFileSync(absolutePath, 'utf8');
+          const diskRevision = computeRevision(diskMarkdown);
 
-      res.json({
-        path: normalizedRelPath,
-        revision: computeRevision(markdown),
-        mtimeMs: stat.mtimeMs,
-        savedAt: new Date().toISOString(),
-        docJson,
-        comments,
-        conflicts: listConflictCopiesForDoc(project.rootPath, normalizedRelPath)
+          if (!forceOverwrite && baseRevision !== diskRevision && diskMarkdown !== markdown) {
+            const conflictDir = resolveInternalMetadataDir(project.rootPath, '.focuswiki/conflicts');
+            fs.mkdirSync(conflictDir, { recursive: true, mode: 0o770 });
+            const safePrefix = normalizedRelPath.replace(/[^a-zA-Z0-9._-]/g, '__');
+            const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+            const conflictFileName = `${safePrefix}.${stamp}.${crypto.randomUUID()}.md`;
+            const conflictAbsPath = path.join(conflictDir, conflictFileName);
+            writeFileAtomicSync(conflictAbsPath, markdown, 0o660);
+
+            const conflictPayload: ConflictErrorPayload = {
+              error: 'revision_conflict',
+              message:
+                'File changed externally on disk since this editor loaded it. Both versions are preserved.',
+              path: normalizedRelPath,
+              diskRevision,
+              diskMarkdown,
+              yourMarkdown: markdown,
+              savedConflictCopyPath: `.focuswiki/conflicts/${conflictFileName}`
+            };
+            res.status(409).json(conflictPayload);
+            return;
+          }
+        } else {
+          fs.mkdirSync(path.dirname(absolutePath), { recursive: true, mode: 0o770 });
+        }
+
+        writeFileAtomicSync(absolutePath, markdown);
+        const stat = fs.statSync(absolutePath);
+        const docJson = markdownToProseMirror(markdown);
+        const sidecar = readCommentSidecar(project.rootPath, normalizedRelPath);
+        const comments = resolveThreadsAgainstDoc(sidecar.threads, docJson);
+
+        res.json({
+          path: normalizedRelPath,
+          revision: computeRevision(markdown),
+          mtimeMs: stat.mtimeMs,
+          savedAt: new Date().toISOString(),
+          docJson,
+          comments,
+          conflicts: listConflictCopiesForDoc(project.rootPath, normalizedRelPath)
+        });
       });
     } catch (err) {
       next(err);
@@ -926,116 +1001,122 @@ export function createHubApp(options: {
   });
 
   // Create inline comment thread (supports both UI selection anchors and bot quote strings)
-  app.post('/api/projects/:projectId/comments', (req, res, next) => {
+  app.post('/api/projects/:projectId/comments', async (req, res, next) => {
     try {
       const project = getProjectOrThrow(req.params.projectId);
       const docParam = String(req.body?.path ?? '');
       const { absolutePath, normalizedRelPath } = resolveSafeProjectPath(project.rootPath, docParam);
-      if (!fs.existsSync(absolutePath)) {
-        res.status(404).json({ error: 'not_found', message: 'Document not found.' });
-        return;
-      }
-      const bodyText = String(req.body?.body ?? '').trim();
-      if (!bodyText) {
-        res.status(400).json({ error: 'invalid_body', message: 'Comment body is required.' });
-        return;
-      }
-      const author = String(req.body?.author ?? 'Reviewer').trim();
-      const role: 'human' | 'bot' = req.body?.role === 'bot' ? 'bot' : 'human';
-
-      const md = fs.readFileSync(absolutePath, 'utf8');
-      const docJson = markdownToProseMirror(md);
-      const blocks = extractProseBlocks(docJson);
-
-      let anchor: CommentAnchor | null = null;
-      if (req.body?.anchor && typeof req.body.anchor.quote === 'string') {
-        anchor = {
-          quote: String(req.body.anchor.quote),
-          prefix: String(req.body.anchor.prefix ?? ''),
-          suffix: String(req.body.anchor.suffix ?? ''),
-          headingContext: req.body.anchor.headingContext
-            ? String(req.body.anchor.headingContext)
-            : undefined
-        };
-      } else if (typeof req.body?.quote === 'string' && req.body.quote.trim()) {
-        const quote = req.body.quote;
-        const matchingBlocks = blocks.filter((b) => b.text.includes(quote));
-        if (matchingBlocks.length === 1) {
-          const blk = matchingBlocks[0];
-          const idx = blk.text.indexOf(quote);
-          anchor = buildAnchorFromBlockSelection(blk, idx, idx + quote.length);
-        } else {
-          anchor = {
-            quote,
-            prefix: String(req.body?.prefix ?? ''),
-            suffix: String(req.body?.suffix ?? '')
-          };
+      await withKeyLock(fs.existsSync(absolutePath) ? fs.realpathSync(absolutePath) : absolutePath, async () => {
+        if (!fs.existsSync(absolutePath)) {
+          res.status(404).json({ error: 'not_found', message: 'Document not found.' });
+          return;
         }
-      }
+        const bodyText = String(req.body?.body ?? '').trim();
+        if (!bodyText) {
+          res.status(400).json({ error: 'invalid_body', message: 'Comment body is required.' });
+          return;
+        }
+        const author = String(req.body?.author ?? 'Reviewer').trim();
+        const role: 'human' | 'bot' = req.body?.role === 'bot' ? 'bot' : 'human';
 
-      if (!anchor || !anchor.quote.trim()) {
-        res.status(400).json({ error: 'invalid_anchor', message: 'Selected prose quote is required.' });
-        return;
-      }
+        const md = fs.readFileSync(absolutePath, 'utf8');
+        const docJson = markdownToProseMirror(md);
+        const blocks = extractProseBlocks(docJson);
 
-      const created = createCommentThread(project.rootPath, normalizedRelPath, {
-        anchor,
-        author,
-        role,
-        body: bodyText
+        let anchor: CommentAnchor | null = null;
+        if (req.body?.anchor && typeof req.body.anchor.quote === 'string') {
+          anchor = {
+            quote: String(req.body.anchor.quote),
+            prefix: String(req.body.anchor.prefix ?? ''),
+            suffix: String(req.body.anchor.suffix ?? ''),
+            headingContext: req.body.anchor.headingContext
+              ? String(req.body.anchor.headingContext)
+              : undefined
+          };
+        } else if (typeof req.body?.quote === 'string' && req.body.quote.trim()) {
+          const quote = req.body.quote;
+          const matchingBlocks = blocks.filter((b) => b.text.includes(quote));
+          if (matchingBlocks.length === 1) {
+            const blk = matchingBlocks[0];
+            const idx = blk.text.indexOf(quote);
+            anchor = buildAnchorFromBlockSelection(blk, idx, idx + quote.length);
+          } else {
+            anchor = {
+              quote,
+              prefix: String(req.body?.prefix ?? ''),
+              suffix: String(req.body?.suffix ?? '')
+            };
+          }
+        }
+
+        if (!anchor || !anchor.quote.trim()) {
+          res.status(400).json({ error: 'invalid_anchor', message: 'Selected prose quote is required.' });
+          return;
+        }
+
+        const created = createCommentThread(project.rootPath, normalizedRelPath, {
+          anchor,
+          author,
+          role,
+          body: bodyText
+        });
+
+        const [resolved] = resolveThreadsAgainstDoc([created], docJson);
+        res.status(201).json({ thread: resolved });
       });
-
-      const [resolved] = resolveThreadsAgainstDoc([created], docJson);
-      res.status(201).json({ thread: resolved });
     } catch (err) {
       next(err);
     }
   });
 
   // Reply to an existing comment thread
-  app.post('/api/projects/:projectId/comments/:threadId/replies', (req, res, next) => {
+  app.post('/api/projects/:projectId/comments/:threadId/replies', async (req, res, next) => {
     try {
       const project = getProjectOrThrow(req.params.projectId);
       const docParam = String(req.body?.path ?? '');
       const { absolutePath, normalizedRelPath } = resolveSafeProjectPath(project.rootPath, docParam);
-      const bodyText = String(req.body?.body ?? '').trim();
-      if (!bodyText) {
-        res.status(400).json({ error: 'invalid_body', message: 'Reply body is required.' });
-        return;
-      }
-      const updated = addCommentReply(project.rootPath, normalizedRelPath, req.params.threadId, {
-        author: String(req.body?.author ?? 'Reviewer'),
-        role: req.body?.role === 'bot' ? 'bot' : 'human',
-        body: bodyText
+      await withKeyLock(fs.existsSync(absolutePath) ? fs.realpathSync(absolutePath) : absolutePath, async () => {
+        const bodyText = String(req.body?.body ?? '').trim();
+        if (!bodyText) {
+          res.status(400).json({ error: 'invalid_body', message: 'Reply body is required.' });
+          return;
+        }
+        const updated = addCommentReply(project.rootPath, normalizedRelPath, req.params.threadId, {
+          author: String(req.body?.author ?? 'Reviewer'),
+          role: req.body?.role === 'bot' ? 'bot' : 'human',
+          body: bodyText
+        });
+        const md = fs.existsSync(absolutePath) ? fs.readFileSync(absolutePath, 'utf8') : '';
+        const [resolved] = resolveThreadsAgainstDoc([updated], markdownToProseMirror(md));
+        res.json({ thread: resolved });
       });
-      const md = fs.existsSync(absolutePath) ? fs.readFileSync(absolutePath, 'utf8') : '';
-      const [resolved] = resolveThreadsAgainstDoc([updated], markdownToProseMirror(md));
-      res.json({ thread: resolved });
     } catch (err) {
       next(err);
     }
   });
 
   // Resolve or reopen a comment thread
-  app.post('/api/projects/:projectId/comments/:threadId/status', (req, res, next) => {
+  app.post('/api/projects/:projectId/comments/:threadId/status', async (req, res, next) => {
     try {
       const project = getProjectOrThrow(req.params.projectId);
       const docParam = String(req.body?.path ?? '');
       const { absolutePath, normalizedRelPath } = resolveSafeProjectPath(project.rootPath, docParam);
-      const status = req.body?.status === 'resolved' ? 'resolved' : req.body?.status === 'open' ? 'open' : null;
-      if (!status) {
-        res.status(400).json({ error: 'invalid_status', message: 'Status must be "open" or "resolved".' });
-        return;
-      }
-      const updated = updateCommentStatus(project.rootPath, normalizedRelPath, req.params.threadId, {
-        status,
-        actor: String(req.body?.actor ?? 'Reviewer'),
-        role: req.body?.role === 'bot' ? 'bot' : 'human',
-        note: typeof req.body?.note === 'string' ? req.body.note : undefined
+      await withKeyLock(fs.existsSync(absolutePath) ? fs.realpathSync(absolutePath) : absolutePath, async () => {
+        const status = req.body?.status === 'resolved' ? 'resolved' : req.body?.status === 'open' ? 'open' : null;
+        if (!status) {
+          res.status(400).json({ error: 'invalid_status', message: 'Status must be "open" or "resolved".' });
+          return;
+        }
+        const updated = updateCommentStatus(project.rootPath, normalizedRelPath, req.params.threadId, {
+          status,
+          actor: String(req.body?.actor ?? 'Reviewer'),
+          role: req.body?.role === 'bot' ? 'bot' : 'human',
+          note: typeof req.body?.note === 'string' ? req.body.note : undefined
+        });
+        const md = fs.existsSync(absolutePath) ? fs.readFileSync(absolutePath, 'utf8') : '';
+        const [resolved] = resolveThreadsAgainstDoc([updated], markdownToProseMirror(md));
+        res.json({ thread: resolved });
       });
-      const md = fs.existsSync(absolutePath) ? fs.readFileSync(absolutePath, 'utf8') : '';
-      const [resolved] = resolveThreadsAgainstDoc([updated], markdownToProseMirror(md));
-      res.json({ thread: resolved });
     } catch (err) {
       next(err);
     }
@@ -1260,8 +1341,11 @@ export function createHubApp(options: {
 
       const ext = path.extname(normalizedRelPath).toLowerCase();
       const contentType = MIME_BY_EXT[ext] ?? 'application/octet-stream';
-      const host = req.get('host') ?? '127.0.0.1:8088';
-      const proto = req.protocol || 'http';
+      const host = validateHost(req.get('host'));
+      const proto = req.protocol;
+      if (!host || !['http', 'https'].includes(proto)) {
+        throw new PathBoundaryError('Invalid request authority.', 400);
+      }
       const allowedProjectAssetPrefix = `${proto}://${host}/embed-sandbox/${encodeURIComponent(project.id)}/`;
 
       // Strict defense-in-depth CSP:
@@ -1337,11 +1421,19 @@ export function createHubApp(options: {
       });
       return;
     }
-    const rawMessage = err instanceof Error ? err.message : 'Unexpected server error';
-    res.status(500).json({
-      error: 'server_error',
-      message: credentialStore.scrubText(rawMessage)
-    });
+    if (err instanceof CommentNotFoundError) {
+      res.status(err.statusCode).json({ error: 'not_found', message: err.message });
+      return;
+    }
+    // Express body parser and URI decoding failures are client errors, not server faults.
+    const status = (err as { status?: unknown } | null)?.status;
+    if (typeof status === 'number' && status >= 400 && status < 500) {
+      res.status(status).json({ error: 'invalid_request', message: 'Invalid request.' });
+      return;
+    }
+    const detail = err instanceof Error ? err.stack ?? err.message : String(err);
+    console.error('[focuswiki] Unexpected request error:', credentialStore.scrubText(detail));
+    res.status(500).json({ error: 'server_error', message: 'Unexpected server error.' });
   });
 
   return {

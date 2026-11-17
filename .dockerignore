@@ -14,3 +14,7 @@ config/.credential-master.key
 config/.git-credentials.enc.json
 config/.*.tmp
 config/projects.json
+
+# Portable runtime state and comment/conflict recovery metadata
+.focuswiki/
+.cairn/
