@@ -25,6 +25,7 @@ import {
 } from '../shared/anchorResolver.js';
 import {
   PathBoundaryError,
+  resolveInternalMetadataDir,
   resolveSafeEmbedAssetPath,
   resolveSafeProjectPath
 } from './pathGuard.js';
@@ -396,7 +397,8 @@ export function createHubApp(options: {
           : undefined;
       const result = await inspectRemoteRepository(url, {
         credentialStore,
-        overrideCredential: token ? { username, token } : undefined
+        overrideCredential: token ? { username, token } : undefined,
+        allowedFileRoots: registry.allowedImportRoots
       });
       res.json({
         ok: true,
@@ -466,7 +468,8 @@ export function createHubApp(options: {
       const saveToken = Boolean(req.body?.saveToken);
       const result = await inspectRemoteRepository(url, {
         credentialStore,
-        overrideCredential: token ? { username, token } : undefined
+        overrideCredential: token ? { username, token } : undefined,
+        allowedFileRoots: registry.allowedImportRoots
       });
       const httpsHost = extractHttpsHost(url);
       if (saveToken && token && httpsHost) {
@@ -525,6 +528,7 @@ export function createHubApp(options: {
       }
 
       if (mode === 'clone') {
+        const shallow = Boolean(req.body?.shallow);
         const url = String(req.body?.url ?? '').trim();
         const branch =
           typeof req.body?.branch === 'string' && req.body.branch.trim()
@@ -556,8 +560,10 @@ export function createHubApp(options: {
           destDir,
           branch,
           prNumber,
+          shallow,
           credentialStore,
-          overrideCredential: token ? { username, token } : undefined
+          overrideCredential: token ? { username, token } : undefined,
+          allowedFileRoots: registry.allowedImportRoots
         });
 
         const httpsHost = extractHttpsHost(url);
@@ -852,7 +858,7 @@ export function createHubApp(options: {
         const diskRevision = computeRevision(diskMarkdown);
 
         if (!forceOverwrite && baseRevision !== diskRevision && diskMarkdown !== markdown) {
-          const conflictDir = path.join(project.rootPath, '.focuswiki', 'conflicts');
+          const conflictDir = resolveInternalMetadataDir(project.rootPath, '.focuswiki/conflicts');
           fs.mkdirSync(conflictDir, { recursive: true, mode: 0o770 });
           const safePrefix = normalizedRelPath.replace(/[^a-zA-Z0-9._-]/g, '__');
           const stamp = new Date().toISOString().replace(/[:.]/g, '-');
@@ -1119,12 +1125,17 @@ export function createHubApp(options: {
         return;
       }
 
+      const paths = Array.isArray(req.body?.paths)
+        ? req.body.paths.filter((p: unknown): p is string => typeof p === 'string')
+        : undefined;
+
       const committed = await commitWorkingTree(
         project.rootPath,
         message,
         authorName,
         authorEmail,
-        expectedSnapshotDigest
+        expectedSnapshotDigest,
+        paths
       );
       res.json(committed);
     } catch (err) {
@@ -1164,7 +1175,10 @@ export function createHubApp(options: {
       const project = getProjectOrThrow(req.params.projectId);
       const includePrRefs =
         typeof req.body?.includePrRefs === 'boolean' ? req.body.includePrRefs : true;
-      const refs = await fetchGitRemote(project.rootPath, credentialStore, { includePrRefs });
+      const refs = await fetchGitRemote(project.rootPath, credentialStore, {
+        includePrRefs,
+        allowedFileRoots: registry.allowedImportRoots
+      });
       watcherHub.broadcast({
         type: 'projects:updated',
         projectId: project.id,
@@ -1181,7 +1195,9 @@ export function createHubApp(options: {
   app.post('/api/projects/:projectId/git/pull', async (req, res, next) => {
     try {
       const project = getProjectOrThrow(req.params.projectId);
-      const result = await pullGitRemote(project.rootPath, credentialStore);
+      const result = await pullGitRemote(project.rootPath, credentialStore, {
+        allowedFileRoots: registry.allowedImportRoots
+      });
       watcherHub.broadcast({
         type: 'projects:updated',
         projectId: project.id,
@@ -1212,7 +1228,8 @@ export function createHubApp(options: {
       const result = await checkoutGitTarget(
         project.rootPath,
         { kind, ref, prNumber },
-        credentialStore
+        credentialStore,
+        { allowedFileRoots: registry.allowedImportRoots }
       );
       watcherHub.broadcast({
         type: 'projects:updated',

@@ -96,7 +96,7 @@ describe('Repository Import, Persistence, Branch/PR Switching & Remote Pull', ()
     fs.mkdirSync(allowedLocalRoot, { recursive: true });
     fs.mkdirSync(outsideRoot, { recursive: true });
 
-    remote = createRemoteFixture(tmpRoot);
+    remote = createRemoteFixture(allowedLocalRoot);
 
     hub = createHubApp({
       projects: [],
@@ -610,4 +610,70 @@ describe('Repository Import, Persistence, Branch/PR Switching & Remote Pull', ()
     const gitignore = fs.readFileSync(path.join(repoRoot, '.gitignore'), 'utf8');
     expect(gitignore).toContain('config/projects.json');
   });
+
+  it('enforces allowedImportRoots on file:// remotes across HTTP endpoints, supports shallow clones, and commits selected paths only', async () => {
+    const outsideBare = createRemoteFixture(outsideRoot);
+
+    // file:// outside allowedImportRoots must be blocked across inspect-remote, credentials/test, and clone
+    await request(hub.app)
+      .post('/api/projects/inspect-remote')
+      .send({ url: outsideBare.bareUrl })
+      .expect(403);
+
+    await request(hub.app)
+      .post('/api/settings/credentials/test')
+      .send({ url: outsideBare.bareUrl })
+      .expect(403);
+
+    await request(hub.app)
+      .post('/api/projects/import')
+      .send({ mode: 'clone', url: outsideBare.bareUrl, id: 'blocked-clone' })
+      .expect(403);
+
+    // Add a second commit to allowed remote so shallow clone (depth 1) is observable
+    fs.writeFileSync(
+      path.join(remote.seedWorkDir, 'README.md'),
+      '# Remote Wiki Home\n\nSecond main commit.\n',
+      'utf8'
+    );
+    git(remote.seedWorkDir, ['add', 'README.md']);
+    git(remote.seedWorkDir, ['commit', '-m', 'Second main commit']);
+    git(remote.seedWorkDir, ['push', 'origin', 'main']);
+
+    const cloneRes = await request(hub.app)
+      .post('/api/projects/import')
+      .send({
+        mode: 'clone',
+        url: remote.bareUrl,
+        id: 'shallow-wiki',
+        shallow: true
+      })
+      .expect(201);
+
+    const clonedRoot = cloneRes.body.project.rootPath as string;
+    const commitCount = Number.parseInt(git(clonedRoot, ['rev-list', '--count', 'HEAD']).trim(), 10);
+    expect(commitCount).toBe(1);
+
+    // Modify two files, then commit only docs/guide.md via paths[]
+    fs.writeFileSync(path.join(clonedRoot, 'README.md'), '# Edited Readme\n', 'utf8');
+    fs.writeFileSync(path.join(clonedRoot, 'docs', 'guide.md'), '# Edited Guide\n', 'utf8');
+
+    const commitRes = await request(hub.app)
+      .post('/api/projects/shallow-wiki/git/commit')
+      .send({
+        message: 'Update guide only',
+        authorName: 'LAN Author',
+        authorEmail: 'lan@local.invalid',
+        paths: ['docs/guide.md']
+      })
+      .expect(200);
+
+    expect(commitRes.body.status.isClean).toBe(false);
+    expect(commitRes.body.status.changedFiles).toHaveLength(1);
+    const remainingDiff = await request(hub.app)
+      .get('/api/projects/shallow-wiki/git/diff')
+      .expect(200);
+    expect(remainingDiff.body.files.map((f: { path: string }) => f.path)).toEqual(['README.md']);
+  });
 });
+

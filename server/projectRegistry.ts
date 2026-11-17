@@ -298,10 +298,10 @@ export class ProjectRegistry {
     const payload = `${JSON.stringify({ projects: serializable }, null, 2)}\n`;
     const tmpPath = path.join(
       dir,
-      `.projects.${process.pid}.${crypto.randomBytes(4).toString('hex')}.tmp`
+      `projects.json.tmp-${process.pid}-${crypto.randomUUID()}`
     );
     try {
-      fs.writeFileSync(tmpPath, payload, { encoding: 'utf8', mode: 0o660 });
+      fs.writeFileSync(tmpPath, payload, { encoding: 'utf8', mode: 0o660, flag: 'wx' });
       fs.renameSync(tmpPath, this.configPath);
     } catch (err) {
       if (fs.existsSync(tmpPath)) {

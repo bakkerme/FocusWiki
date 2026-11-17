@@ -11,7 +11,7 @@ export class PathBoundaryError extends Error {
   }
 }
 
-const FORBIDDEN_SEGMENTS = new Set(['.git', 'node_modules']);
+const FORBIDDEN_SEGMENTS = new Set(['.git', 'node_modules', '.focuswiki', '.cairn']);
 const FORBIDDEN_FILE_PATTERNS = [
   /^\.env(\..+)?$/i,
   /\.(pem|key|p12|pfx|keystore)$/i,
@@ -27,6 +27,9 @@ export function resolveSafeProjectPath(projectRoot: string, userRelativePath: st
   }
   if (userRelativePath.includes('\0') || userRelativePath.includes('\\')) {
     throw new PathBoundaryError('Invalid characters in path.', 400);
+  }
+  if (userRelativePath.split('/').some((segment) => FORBIDDEN_SEGMENTS.has(segment))) {
+    throw new PathBoundaryError('Access to internal project directories is forbidden.');
   }
   if (path.isAbsolute(userRelativePath)) {
     throw new PathBoundaryError('Absolute paths are not permitted.', 403);
@@ -58,16 +61,24 @@ export function resolveSafeProjectPath(projectRoot: string, userRelativePath: st
     }
   }
 
-  // Verify symlink resolution on deepest existing ancestor so symlinks cannot escape realRoot
-  let checkTarget = candidate;
-  while (!fs.existsSync(checkTarget)) {
-    const parent = path.dirname(checkTarget);
-    if (parent === checkTarget) break;
-    checkTarget = parent;
-  }
-  const realExisting = fs.realpathSync(checkTarget);
-  if (realExisting !== realRoot && !realExisting.startsWith(realRoot + path.sep)) {
-    throw new PathBoundaryError('Symlink target escapes registered project directory.', 403);
+  // Walk every existing component, including dangling symlinks. Checking only
+  // the final target would allow aliases into protected app metadata.
+  let current = realRoot;
+  for (const segment of segments) {
+    current = path.join(current, segment);
+    if (!fs.lstatSync(current, { throwIfNoEntry: false })) break;
+    let real: string;
+    try { real = fs.realpathSync(current); }
+    catch { throw new PathBoundaryError('Cannot safely resolve project symlink.'); }
+    const relative = path.relative(realRoot, real);
+    if (path.isAbsolute(relative) || relative === '..' || relative.startsWith('..' + path.sep)) {
+      throw new PathBoundaryError('Symlink target escapes registered project directory.');
+    }
+    const realSegments = relative.split(path.sep);
+    if (realSegments.some((part) => FORBIDDEN_SEGMENTS.has(part)) ||
+        FORBIDDEN_FILE_PATTERNS.some((pattern) => pattern.test(path.basename(real)))) {
+      throw new PathBoundaryError('Symlink target exposes protected project files.');
+    }
   }
 
   return {
@@ -104,3 +115,28 @@ export function resolveSafeEmbedAssetPath(projectRoot: string, userRelativePath:
   }
   return resolved;
 }
+
+export function resolveInternalMetadataDir(projectRoot: string, internalRelDir: string): string {
+  const realRoot = fs.realpathSync(projectRoot);
+  const candidate = path.resolve(realRoot, internalRelDir);
+  if (candidate === realRoot || !candidate.startsWith(realRoot + path.sep)) {
+    throw new PathBoundaryError('Internal metadata directory escapes project root.', 403);
+  }
+  const segments = path.relative(realRoot, candidate).split(path.sep);
+  let current = realRoot;
+  for (const segment of segments) {
+    current = path.join(current, segment);
+    const stat = fs.lstatSync(current, { throwIfNoEntry: false });
+    if (!stat) break;
+    if (stat.isSymbolicLink() || !stat.isDirectory()) {
+      throw new PathBoundaryError('Internal metadata path must be a real directory inside the project.', 403);
+    }
+    const real = fs.realpathSync(current);
+    const rel = path.relative(realRoot, real);
+    if (path.isAbsolute(rel) || rel === '..' || rel.startsWith('..' + path.sep)) {
+      throw new PathBoundaryError('Internal metadata target escapes project root.', 403);
+    }
+  }
+  return candidate;
+}
+
