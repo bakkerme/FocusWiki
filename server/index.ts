@@ -16,9 +16,16 @@ function resolveConfigPath(): string {
 
 function loadProjectsConfig(configPath: string): ProjectConfig[] {
   if (!fs.existsSync(configPath)) {
-    throw new Error(
-      `Missing projects config at ${configPath}. Run "npm run seed" first to initialize sample repositories.`
-    );
+    const defaultTemplatePath = path.join(path.dirname(configPath), 'projects.default.json');
+    if (fs.existsSync(defaultTemplatePath)) {
+      fs.mkdirSync(path.dirname(configPath), { recursive: true, mode: 0o770 });
+      fs.copyFileSync(defaultTemplatePath, configPath);
+      fs.chmodSync(configPath, 0o660);
+    } else {
+      throw new Error(
+        `Missing projects config at ${configPath}. Run "npm run seed" first to initialize sample repositories.`
+      );
+    }
   }
 
   const raw = JSON.parse(fs.readFileSync(configPath, 'utf8')) as { projects: ProjectConfig[] };

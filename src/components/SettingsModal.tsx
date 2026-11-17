@@ -549,7 +549,7 @@ export function SettingsModal(props: Props) {
       await onRepoRemoved(proj.id);
       setRepoFeedback({
         kind: 'ok',
-        text: `Removed "${proj.name}" from Cairn (files on disk were not deleted).`
+        text: `Removed "${proj.name}" from Focus (files on disk were not deleted).`
       });
     } catch (err) {
       setRepoFeedback({
@@ -1095,7 +1095,7 @@ export function SettingsModal(props: Props) {
                                           setConfirmRemoveRepoId(proj.id);
                                           setRepoFeedback(null);
                                         }}
-                                        title={`Remove ${proj.name} from Cairn (keeps files on disk)`}
+                                        title={`Remove ${proj.name} from Focus (keeps files on disk)`}
                                       >
                                         <Trash2 size={12} aria-hidden="true" />
                                         <span>Remove</span>
@@ -1111,7 +1111,7 @@ export function SettingsModal(props: Props) {
                     )}
                   </div>
                   <p className="import-hint-text">
-                    Removing a repository disconnects it from Cairn’s registry while leaving all local files and Git history intact on disk.
+                    Removing a repository disconnects it from Focus’s registry while leaving all local files and Git history intact on disk.
                   </p>
                 </div>
               </div>
@@ -1583,9 +1583,9 @@ export function SettingsModal(props: Props) {
           <footer className="settings-main-footer">
             <span className="settings-footer-hint">
               {section === 'credentials'
-                ? 'Encrypted at rest on the Cairn server.'
+                ? 'Encrypted at rest on the Focus server.'
                 : section === 'repositories'
-                  ? 'Saved to the Cairn repository registry.'
+                  ? 'Saved to the Focus repository registry.'
                   : section === 'environment' || section === 'about'
                     ? 'Server runtime diagnostics.'
                     : 'Saved automatically in this browser.'}

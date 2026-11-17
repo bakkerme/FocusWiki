@@ -710,6 +710,15 @@ export function App() {
     }
   }
 
+  async function handleOpenGitModal() {
+    if (saveTimerRef.current !== null) {
+      window.clearTimeout(saveTimerRef.current);
+      saveTimerRef.current = null;
+      await performSave(liveMdRef.current, false);
+    }
+    setGitModalOpen(true);
+  }
+
   async function handleSelectProject(nextProjectId: string) {
     if (saveTimerRef.current !== null) {
       window.clearTimeout(saveTimerRef.current);
@@ -1246,7 +1255,7 @@ export function App() {
                   <button
                     type="button"
                     className={`git-status-btn ${activeProject.git.isClean ? 'is-clean' : 'dirty'}`}
-                    onClick={() => setGitModalOpen(true)}
+                    onClick={() => void handleOpenGitModal()}
                     aria-label={`Repository ${activeProject.name} on branch ${activeProject.git.branch}, ${
                       activeProject.git.isClean
                         ? 'working tree clean'
@@ -1481,7 +1490,7 @@ export function App() {
                 openReviewPanel();
               }}
               onOpenInsertEmbedModal={() => setEmbedModalOpen(true)}
-              onOpenRepoDetails={() => setGitModalOpen(true)}
+              onOpenRepoDetails={() => void handleOpenGitModal()}
               onNavigateDoc={(targetPath) => {
                 if (activeProjectId) {
                   void handleSelectDoc(activeProjectId, targetPath);

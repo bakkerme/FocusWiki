@@ -31,7 +31,7 @@ const execFileAsync = promisify(execFile);
 const MAX_REVIEW_FILE_BYTES = 256 * 1024;
 const GIT_NETWORK_TIMEOUT_MS = 60_000;
 const CREDENTIAL_HELPER_SCRIPT =
-  '!f() { test "$1" = "get" && printf "username=%s\\npassword=%s\\n" "$CAIRN_GIT_USERNAME" "$CAIRN_GIT_TOKEN"; }; f';
+  '!f() { if [ "$1" = "get" ]; then printf "username=%s\\npassword=%s\\n" "$CAIRN_GIT_USERNAME" "$CAIRN_GIT_TOKEN"; fi; }; f';
 
 export class WorkingTreeSnapshotMismatchError extends Error {
   readonly statusCode = 409;
@@ -151,7 +151,10 @@ export function sanitizeRemoteUrl(raw: string): string {
   if (!trimmed) return '';
   try {
     const parsed = new URL(trimmed);
-    if (parsed.username || parsed.password) {
+    if (
+      (parsed.protocol === 'http:' || parsed.protocol === 'https:') &&
+      (parsed.username || parsed.password)
+    ) {
       parsed.username = '';
       parsed.password = '';
     }
@@ -437,6 +440,12 @@ async function readSingleFileRawPatch(
     const out = await runGitText(projectRoot, ['diff', 'HEAD', '--', ...pathArgs]);
     return out.trimEnd();
   } catch {
+    try {
+      const stagedOut = await runGitText(projectRoot, ['diff', '--cached', '--', ...pathArgs]);
+      if (stagedOut.trim()) return stagedOut.trimEnd();
+    } catch {
+      // continue to working-tree diff fallback
+    }
     try {
       const out = await runGitText(projectRoot, ['diff', '--', ...pathArgs]);
       return out.trimEnd();
@@ -879,7 +888,14 @@ export async function cloneRepository(options: {
 
   if (prNumber) {
     try {
-      await checkoutGitPrNumber(options.destDir, prNumber, 'origin', credential);
+      await checkoutGitPrNumber(
+        options.destDir,
+        prNumber,
+        'origin',
+        credential,
+        url,
+        options.credentialStore
+      );
     } catch (err) {
       if (fs.existsSync(options.destDir)) {
         fs.rmSync(options.destDir, { recursive: true, force: true });
@@ -1220,7 +1236,9 @@ async function checkoutGitPrNumber(
   projectRoot: string,
   prNumber: number,
   remoteName: string,
-  credential?: ResolvedGitCredential | null
+  credential?: ResolvedGitCredential | null,
+  remoteUrl?: string | null,
+  credentialStore?: CredentialStore
 ): Promise<void> {
   if (!Number.isInteger(prNumber) || prNumber <= 0) {
     throw new GitOperationError('Pull request number must be a positive integer.', 400);
@@ -1243,7 +1261,19 @@ async function checkoutGitPrNumber(
       });
       fetchedRef = localTarget;
       break;
-    } catch {
+    } catch (err) {
+      const detail = extractGitErrorDetail(
+        err,
+        credentialStore,
+        credential ? [credential.token] : []
+      );
+      if (isGitAuthFailure(detail)) {
+        const host = extractHttpsHost(remoteUrl ?? '');
+        throw new GitAuthError(
+          `Authentication required for ${host ?? 'remote'}: ${detail}`,
+          host
+        );
+      }
       // Try next ref convention
     }
   }
@@ -1297,7 +1327,14 @@ export async function checkoutGitTarget(
     if (!Number.isInteger(parsedNum) || parsedNum <= 0) {
       throw new GitOperationError('Valid pull request number is required.', 400);
     }
-    await checkoutGitPrNumber(projectRoot, parsedNum, remote.name ?? 'origin', credential);
+    await checkoutGitPrNumber(
+      projectRoot,
+      parsedNum,
+      remote.name ?? 'origin',
+      credential,
+      remote.url,
+      credentialStore
+    );
     const after = await getGitRepoStatus(projectRoot);
     return { status: after, branch: after.branch };
   }

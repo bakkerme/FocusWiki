@@ -577,4 +577,37 @@ describe('Repository Import, Persistence, Branch/PR Switching & Remote Pull', ()
       .send({ defaultDoc: '../secret.md' })
       .expect(403);
   });
+
+  it('preserves ssh:// username in sanitizeRemoteUrl, diffs staged files on unborn HEAD, and keeps projects.default.json fictional', async () => {
+    expect(sanitizeRemoteUrl('https://alice:ghp_secret123@github.com/org/repo.git')).toBe(
+      'https://github.com/org/repo.git'
+    );
+    expect(sanitizeRemoteUrl('ssh://git@github.com/org/repo.git')).toBe(
+      'ssh://git@github.com/org/repo.git'
+    );
+
+    // Unborn HEAD repository with a staged file should report a raw patch
+    const unbornDir = path.join(allowedLocalRoot, 'unborn-repo');
+    fs.mkdirSync(unbornDir, { recursive: true });
+    git(unbornDir, ['init', '-b', 'main']);
+    fs.writeFileSync(path.join(unbornDir, 'README.md'), '# Unborn Repo\n\nStaged line.\n', 'utf8');
+    git(unbornDir, ['add', 'README.md']);
+
+    await request(hub.app)
+      .post('/api/projects/import')
+      .send({ mode: 'local', path: unbornDir, id: 'unborn-repo', name: 'Unborn Repo' })
+      .expect(201);
+
+    const diffRes = await request(hub.app).get('/api/projects/unborn-repo/git/diff').expect(200);
+    expect(diffRes.body.files).toHaveLength(1);
+    expect(diffRes.body.files[0].rawPatch).toContain('+Staged line.');
+
+    // Default project registry template stays strictly fictional and projects.json is gitignored
+    const repoRoot = path.resolve(__dirname, '..');
+    const templateRaw = fs.readFileSync(path.join(repoRoot, 'config', 'projects.default.json'), 'utf8');
+    const template = JSON.parse(templateRaw) as { projects: Array<{ id: string }> };
+    expect(template.projects.map((p) => p.id)).toEqual(['cindervault-rpg', 'helios-lab']);
+    const gitignore = fs.readFileSync(path.join(repoRoot, '.gitignore'), 'utf8');
+    expect(gitignore).toContain('config/projects.json');
+  });
 });
