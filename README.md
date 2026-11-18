@@ -24,6 +24,19 @@ npm test              # Runs Vitest unit + API integration suite
 
 Use operator enrollment to connect a GitHub repository and a single base branch. Focus reads and edits shared working files while a separate Git worker fetches upstream changes and handles reviewed proposals. See [managed Git setup and migration](docs/MANAGED-GIT.md) for the process configuration, API and steps to preserve work from existing checkouts.
 
+## Managed Git and Pull Requests
+
+Use **Enrollment** in the sidebar to see how to request repository access. The workspace operator configures the working copy, upstream, and Git credentials on the server. The sidebar lists the repositories available to you.
+
+1. Edit a document as usual. **Saved locally** means FocusWiki wrote your draft to the local working copy. Inline comments and component changes also live in project files. Saving and opening a review have no upstream effect.
+2. Open **Review working changes** from the topbar Git status. Inspect the rich or raw diff, select the files to include, and enter a proposal message. Each new review starts with no files selected.
+3. Choose **Propose changes** to publish the selected snapshot as a pull request. Open the returned link to check the pull request and its merge status on the Git host.
+4. If the review becomes stale, choose **New review**, inspect the updated diff, and select the files again. If publishing is interrupted, **Retry proposal** resubmits the same review, file selection, and message. Your local draft stays on disk.
+
+**Backend dependency.** Publishing requires the managed enrollment, Git service, and proposal backend. The browser reads `GET /api/projects/:projectId/git/diff` for the existing rich review payload plus an opaque `reviewId`. It sends `POST /api/projects/:projectId/git/propose` with JSON `{reviewId, message, paths}` and `X-FocusWiki-Intent: propose` on the same origin. The server validates the review and selected paths, and returns `{url, sha}` on success. A diff without a review ID is available for inspection only.
+
+Set `
+
 ## Images, Links, and Visual Editing
 
 In **Edit → Visual**, use **Image** for a repository path or HTTP(S) URL, alternative text, and an optional title. Inline and standalone Markdown images remain editable and retain their original `src`, `alt`, and `title` when saved. Repository image URLs resolve against the current document directory and render through `/api/projects/:projectId/assets/:path`; they are never rewritten into API URLs in Markdown. Remote images load directly from their host with no referrer.
@@ -62,6 +75,8 @@ height: 300
 props: {"depth":3,"luckBonus":1}
 ```
 ````
+
+Use relative URLs for component scripts (including modules), stylesheets, images, and fonts. Keep them inside the same project's `embeds/` directory, using regular files and directories. The sandbox applies in the iframe and when the embed URL is opened directly.
 
 ### Adding a Fourth Component (Bot or CLI Workflow — Zero Hub Code Changes)
 
@@ -137,7 +152,7 @@ node .agents/skills/focuswiki-docs/scripts/validate-wiki.mjs .
 | `react`, `react-dom` | Workspace UI rendering | MIT |
 | `@tiptap/*`, `prosemirror-*` | Rich visual Markdown editor, tables, task lists, decorations | MIT |
 | `unified`, `remark-parse`, `remark-gfm`, `remark-frontmatter`, `remark-stringify` | Lossless Markdown AST parsing and serialization | MIT |
-| `express`, `chokidar` | Local HTTP API, sandboxed asset serving, and live file watching | MIT |
+| `express` | Local HTTP API and sandboxed asset serving | MIT |
 | `lucide-react` | Minimal UI iconography | ISC |
 | `@fontsource/jetbrains-mono` | Self-hosted WOFF2 monospace code & source font | OFL-1.1 |
 | `typescript`, `vite`, `vitest`, `supertest`, `tsx` | Build, typecheck, and automated test toolchain | Apache-2.0 / MIT |

@@ -2,7 +2,7 @@
 
 ## Internal LAN Readiness & Hardening Verification — 2026-11-17
 
-Summary of integrated hardening, Git clone lifecycle, authoring, and test verification:
+Historical summary of integrated hardening, Git clone lifecycle, authoring, and test verification before the managed Git workflow:
 
 - **Git Cloning & Repository Security (`server/gitService.ts`, `server/credentialStore.ts`, `server/pathGuard.ts`, `server/projectRegistry.ts`):**
   - Hardened every `git` invocation with `core.hooksPath=/dev/null`, `core.fsmonitor=false`, `submodule.recurse=false`, `core.symlinks=false`, `http.followRedirects=false`, `transfer.fsckObjects=true`, `protocol.allow=never` + explicit per-protocol allowlisting, URL-rewrite (`insteadOf`) blocking, minimal child environments (`GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=/dev/null`), and `0700` ephemeral credential helpers with stderr/stdout secret scrubbing.
@@ -70,7 +70,7 @@ The image build also reports that Git provenance could not be captured from the 
 ## Five-Minute Reviewer Walkthrough
 
 1. **Minute 1 — Read-First RPG Doc & Content-Sized Interactive Embeds (`Scenario 1`):**
-   - Open `http://100.117.116.91:8088/`. It loads **Cindervault RPG** (`docs/vault-breach-action.md`) in **Read** mode by default—no formatting toolbar or embed arrangement chrome competes with reading. Click the `main · 1 uncommitted` badge in the top bar at any time to inspect the full checkout path and `git diff HEAD`.
+   - Open `http://100.117.116.91:8088/`. It loads **Cindervault RPG** (`docs/vault-breach-action.md`) in **Read** mode by default—no formatting toolbar or embed arrangement chrome competes with reading. Use the topbar Git status to open **Review working changes**.
    - Scroll down and operate all three sandboxed widgets in Read mode (each sizes dynamically to its actual rendered content via instance-validated `focus:embed:ready`/`focus:embed:resize` (with legacy `cairn:embed:*` support) messages while preserving `sandbox="allow-scripts"` + strict CSP):
      1. *Ward-Breach State & Transition Explorer*: click **Commit Lantern Oil** -> **Roll 2d6 Check** -> **Total 7–9 (Strained)** and inspect the live engine state JSON.
      2. *Sunken Reliquary Step-Through Walkthrough*: step through Beats 1–5 and toggle the Beat 5 `7–9` consequence cost.
@@ -87,10 +87,11 @@ The image build also reports that Git provenance could not be captured from the 
    - Compare prose anchor treatments: unselected open threads use a warm wash + subtle underline, the selected thread adds a richer gold wash + focus halo and expands its card in the Review rail, and resolved threads collapse into compact summary cards with a muted dashed prose underline + `✓` badge.
    - Cut and paste an anchored sentence in **Edit** mode: the anchor stays attached at the new location; duplicating creates an **Ambiguous** unattached thread; deleting flags **Orphaned**.
 
-4. **Minute 4 — External Edits, Conflict Protection & Local Git Commit (`Scenarios 2, 6, 8`):**
+4. **Minute 4 — External Edits, Conflict Protection & Pull Request Proposals:**
    - Edit `sample-repos/cindervault-rpg/docs/vault-breach-action.md` externally on disk while clean (`Saved locally`): the browser reloads the external edit via SSE before any commit.
    - Trigger a simultaneous edit conflict: FocusWiki refuses to overwrite disk, backs up the editor buffer under `.focuswiki/conflicts/`, and opens the side-by-side **Conflict resolution** modal.
-   - Click the `main · ... uncommitted` badge in the top bar to open **Review working changes**: inspect structured Markdown diffs (which highlight inline prose additions while separating formatting-only table pipe alignment from real cell changes), human-readable `.comments.json` updates, code diffs, or secondary **Raw diff**, enter a commit message, and click **Commit N files** (commits locally on `main` preserving your exact message and author identity; never pushes).
+   - On an operator-enrolled fixture with the managed Git backend enabled, open **Review working changes**. Inspect a Markdown or comments diff, switch to **Raw diff**, then check only the files you want to include. Enter a proposal message and choose **Propose changes**. Use **Open pull request** to verify the proposal on the Git host.
+   - If the service reports a stale snapshot, choose **New review** and reselect the files after inspecting the diff. If publishing fails temporarily, **Retry proposal** uses the original selection and message. The browser tests in `tests/settingsAndManagedGit.test.ts` exercise both responses with a fictional checkout and mocked proposal endpoint.
 
 5. **Minute 5 — Cross-Project Search, Lab Runbook & Responsive Portrait/Landscape Drawers:**
    - Switch **Repository** to **Helios Bench Runbook (`main`)**, toggle rails in *Helios Rack Power & Boot Sequencer* (`embeds/power-sequencer/index.html`), and search `Ward-Seal` or `198.51.100.41` across repositories.
@@ -115,7 +116,7 @@ The following results were recorded by earlier application work. Current deploym
 
 ## Dependencies & Licenses
 
-- Runtime: `express` (MIT), `chokidar` (MIT), `react` / `react-dom` (MIT), `@tiptap/*` & `prosemirror-*` (MIT), `unified` / `remark-*` (MIT), `lucide-react` (ISC), `@fontsource/jetbrains-mono` (SIL OFL 1.1).
+- Runtime: `express` (MIT), `react` / `react-dom` (MIT), `@tiptap/*` & `prosemirror-*` (MIT), `unified` / `remark-*` (MIT), `lucide-react` (ISC), `@fontsource/jetbrains-mono` (SIL OFL 1.1).
 - Build & Test: `typescript` (Apache-2.0), `vite` / `@vitejs/plugin-react` (MIT), `vitest` (MIT), `supertest` (MIT), `playwright` (Apache-2.0), `tsx` (MIT).
 
 ## Known Limitations

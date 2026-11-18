@@ -6,7 +6,6 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createHubApp, type HubAppInstance } from '../server/app';
-import { getGitWorkingDiff } from '../server/gitService';
 
 const PROJECT_ROOT = path.resolve(__dirname, '..');
 const CLIENT_DIST = path.join(PROJECT_ROOT, 'dist', 'client');
@@ -756,7 +755,7 @@ describe('Council UI Design & Responsive IA Pass — Interactive Browser Verific
   });
 
   it('renders safe Rich Change Review (prose word diff, formatting-only table separation, comments, code, add/delete) without executing project content', async () => {
-    // Isolate a clean project working tree in heliosRoot for rich change review + commit verification
+    // Use the local checkout to exercise the real rich comparison payload.
     const invPath = path.join(heliosRoot, 'docs', 'bench-inventory.md');
     const origInv = fs.readFileSync(invPath, 'utf8');
 
@@ -785,19 +784,6 @@ describe('Council UI Design & Responsive IA Pass — Interactive Browser Verific
     const context = await browser!.newContext({ viewport: { width: 1440, height: 900 } });
     context.setDefaultTimeout(15000);
     const page = await context.newPage();
-
-    await page.route('**/api/projects', async (route) => {
-      const response = await route.fetch();
-      const body = await response.json();
-      const project = body.projects.find((item: { id: string }) => item.id === 'helios-lab');
-      const git = await getGitWorkingDiff(heliosRoot);
-      project.git = { ...git.status, state: 'ready', checkedAt: new Date().toISOString(), changesTruncated: false };
-      await route.fulfill({ response, json: body });
-    });
-    await page.route('**/api/projects/helios-lab/git/diff', async (route) => {
-      const review = await getGitWorkingDiff(heliosRoot);
-      await route.fulfill({ json: { ...review, reviewId: 'fictional-review-id' } });
-    });
 
     try {
       await page.goto(`${baseUrl}/?project=helios-lab&doc=docs%2Fbench-inventory.md`);
@@ -863,6 +849,8 @@ describe('Council UI Design & Responsive IA Pass — Interactive Browser Verific
       );
       expect(phoneOverflowX).toBeLessThanOrEqual(1);
 
+      // A legacy diff without a review ID is available for inspection only.
+      expect(await page.getByLabel('Proposal message').count()).toBe(0);
     } finally {
       await context.close();
     }

@@ -25,6 +25,7 @@ export interface GitRepoStatus {
   headSubject: string;
   isClean: boolean;
   changedFiles: GitChangedFile[];
+  statusIncomplete?: boolean;
   remoteName?: string | null;
   remoteUrl?: string | null;
   ahead?: number;
@@ -69,6 +70,7 @@ export interface RepoInspectionResult {
   suggestedDefaultDoc: string;
   docCount: number;
   embedCount: number;
+  scanIncomplete?: boolean;
   isGitRepo: boolean;
   branch?: string;
   remoteUrl?: string | null;
@@ -124,6 +126,8 @@ export interface ProjectSummary extends ProjectConfig {
   workingTreeAvailable: boolean;
   docs: DocTreeEntry[];
   embeds: EmbedAssetEntry[];
+  scanIncomplete?: boolean;
+  watchIncomplete?: boolean;
 }
 
 export interface EmbedDescriptor {
@@ -203,6 +207,7 @@ export interface DocumentPayload {
   docJson: ProseMirrorNode;
   comments: ResolvedCommentThread[];
   conflicts: string[];
+  conflictsIncomplete?: boolean;
 }
 
 export interface ConflictErrorPayload {
