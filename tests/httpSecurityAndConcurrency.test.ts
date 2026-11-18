@@ -125,9 +125,12 @@ describe('LAN HTTP security, safe assets, and concurrent writes', () => {
   it('grants opaque-origin asset CORS only with a valid URL for that project', async () => {
     const otherRepo = path.join(root, 'other-repo');
     fs.cpSync(repo, otherRepo, { recursive: true });
-    const otherProject = hub.registry.add({
+    const otherProject = {
       id: 'other', name: 'Other Observatory', description: '', rootPath: otherRepo, defaultDoc: 'README.md'
-    });
+    };
+    const projects = hub.registry.list();
+    await hub.close();
+    hub = makeHub({ projects: [...projects, otherProject] });
     fs.writeFileSync(path.join(repo, 'embeds/data.mjs'), 'export const cometCount = 2;');
     fs.writeFileSync(path.join(otherRepo, 'embeds/data.mjs'), 'export const cometCount = 3;');
 
@@ -147,9 +150,8 @@ describe('LAN HTTP security, safe assets, and concurrent writes', () => {
     const otherOrigin = await request(hub.app).get(moduleUrl).set('Origin', 'https://elsewhere.example').expect(200);
     expect(otherOrigin.headers['access-control-allow-origin']).toBeUndefined();
     await request(hub.app).get(moduleUrl.replace('/fixture/', '/other/')).set('Origin', 'null').expect(403);
-    hub.registry.remove('fixture');
-    hub.registry.remove('other');
-    hub.registry.add({ ...otherProject, id: 'fixture' });
+    await hub.close();
+    hub = makeHub({ projects: [{ ...otherProject, id: 'fixture' }] });
     await request(hub.app).get(moduleUrl).set('Origin', 'null').expect(403);
   });
 
