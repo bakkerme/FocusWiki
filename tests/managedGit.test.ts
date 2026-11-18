@@ -189,9 +189,12 @@ describe('managed Git service', () => {
     await request(hub.app).get('/api/projects/amber/git/diff').expect(503);
     await request(hub.app).post('/api/projects/amber/git/propose').send(proposalInput).expect(503);
 
-    const client = await start();
+    const service = companion('0'.repeat(40));
+    const client = await start(service);
     expect(fs.statSync(socketPath).mode & 0o777).toBe(0o660);
-    await expect(client.review(loadEnrollment(enrollmentFile)[0], 'fictional-reviewer')).rejects.toMatchObject({ code: 'proposal_unavailable' });
+    await expect(client.review(loadEnrollment(enrollmentFile)[0], 'fictional-reviewer')).rejects.toMatchObject({ code: 'git_not_ready' });
+    expect(service.reviewProposal).not.toHaveBeenCalled();
+    expect(service.getRepoToken).not.toHaveBeenCalled();
     expect(fs.readdirSync(stateDir)).toEqual([]);
     expect(fs.readFileSync(path.join(workTree, '.git', 'config'), 'utf8')).toBe('fictional legacy metadata');
   });
