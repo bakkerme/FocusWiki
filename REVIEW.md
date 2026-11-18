@@ -116,7 +116,7 @@ The following results were recorded by earlier application work. Current deploym
 
 ## Dependencies & Licenses
 
-- Runtime: `express` (MIT), `chokidar` (MIT), `react` / `react-dom` (MIT), `@tiptap/*` & `prosemirror-*` (MIT), `unified` / `remark-*` (MIT), `lucide-react` (ISC), `@fontsource/jetbrains-mono` (SIL OFL 1.1).
+- Runtime: `express` (MIT), `react` / `react-dom` (MIT), `@tiptap/*` & `prosemirror-*` (MIT), `unified` / `remark-*` (MIT), `lucide-react` (ISC), `@fontsource/jetbrains-mono` (SIL OFL 1.1).
 - Build & Test: `typescript` (Apache-2.0), `vite` / `@vitejs/plugin-react` (MIT), `vitest` (MIT), `supertest` (MIT), `playwright` (Apache-2.0), `tsx` (MIT).
 
 ## Known Limitations

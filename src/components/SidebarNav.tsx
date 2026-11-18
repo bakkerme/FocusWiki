@@ -59,6 +59,7 @@ interface Props {
   enrollmentTriggerRef?: RefObject<HTMLButtonElement>;
   searchQuery: string;
   searchResults: SearchResultItem[];
+  searchNotice: string;
   onChangeSearch: (q: string) => void;
   onSelectProject: (projectId: string) => void;
   onSelectDoc: (projectId: string, docPath: string) => void;
@@ -81,6 +82,7 @@ export function SidebarNav(props: Props) {
     enrollmentTriggerRef,
     searchQuery,
     searchResults,
+  searchNotice,
     onChangeSearch,
     onSelectProject,
     onSelectDoc,
@@ -406,8 +408,9 @@ export function SidebarNav(props: Props) {
 
         {searchQuery.trim() !== '' && (
           <div className="search-results-panel">
+            {searchNotice && <div className="search-empty" role="status">{searchNotice}</div>}
             {searchResults.length === 0 ? (
-              <div className="search-empty">No matching lines across repositories.</div>
+              !searchNotice && <div className="search-empty">No matching lines across repositories.</div>
             ) : (
               searchResults.map((hit, idx) => (
                 <button
@@ -433,6 +436,13 @@ export function SidebarNav(props: Props) {
           </div>
         )}
       </div>
+
+      {activeProject?.scanIncomplete && (
+        <div className="search-empty">Some pages, comment counts, or embeds could not be listed.</div>
+      )}
+      {activeProject?.watchIncomplete && (
+        <div className="search-empty">Live updates have limited coverage. Reload to read from disk.</div>
+      )}
 
       {activeProject && docTree && (
         <nav className="sidebar-docs-section" aria-label={`${activeProject.name} documents`}>

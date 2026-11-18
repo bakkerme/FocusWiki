@@ -86,12 +86,14 @@ export function createExpensiveRequestLimiter(options: RateLimitOptions = {}): R
   const windowMs = positive(options.windowMs ?? Number(process.env.FOCUSWIKI_RATE_LIMIT_WINDOW_MS ?? 60000), 60000);
   const peers = new Map<string, number[]>();
   return (req, res, next) => {
-    if (req.method !== 'POST' || !/^\/api\/(?:projects\/(?:inspect-remote|import)|(?:settings\/)?credentials\/test|projects\/[^/]+\/git\/(?:fetch|pull))\/?$/i.test(req.path)) {
+    const read = ['GET', 'HEAD'].includes(req.method) && /^\/api\/(?:search|projects|projects\/[^/]+\/git\/diff)\/?$/i.test(req.path);
+    const write = req.method === 'POST' && /^\/api\/(?:projects\/(?:inspect-local|inspect-remote|import)|(?:settings\/)?credentials\/test|projects\/[^/]+\/git\/(?:fetch|pull))\/?$/i.test(req.path);
+    if (!read && !write) {
       next();
       return;
     }
     const now = Date.now();
-    const key = req.socket.remoteAddress ?? 'unknown';
+    const key = `${req.socket.remoteAddress ?? 'unknown'}:${read ? 'read' : 'write'}`;
     for (const [peer, timestamps] of peers) {
       if (timestamps[timestamps.length - 1] <= now - windowMs) peers.delete(peer);
     }

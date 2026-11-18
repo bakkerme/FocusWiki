@@ -31,6 +31,8 @@ Use **Enrollment** in the sidebar to see how to request repository access. The w
 
 **Backend dependency.** Publishing requires the managed enrollment, Git service, and proposal backend. The browser reads `GET /api/projects/:projectId/git/diff` for the existing rich review payload plus an opaque `reviewId`. It sends `POST /api/projects/:projectId/git/propose` with JSON `{reviewId, message, paths}` and `X-FocusWiki-Intent: propose` on the same origin. The server validates the review and selected paths, and returns `{url, sha}` on success. A diff without a review ID is available for inspection only.
 
+Set `FOCUSWIKI_ALLOWED_IMPORT_ROOTS` to a comma-separated list of directories for local folder imports and `file://` Git remotes. When omitted, it defaults to the managed repository directory. An explicitly empty list disables both operations. Preconfigured projects can still be opened.
+
 ## Images, Links, and Visual Editing
 
 In **Edit → Visual**, use **Image** for a repository path or HTTP(S) URL, alternative text, and an optional title. Inline and standalone Markdown images remain editable and retain their original `src`, `alt`, and `title` when saved. Repository image URLs resolve against the current document directory and render through `/api/projects/:projectId/assets/:path`; they are never rewritten into API URLs in Markdown. Remote images load directly from their host with no referrer.
@@ -93,6 +95,8 @@ height: 300
 props: {"depth":3,"luckBonus":1}
 ```
 ````
+
+Use relative URLs for component scripts (including modules), stylesheets, images, and fonts. Keep them inside the same project's `embeds/` directory, using regular files and directories. The sandbox applies in the iframe and when the embed URL is opened directly.
 
 ### Adding a Fourth Component (Bot or CLI Workflow — Zero Hub Code Changes)
 
@@ -168,7 +172,7 @@ node .agents/skills/focuswiki-docs/scripts/validate-wiki.mjs .
 | `react`, `react-dom` | Workspace UI rendering | MIT |
 | `@tiptap/*`, `prosemirror-*` | Rich visual Markdown editor, tables, task lists, decorations | MIT |
 | `unified`, `remark-parse`, `remark-gfm`, `remark-frontmatter`, `remark-stringify` | Lossless Markdown AST parsing and serialization | MIT |
-| `express`, `chokidar` | Local HTTP API, sandboxed asset serving, and live file watching | MIT |
+| `express` | Local HTTP API and sandboxed asset serving | MIT |
 | `lucide-react` | Minimal UI iconography | ISC |
 | `@fontsource/jetbrains-mono` | Self-hosted WOFF2 monospace code & source font | OFL-1.1 |
 | `typescript`, `vite`, `vitest`, `supertest`, `tsx` | Build, typecheck, and automated test toolchain | Apache-2.0 / MIT |
