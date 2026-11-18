@@ -25,7 +25,7 @@ import {
   PathBoundaryError,
   resolveInternalMetadataDir,
   resolveSafeEmbedAssetPath,
-  resolveSafeProjectPath
+  resolveSafeProjectFilePath
 } from './pathGuard.js';
 import {
   GitAuthError,
@@ -123,6 +123,7 @@ export interface HubAppOptions {
 export function createHubApp(options: HubAppOptions): HubAppInstance {
   const app = express();
   const startedAt = Date.now();
+  const embedAssetKey = crypto.randomBytes(32);
   const registry =
     options.registry ??
     new ProjectRegistry({
@@ -616,7 +617,7 @@ export function createHubApp(options: HubAppOptions): HubAppInstance {
         typeof req.body?.description === 'string' ? req.body.description.trim() : undefined;
       let defaultDoc: string | undefined;
       if (typeof req.body?.defaultDoc === 'string') {
-        const { normalizedRelPath } = resolveSafeProjectPath(
+        const { normalizedRelPath } = resolveSafeProjectFilePath(
           existing.rootPath,
           req.body.defaultDoc.trim()
         );
@@ -693,7 +694,7 @@ export function createHubApp(options: HubAppOptions): HubAppInstance {
       if (segments.some((segment) => ['..', '.git', '.focuswiki', '.cairn'].includes(segment.toLowerCase())) || /\.comments\.json(?:$|\/)/i.test(assetPath)) {
         throw new PathBoundaryError('Protected asset path.', 403);
       }
-      const { absolutePath, normalizedRelPath } = resolveSafeProjectPath(project.rootPath, assetPath);
+      const { absolutePath, normalizedRelPath } = resolveSafeProjectFilePath(project.rootPath, assetPath);
       if (normalizedRelPath.split('/').some((seg) => seg.startsWith('.'))) {
         throw new PathBoundaryError('Hidden dotfiles may not be served as assets.', 403);
       }
@@ -705,17 +706,11 @@ export function createHubApp(options: HubAppOptions): HubAppInstance {
         res.status(404).json({ error: 'not_found', message: 'Asset not found.' });
         return;
       }
-      // Also reject aliases into protected metadata directories inside the repository.
-      const realRoot = fs.realpathSync(project.rootPath);
-      const realRelative = path.relative(realRoot, fs.realpathSync(absolutePath));
-      if (realRelative.split(path.sep).some((part) => !part || part.startsWith('.') || ['.git', '.focuswiki', '.cairn'].includes(part.toLowerCase())) || /\.comments\.json$/i.test(realRelative)) {
-        throw new PathBoundaryError('Protected asset target.', 403);
-      }
       res.setHeader('Content-Type', MIME_BY_EXT[ext]);
       res.setHeader('Cache-Control', 'private, max-age=60');
       res.setHeader('X-Content-Type-Options', 'nosniff');
       if (ext === '.svg') res.setHeader('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; sandbox");
-      res.sendFile(realRelative.split(path.sep).join('/'), { root: realRoot, dotfiles: 'deny' }, (err) => { if (err) next(err); });
+      res.sendFile(normalizedRelPath, { root: project.rootPath, dotfiles: 'deny' });
     } catch (err) {
       next(err);
     }
@@ -726,7 +721,7 @@ export function createHubApp(options: HubAppOptions): HubAppInstance {
     try {
       const project = getProjectOrThrow(req.params.projectId);
       const docParam = String(req.query.path ?? project.defaultDoc);
-      const { absolutePath, normalizedRelPath } = resolveSafeProjectPath(
+      const { absolutePath, normalizedRelPath } = resolveSafeProjectFilePath(
         project.rootPath,
         docParam
       );
@@ -767,7 +762,7 @@ export function createHubApp(options: HubAppOptions): HubAppInstance {
       const rawPath = String(req.body?.path ?? '').trim();
       const title = String(req.body?.title ?? 'Untitled Document').trim();
       const withExt = rawPath.endsWith('.md') ? rawPath : `${rawPath}.md`;
-      const { absolutePath, normalizedRelPath } = resolveSafeProjectPath(project.rootPath, withExt);
+      const { absolutePath, normalizedRelPath } = resolveSafeProjectFilePath(project.rootPath, withExt);
       if (fs.existsSync(absolutePath)) {
         res.status(409).json({ error: 'already_exists', message: `Document "${normalizedRelPath}" already exists.` });
         return;
@@ -778,7 +773,7 @@ export function createHubApp(options: HubAppOptions): HubAppInstance {
           : `# ${title}\n\nStart writing here.\n`;
 
       fs.mkdirSync(path.dirname(absolutePath), { recursive: true, mode: 0o770 });
-      fs.writeFileSync(absolutePath, initialMd, { encoding: 'utf8', mode: 0o660 });
+      fs.writeFileSync(absolutePath, initialMd, { encoding: 'utf8', mode: 0o660, flag: 'wx' });
 
       res.status(201).json({
         path: normalizedRelPath,
@@ -803,8 +798,9 @@ export function createHubApp(options: HubAppOptions): HubAppInstance {
         return;
       }
 
-      const { absolutePath, normalizedRelPath } = resolveSafeProjectPath(project.rootPath, rawPath);
-      await withKeyLock(fs.existsSync(absolutePath) ? fs.realpathSync(absolutePath) : absolutePath, async () => {
+      const lockPath = resolveSafeProjectFilePath(project.rootPath, rawPath).absolutePath;
+      await withKeyLock(lockPath, async () => {
+        const { absolutePath, normalizedRelPath } = resolveSafeProjectFilePath(project.rootPath, rawPath);
         if (!normalizedRelPath.endsWith('.md')) {
           throw new PathBoundaryError('Only Markdown (.md) files can be written via document save.', 400);
         }
@@ -865,7 +861,7 @@ export function createHubApp(options: HubAppOptions): HubAppInstance {
     try {
       const project = getProjectOrThrow(req.params.projectId);
       const docParam = String(req.query.path ?? project.defaultDoc);
-      const { absolutePath, normalizedRelPath } = resolveSafeProjectPath(project.rootPath, docParam);
+      const { absolutePath, normalizedRelPath } = resolveSafeProjectFilePath(project.rootPath, docParam);
       if (!fs.existsSync(absolutePath)) {
         res.status(404).json({ error: 'not_found', message: 'Document not found.' });
         return;
@@ -887,8 +883,9 @@ export function createHubApp(options: HubAppOptions): HubAppInstance {
     try {
       const project = getProjectOrThrow(req.params.projectId);
       const docParam = String(req.body?.path ?? '');
-      const { absolutePath, normalizedRelPath } = resolveSafeProjectPath(project.rootPath, docParam);
-      await withKeyLock(fs.existsSync(absolutePath) ? fs.realpathSync(absolutePath) : absolutePath, async () => {
+      const lockPath = resolveSafeProjectFilePath(project.rootPath, docParam).absolutePath;
+      await withKeyLock(lockPath, async () => {
+        const { absolutePath, normalizedRelPath } = resolveSafeProjectFilePath(project.rootPath, docParam);
         if (!fs.existsSync(absolutePath)) {
           res.status(404).json({ error: 'not_found', message: 'Document not found.' });
           return;
@@ -956,8 +953,9 @@ export function createHubApp(options: HubAppOptions): HubAppInstance {
     try {
       const project = getProjectOrThrow(req.params.projectId);
       const docParam = String(req.body?.path ?? '');
-      const { absolutePath, normalizedRelPath } = resolveSafeProjectPath(project.rootPath, docParam);
-      await withKeyLock(fs.existsSync(absolutePath) ? fs.realpathSync(absolutePath) : absolutePath, async () => {
+      const lockPath = resolveSafeProjectFilePath(project.rootPath, docParam).absolutePath;
+      await withKeyLock(lockPath, async () => {
+        const { absolutePath, normalizedRelPath } = resolveSafeProjectFilePath(project.rootPath, docParam);
         const bodyText = String(req.body?.body ?? '').trim();
         if (!bodyText) {
           res.status(400).json({ error: 'invalid_body', message: 'Reply body is required.' });
@@ -982,8 +980,9 @@ export function createHubApp(options: HubAppOptions): HubAppInstance {
     try {
       const project = getProjectOrThrow(req.params.projectId);
       const docParam = String(req.body?.path ?? '');
-      const { absolutePath, normalizedRelPath } = resolveSafeProjectPath(project.rootPath, docParam);
-      await withKeyLock(fs.existsSync(absolutePath) ? fs.realpathSync(absolutePath) : absolutePath, async () => {
+      const lockPath = resolveSafeProjectFilePath(project.rootPath, docParam).absolutePath;
+      await withKeyLock(lockPath, async () => {
+        const { absolutePath, normalizedRelPath } = resolveSafeProjectFilePath(project.rootPath, docParam);
         const status = req.body?.status === 'resolved' ? 'resolved' : req.body?.status === 'open' ? 'open' : null;
         if (!status) {
           res.status(400).json({ error: 'invalid_status', message: 'Status must be "open" or "resolved".' });
@@ -1033,9 +1032,6 @@ export function createHubApp(options: HubAppOptions): HubAppInstance {
       const project = getProjectOrThrow(req.params.projectId);
       const srcParam = String(req.body?.src ?? '').trim();
       const source = typeof req.body?.source === 'string' ? req.body.source : '';
-      if (!srcParam.startsWith('embeds/')) {
-        throw new PathBoundaryError('Embed components must reside under "embeds/".', 400);
-      }
       if (!source.trim()) {
         res.status(400).json({ error: 'invalid_source', message: 'Component HTML/JS source is required.' });
         return;
@@ -1045,7 +1041,7 @@ export function createHubApp(options: HubAppOptions): HubAppInstance {
         srcParam
       );
       fs.mkdirSync(path.dirname(absolutePath), { recursive: true, mode: 0o770 });
-      fs.writeFileSync(absolutePath, source, { encoding: 'utf8', mode: 0o660 });
+      writeFileAtomicSync(absolutePath, source);
       res.status(201).json({
         src: normalizedRelPath
       });
@@ -1206,10 +1202,19 @@ export function createHubApp(options: HubAppOptions): HubAppInstance {
     try {
       const project = getProjectOrThrow(req.params.projectId);
       const wildcard = (req.params as Record<string, string>)[0] ?? '';
-      const { absolutePath, normalizedRelPath } = resolveSafeEmbedAssetPath(
-        project.rootPath,
-        wildcard
-      );
+      const assetToken = crypto.createHmac('sha256', embedAssetKey)
+        .update(project.id).update('\0').update(project.rootPath).digest('hex');
+      const assetPathPrefix = `/embed-sandbox/${encodeURIComponent(project.id)}/_assets/${assetToken}/`;
+      const scoped = wildcard.startsWith('_assets/');
+      let relPath = wildcard;
+      if (scoped) {
+        const match = /^_assets\/([a-f0-9]{64})\/(.*)$/s.exec(wildcard);
+        if (!match || !crypto.timingSafeEqual(Buffer.from(match[1], 'hex'), Buffer.from(assetToken, 'hex'))) {
+          throw new PathBoundaryError('Invalid embed asset URL.');
+        }
+        relPath = match[2];
+      }
+      const { absolutePath, normalizedRelPath } = resolveSafeEmbedAssetPath(project.rootPath, relPath);
 
       if (!fs.existsSync(absolutePath) || !fs.statSync(absolutePath).isFile()) {
         res.status(404).type('text/plain').send('Embed asset not found.');
@@ -1223,32 +1228,42 @@ export function createHubApp(options: HubAppOptions): HubAppInstance {
       if (!host || !['http', 'https'].includes(proto)) {
         throw new PathBoundaryError('Invalid request authority.', 400);
       }
-      const allowedProjectAssetPrefix = `${proto}://${host}/embed-sandbox/${encodeURIComponent(project.id)}/`;
-
-      // Strict defense-in-depth CSP:
-      // Paired with <iframe sandbox="allow-scripts"> (opaque null origin, NO allow-same-origin),
-      // components can run their own inline/sibling scripts & styles, cannot fetch external or hub APIs,
-      // and cannot read parent DOM or storage.
+      const allowedProjectAssetPrefix = scoped ? ` ${proto}://${host}${assetPathPrefix}embeds/` : '';
       const csp = [
+        "sandbox allow-scripts",
         "default-src 'none'",
-        `script-src 'unsafe-inline' ${allowedProjectAssetPrefix}`,
-        `style-src 'unsafe-inline' ${allowedProjectAssetPrefix}`,
-        `img-src data: blob: ${allowedProjectAssetPrefix}`,
-        `font-src data: ${allowedProjectAssetPrefix}`,
+        `script-src 'unsafe-inline'${allowedProjectAssetPrefix}`,
+        `style-src 'unsafe-inline'${allowedProjectAssetPrefix}`,
+        `img-src data: blob:${allowedProjectAssetPrefix}`,
+        `font-src data:${allowedProjectAssetPrefix}`,
         "connect-src 'none'",
         "form-action 'none'",
         "base-uri 'none'",
         "frame-ancestors 'self'"
       ].join('; ');
 
-      res.setHeader('Content-Security-Policy', csp);
-      res.setHeader('Access-Control-Allow-Origin', '*');
       res.setHeader('X-Content-Type-Options', 'nosniff');
       res.setHeader('Referrer-Policy', 'no-referrer');
       res.setHeader('Cache-Control', 'no-store');
+      if (!scoped) {
+        res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
+        if (ext === '.html') {
+          // Navigation can use this redirect. A cross-origin fetch cannot read it or its Location.
+          const encodedPath = normalizedRelPath.split('/').map(encodeURIComponent).join('/');
+          const queryStart = req.originalUrl.indexOf('?');
+          const query = queryStart === -1 ? '' : req.originalUrl.slice(queryStart);
+          res.location(assetPathPrefix + encodedPath + query).status(302).end();
+          return;
+        }
+      } else if (ext !== '.html') {
+        // Opaque iframe modules and fonts need CORS. The project-scoped URL authorizes it.
+        res.vary('Origin');
+        if (req.get('origin') === 'null') res.setHeader('Access-Control-Allow-Origin', 'null');
+      }
+      res.setHeader('Content-Security-Policy', csp);
       res.setHeader('Content-Type', contentType);
 
-      res.sendFile(absolutePath);
+      res.sendFile(normalizedRelPath, { root: project.rootPath, dotfiles: 'deny' });
     } catch (err) {
       next(err);
     }

@@ -35,6 +35,8 @@ You do not need to edit `config/projects.json` or restart the server to add repo
   - `POST /api/projects/import` (`mode`: `"clone" | "local" | "init"`) & `DELETE /api/projects/:projectId`
   - `GET /api/projects/:projectId/git/refs`, `POST /api/projects/:projectId/git/fetch`, `POST /api/projects/:projectId/git/pull`, `POST /api/projects/:projectId/git/checkout`
 
+Set `FOCUSWIKI_ALLOWED_IMPORT_ROOTS` to a comma-separated list of directories for local folder imports and `file://` Git remotes. When omitted, it defaults to the managed repository directory. An explicitly empty list disables both operations. Preconfigured projects can still be opened.
+
 ## Images, Links, and Visual Editing
 
 In **Edit → Visual**, use **Image** for a repository path or HTTP(S) URL, alternative text, and an optional title. Inline and standalone Markdown images remain editable and retain their original `src`, `alt`, and `title` when saved. Repository image URLs resolve against the current document directory and render through `/api/projects/:projectId/assets/:path`; they are never rewritten into API URLs in Markdown. Remote images load directly from their host with no referrer.
@@ -99,6 +101,8 @@ height: 300
 props: {"depth":3,"luckBonus":1}
 ```
 ````
+
+Use relative URLs for component scripts (including modules), stylesheets, images, and fonts. Keep them inside the same project's `embeds/` directory, using regular files and directories. The sandbox applies in the iframe and when the embed URL is opened directly.
 
 ### Adding a Fourth Component (Bot or CLI Workflow — Zero Hub Code Changes)
 

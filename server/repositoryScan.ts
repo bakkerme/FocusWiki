@@ -4,8 +4,18 @@ import path from 'node:path';
 import type { DocTreeEntry, EmbedAssetEntry, ProjectConfig, SearchResultItem } from '../shared/types.js';
 import { extractDocumentTitle } from '../shared/markdownCodec.js';
 import { getCommentSidecarRelPath } from './commentStore.js';
+import { PathBoundaryError, resolveSafeEmbedAssetPath } from './pathGuard.js';
 
 const KiB = 1024;
+function allowedEmbed(root: string, relative: string): boolean {
+  try {
+    resolveSafeEmbedAssetPath(root, relative);
+    return true;
+  } catch (error) {
+    if (error instanceof PathBoundaryError) return false;
+    throw error;
+  }
+}
 const IGNORED_AGENT_DOC_NAMES = new Set(['AGENTS.md', 'CLAUDE.md', 'GEMINI.md']);
 
 export interface ScanLimits {
@@ -229,14 +239,14 @@ export async function scanRepository(project: ProjectConfig, budget = new ScanBu
       const embedBudget = budget.child({ entries: 1_000, files: 0, bytes: 0, depth: 2 });
       await withChildDirectory(root, 'embeds', async (embedRoot) => {
         await eachEntry(embedRoot, embedBudget, async (entry) => {
-          if (entry.isFile() && entry.name.endsWith('.html')) {
+          if (entry.isFile() && entry.name.endsWith('.html') && allowedEmbed(project.rootPath, `embeds/${entry.name}`)) {
             embeds.push({ src: `embeds/${entry.name}`, name: entry.name.slice(0, -5), directory: 'embeds', files: [entry.name] });
           } else if (entry.isDirectory()) {
             const directory = `embeds/${entry.name}`;
             await withChildDirectory(embedRoot, entry.name, async (child) => {
               const files: string[] = [];
               await eachEntry(child, embedBudget, async (file) => {
-                if (file.isFile()) files.push(file.name);
+                if (file.isFile() && allowedEmbed(project.rootPath, `${directory}/${file.name}`)) files.push(file.name);
               });
               files.sort();
               const html = files.includes('index.html') ? 'index.html' : files.find((file) => file.endsWith('.html'));
