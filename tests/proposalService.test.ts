@@ -358,6 +358,20 @@ describe('proposal worker', () => {
     expect(upstream.pushes).toHaveLength(0);
   });
 
+  it('publishes against the reviewed branch, not the GitHub default or a same-SHA replacement', async () => {
+    draft();
+    calls.defaultBranch = 'other';
+    origin('update-ref', 'refs/heads/other', base);
+    const review = await reviewProposal(ctx);
+    const input = { reviewId: review.reviewId, message: 'Review the guide', paths: ['Guide.md'] };
+    git('branch', 'other', base);
+    git('symbolic-ref', 'HEAD', 'refs/heads/other');
+    await expect(publishProposal(ctx, input)).rejects.toThrow(/unavailable/);
+    expect(calls.fetch).not.toHaveBeenCalled();
+    git('symbolic-ref', 'HEAD', `refs/heads/${baseBranch}`);
+    expect((await publishProposal(ctx, input)).url).toBe(pullRequestUrl);
+  });
+
   it('does not overwrite a proposal branch created before Git advertises refs', async () => {
     draft();
     const review = await reviewProposal(ctx);

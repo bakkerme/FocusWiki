@@ -31,7 +31,7 @@ type TokenMode = 'read' | 'write';
 type FileMode = '100644' | '100755';
 type Fingerprint = { mode: FileMode; digest: string };
 type ReviewedPath = { path: string; after: Fingerprint | null };
-type Review = { projectId: string; remote: string; branch: string; workTree: string; base: string; files: ReviewedPath[] };
+type Review = { projectId: string; remote: string; branch: string; workTree: string; base: string; baseBranch: string; files: ReviewedPath[] };
 type Prepared = { paths: string[]; messageDigest: string; baseBranch: string; sha: string };
 type Proposal = { url: string; sha: string };
 type BlobEntry = { mode: string; sha: string; size: number };
@@ -47,6 +47,7 @@ const MAX_API_BYTES = 1024 * 1024;
 const SHA = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 const UUID = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/;
 const decoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
+export const enforcesManagedBase = true;
 
 class ProposalError extends Error {
   constructor(message: string) {
@@ -577,6 +578,7 @@ function fileSummary(file: Capture, raw: string): ChangeFileSummary {
 
 export async function reviewProposal(ctx: ProposalContext): Promise<GitChangeReviewPayload & { reviewId: string }> {
   const enrolled = enrollment(ctx);
+  const baseBranch = await managedBaseBranch(enrolled);
   const base = await localHead(enrolled);
   const { files, excluded } = await capture(enrolled, base);
   const directory = stateDirectory(enrolled);
@@ -596,7 +598,7 @@ export async function reviewProposal(ctx: ProposalContext): Promise<GitChangeRev
   const reviewId = randomUUID();
   const review: Review = {
     projectId: enrolled.projectId, remote: enrolled.remote, branch: enrolled.branch, workTree: enrolled.workTree,
-    base, files: files.map(fingerprint)
+    base, baseBranch, files: files.map(fingerprint)
   };
   record(directory, `${reviewId}.review`, review);
   return {
@@ -625,11 +627,18 @@ async function remoteTip(ctx: Enrollment, token: string, branch: string, optiona
   return ref.object.sha!;
 }
 
-async function verifyRemoteBase(ctx: Enrollment, token: string, base: string, expectedBranch?: string): Promise<string> {
-  const remote = await github<{ full_name?: string; default_branch?: string }>(ctx.repo.api, token);
-  const branch = remote?.default_branch;
-  if (remote?.full_name?.toLowerCase() !== ctx.repo.slug.toLowerCase() || !validBranch(branch) || branch.startsWith('focuswiki/') ||
-      (expectedBranch !== undefined && branch !== expectedBranch) || await remoteTip(ctx, token, branch) !== base) {
+async function managedBaseBranch(ctx: Enrollment): Promise<string> {
+  const ref = (await localGit(ctx, ['symbolic-ref', 'HEAD'])).toString().trim();
+  const branch = ref.slice('refs/heads/'.length);
+  if (!ref.startsWith('refs/heads/') || !validBranch(branch) || branch.startsWith('focuswiki/')) {
+    throw new ProposalError('Invalid managed base branch.');
+  }
+  return branch;
+}
+
+async function verifyRemoteBase(ctx: Enrollment, token: string, base: string, expectedBranch: string): Promise<string> {
+  const branch = await managedBaseBranch(ctx);
+  if (branch !== expectedBranch || await remoteTip(ctx, token, branch) !== base) {
     throw new ProposalError('The enrolled repository base changed. Fetch the new base and run a new review.');
   }
   return branch;
@@ -785,7 +794,8 @@ export async function publishProposal(ctx: ProposalContext, input: PublishPropos
   return withKeyLock(enrolled.gitDir, async () => {
     const directory = stateDirectory(enrolled);
     const review = load<Review>(directory, `${reviewId}.review`);
-    if (!review || review.projectId !== enrolled.projectId || review.workTree !== enrolled.workTree ||
+    if (!review || review.baseBranch !== await managedBaseBranch(enrolled) ||
+        review.projectId !== enrolled.projectId || review.workTree !== enrolled.workTree ||
         review.remote !== enrolled.remote || review.branch !== enrolled.branch) {
       throw new ProposalError('Review is unavailable for this enrollment.');
     }
@@ -816,7 +826,7 @@ export async function publishProposal(ctx: ProposalContext, input: PublishPropos
       // Refuse a stale draft before asking for any credentials.
       const files = await captureSelection();
       readToken = await issueToken(enrolled, 'read');
-      const baseBranch = await verifyRemoteBase(enrolled, readToken, review.base);
+      const baseBranch = await verifyRemoteBase(enrolled, readToken, review.base, review.baseBranch);
       if (await remoteTip(enrolled, readToken, enrolled.branch, true)) {
         throw new ProposalError('The proposal branch already exists. Use a new enrolled proposal branch.');
       }
