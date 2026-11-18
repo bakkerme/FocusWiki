@@ -1,5 +1,7 @@
 import { isIP } from 'node:net';
-import type { RequestHandler } from 'express';
+import type { Socket } from 'node:net';
+import { Router, type Request, type RequestHandler } from 'express';
+import { proposalAuth, recordServeIdentity } from './proposalAuth.js';
 
 const HOST_SYNTAX = /^(?:[a-zA-Z0-9.-]+|\[[0-9a-fA-F:]+\])(?::\d{1,5})?$/;
 const LAN_SUFFIXES = ['.local', '.lan', '.internal', '.home.arpa', '.ts.net'];
@@ -26,10 +28,70 @@ function explicitlyAllowed(host: string, allowed: string[]): boolean {
   return allowed.some((entry) => entry === host || entry === hostName(host));
 }
 
-export function createHttpSecurity(options: { allowedHosts?: string[] } = {}): RequestHandler {
+const LOGIN_SYNTAX = /^[^\s,@\x00-\x1f\x7f-\uffff]+@[^\s,@\x00-\x1f\x7f-\uffff]+$/;
+
+function validLogin(login: string): boolean {
+  return login.length <= 256 && !login.startsWith('=?') && LOGIN_SYNTAX.test(login);
+}
+
+export interface ServeAccessOptions {
+  origin: string;
+  publishers: string[];
+  trustedConnections: WeakSet<Socket>;
+}
+
+function singleHeader(req: Request, name: string): string | undefined {
+  const values = req.headersDistinct[name];
+  return values?.length === 1 ? values[0] : undefined;
+}
+
+function createServeAccess(options: ServeAccessOptions): RequestHandler {
+  const browser = URL.parse(options.origin);
+  if (!browser || browser.protocol !== 'https:' || browser.origin !== options.origin ||
+      !browser.hostname.endsWith('.ts.net') || !validateHost(browser.host)) {
+    throw new Error('FOCUSWIKI_PUBLIC_ORIGIN must be an exact HTTPS Tailscale Serve origin.');
+  }
+  const publishers = new Set(options.publishers);
+  if ([...publishers].some((login) => !validLogin(login))) {
+    throw new Error('FOCUSWIKI_PUBLISHERS must contain exact Tailscale user logins.');
+  }
+
+  return (req, res, next) => {
+    res.setHeader('Cache-Control', 'no-store');
+    if (!options.trustedConnections.has(req.socket)) {
+      res.status(403).json({ error: 'untrusted_proxy' });
+      return;
+    }
+    const login = singleHeader(req, 'tailscale-user-login');
+    if (!login || !validLogin(login) || req.headersDistinct['tailscale-funnel-request']) {
+      res.status(401).json({ error: 'identity_required' });
+      return;
+    }
+    // Serve may set the backend Host to localhost for Unix socket targets.
+    const forwardedHost = singleHeader(req, 'x-forwarded-host');
+    if (validateHost(forwardedHost) !== browser.host || singleHeader(req, 'x-forwarded-proto') !== 'https') {
+      res.status(403).json({ error: 'origin_blocked' });
+      return;
+    }
+    if (!['GET', 'HEAD', 'OPTIONS'].includes(req.method)) {
+      const fetchSite = req.headersDistinct['sec-fetch-site'];
+      if (singleHeader(req, 'origin') !== browser.origin ||
+          (fetchSite && (fetchSite.length !== 1 || fetchSite[0] !== 'same-origin'))) {
+        res.status(403).json({ error: 'csrf_blocked' });
+        return;
+      }
+    }
+    res.locals.browserOrigin = browser.origin;
+    recordServeIdentity(req, login, publishers.has(login));
+    next();
+  };
+}
+
+export function createHttpSecurity(options: { allowedHosts?: string[]; serveAccess?: ServeAccessOptions } = {}): RequestHandler {
   const allowed = (options.allowedHosts ?? (process.env.FOCUSWIKI_ALLOWED_HOSTS ?? '').split(','))
     .map((entry) => validateHost(entry.trim())).filter((entry): entry is string => entry !== null);
-  return (req, res, next) => {
+  const security = Router();
+  security.use((req, res, next) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Referrer-Policy', 'same-origin');
     const routePath = req.path.toLowerCase();
@@ -46,13 +108,16 @@ export function createHttpSecurity(options: { allowedHosts?: string[] } = {}): R
       res.status(400).json({ error: 'invalid_host', message: 'Invalid Host header.' });
       return;
     }
+    if (options.serveAccess) {
+      next();
+      return;
+    }
     const name = hostName(host).replace(/\.$/, '');
     const ip = name.startsWith('[') ? name.slice(1, -1) : name;
     if (!isIP(ip) && name.includes('.') && !LAN_SUFFIXES.some((suffix) => name.endsWith(suffix)) && !explicitlyAllowed(host, allowed)) {
       res.status(403).json({ error: 'host_blocked', message: 'Host is not an allowed LAN hostname.' });
       return;
     }
-    res.locals.validatedHost = host;
     if (routePath.startsWith('/api/') && ['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) {
       let blocked = req.get('sec-fetch-site')?.toLowerCase() === 'cross-site';
       const origin = req.get('origin');
@@ -71,7 +136,13 @@ export function createHttpSecurity(options: { allowedHosts?: string[] } = {}): R
       }
     }
     next();
-  };
+  });
+  if (options.serveAccess) {
+    security.use(createServeAccess(options.serveAccess));
+    security.get('/api/projects/:projectId/git/diff', proposalAuth);
+    security.post('/api/projects/:projectId/git/propose', proposalAuth);
+  }
+  return security;
 }
 
 export interface RateLimitOptions {
@@ -86,12 +157,15 @@ export function createExpensiveRequestLimiter(options: RateLimitOptions = {}): R
   const windowMs = positive(options.windowMs ?? Number(process.env.FOCUSWIKI_RATE_LIMIT_WINDOW_MS ?? 60000), 60000);
   const peers = new Map<string, number[]>();
   return (req, res, next) => {
-    if (req.method !== 'POST' || !/^\/api\/(?:projects\/(?:inspect-remote|import)|(?:settings\/)?credentials\/test|projects\/[^/]+\/git\/(?:fetch|pull))\/?$/i.test(req.path)) {
+    const read = ['GET', 'HEAD'].includes(req.method) && /^\/api\/(?:search|projects|projects\/[^/]+\/git\/diff)\/?$/i.test(req.path);
+    const write = req.method === 'POST' && /^\/api\/(?:projects\/(?:inspect-local|inspect-remote|import)|(?:settings\/)?credentials\/test|projects\/[^/]+\/git\/(?:fetch|pull))\/?$/i.test(req.path);
+    if (!read && !write && !(req.method === 'POST' && /^\/api\/projects\/[^/]+\/git\/propose\/?$/i.test(req.path))) {
       next();
       return;
     }
     const now = Date.now();
-    const key = req.socket.remoteAddress ?? 'unknown';
+    const bucket = /^\/api\/projects\/[^/]+\/git\//i.test(req.path) ? 'git' : 'browse';
+    const key = `${req.socket.remoteAddress ?? 'unknown'}:${bucket}`;
     for (const [peer, timestamps] of peers) {
       if (timestamps[timestamps.length - 1] <= now - windowMs) peers.delete(peer);
     }

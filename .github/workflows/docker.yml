@@ -18,6 +18,8 @@ jobs:
     name: Test and build image
     runs-on: ubuntu-24.04
     timeout-minutes: 25
+    outputs:
+      release-ready: ${{ steps.smoke.outputs.release-ready }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -32,14 +34,15 @@ jobs:
       - run: npm run build
       - run: npm test
       - name: Build and smoke-test Docker image
+        id: smoke
         run: |
           docker build --tag "focuswiki:${GITHUB_SHA}" .
           node scripts/docker-smoke.mjs "focuswiki:${GITHUB_SHA}"
       - name: Archive tested image
-        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && steps.smoke.outputs.release-ready == 'true'
         run: docker save "focuswiki:${GITHUB_SHA}" | gzip -1 > "$RUNNER_TEMP/focuswiki.tar.gz"
       - name: Upload tested image
-        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && steps.smoke.outputs.release-ready == 'true'
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: focuswiki-image
@@ -51,8 +54,9 @@ jobs:
 
   publish:
     name: Publish image to GCR
-    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && needs.build.outputs.release-ready == 'true'
     needs: build
+    environment: registry-publish
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:

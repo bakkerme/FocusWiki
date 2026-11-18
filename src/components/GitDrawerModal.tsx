@@ -1,21 +1,17 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
-  ArrowDown,
-  ArrowUp,
   CheckCircle2,
   Code2,
-  Download,
+  ExternalLink,
   FileDiff,
   FilePlus2,
   FileText,
   FileX2,
   GitBranch,
   GitPullRequest,
-  KeyRound,
   Layers,
   MessageSquare,
   RefreshCw,
-  Search,
   X
 } from 'lucide-react';
 import type {
@@ -26,22 +22,20 @@ import type {
   InertReviewBlock,
   MarkdownReviewEntry
 } from '../../shared/changeReview';
-import type { GitCommitSelection, GitRefsPayload, GitRepoStatus, ProjectSummary } from '../../shared/types';
+import type { ProjectSummary } from '../../shared/types';
+import { hasWorkingTreeStatus, managedGitLabel, workingTreeLabel, type ProjectGitStatusView } from '../utils/gitStatus';
 import { useModalOverlayFocus } from '../utils/overlayModal';
 
 interface Props {
   project: ProjectSummary;
   activeDocPath?: string;
-  defaultAuthorName?: string;
-  defaultAuthorEmail?: string;
-  defaultTab?: 'changes' | 'branches';
-  autoFetchOnOpen?: boolean;
-  includePrRefsOnFetch?: boolean;
-  onOpenCredentialsSettings?: (host?: string) => void;
   onClose: () => void;
-  onCommitted: () => Promise<void>;
-  onRepoSynced?: (notice: string) => Promise<void>;
+  onStatusChanged: () => Promise<unknown>;
 }
+
+type ReviewResponse = GitChangeReviewPayload & { reviewId?: string };
+const UNCONFIRMED_PROPOSAL =
+  'Could not confirm the pull request. Your files are saved locally. Retry this proposal from the same review.';
 
 function renderDiffTokens(tokens: DiffToken[]) {
   return tokens.map((tok, idx) => {
@@ -413,283 +407,145 @@ function renderMarkdownEntry(entry: MarkdownReviewEntry, index: number) {
   );
 }
 
-export function GitDrawerModal({
-  project,
-  activeDocPath,
-  defaultAuthorName,
-  defaultAuthorEmail,
-  defaultTab = 'changes',
-  autoFetchOnOpen = false,
-  includePrRefsOnFetch = true,
-  onOpenCredentialsSettings,
-  onClose,
-  onCommitted,
-  onRepoSynced
-}: Props) {
+function pullRequestLink(value: unknown): string | null {
+  if (typeof value !== 'string' || !/^https:\/\/[^/\\]/i.test(value)) return null;
+  try {
+    const url = new URL(value);
+    return url.protocol === 'https:' && !url.username && !url.password ? url.href : null;
+  } catch {
+    return null;
+  }
+}
+
+export function GitDrawerModal({ project, activeDocPath, onClose, onStatusChanged }: Props) {
   const modalRef = useRef<HTMLDivElement | null>(null);
-  const [modalTab, setModalTab] = useState<'changes' | 'branches'>(defaultTab);
-  const [loading, setLoading] = useState<boolean>(true);
-  const [refsLoading, setRefsLoading] = useState<boolean>(true);
-  const [review, setReview] = useState<GitChangeReviewPayload>({
-    status: project.git,
-    diff: '',
-    snapshotDigest: '',
-    commitScopeNote: '',
-    files: []
-  });
-  const [refsData, setRefsData] = useState<GitRefsPayload | null>(null);
-  const [branchFilter, setBranchFilter] = useState<string>('');
-  const [prNumberInput, setPrNumberInput] = useState<string>('');
-  const [syncingAction, setSyncingAction] = useState<'fetch' | 'pull' | 'checkout' | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [review, setReview] = useState<ReviewResponse | null>(null);
   const [selectedPaths, setSelectedPaths] = useState<string[]>([]);
-  const [selectedPath, setSelectedPath] = useState<string>('');
+  const [selectedPath, setSelectedPath] = useState('');
   const [viewMode, setViewMode] = useState<'rich' | 'raw-file' | 'raw-all'>('rich');
-  const [commitMessage, setCommitMessage] = useState<string>('');
-  const [authorName, setAuthorName] = useState<string>(defaultAuthorName || 'Workspace Author');
-  const [committing, setCommitting] = useState<boolean>(false);
+  const [message, setMessage] = useState('');
+  const [publishing, setPublishing] = useState(false);
+  const publishingRef = useRef(false);
+  const [retry, setRetry] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [authPromptHost, setAuthPromptHost] = useState<string | null>(null);
-  const [commitResult, setCommitResult] = useState<string | null>(null);
+  const [published, setPublished] = useState<{ sha: string; url: string | null } | null>(null);
+  const gitUrl = `/api/projects/${encodeURIComponent(project.id)}/git`;
+
+  function dismiss() {
+    if (!publishingRef.current) onClose();
+  }
 
   useModalOverlayFocus({
     active: true,
     containerRef: modalRef,
     initialFocusSelector: '.change-review-close-btn',
-    onDismiss: onClose
+    onDismiss: dismiss
   });
 
-  async function loadDiff(preferredPath?: string) {
+  const loadReview = useCallback(async (signal?: AbortSignal) => {
     setLoading(true);
+    setReview(null);
+    setSelectedPaths([]);
+    setViewMode('rich');
+    setRetry(false);
     setError(null);
-    setAuthPromptHost(null);
+
     try {
-      const res = await fetch(`/api/projects/${encodeURIComponent(project.id)}/git/diff`);
-      if (!res.ok) throw new Error(`Failed to read working-tree changes (${res.status})`);
-      const data = (await res.json()) as GitChangeReviewPayload;
+      const response = await fetch(`${gitUrl}/diff`, { cache: 'no-store', signal });
+      if (!response.ok) {
+        if (response.status === 404) {
+          throw new Error('Managed change review is unavailable for this repository. Ask your workspace operator about enrollment.');
+        }
+        throw new Error(`Unable to load working changes (${response.status}). Try starting a new review.`);
+      }
+      const data = (await response.json()) as ReviewResponse;
+      if (signal?.aborted) return;
       setReview(data);
-      setSelectedPaths(data.status.changedFiles.map((file) => file.path));
-      const candidates = data.files.map((f) => f.path);
-      setSelectedPath((prev) => {
-        if (preferredPath && candidates.includes(preferredPath)) return preferredPath;
-        if (prev && candidates.includes(prev)) return prev;
-        if (activeDocPath && candidates.includes(activeDocPath)) return activeDocPath;
-        return candidates[0] ?? '';
+      setSelectedPath((previous) => {
+        const preferred = [previous, activeDocPath].find((path) => data.files.some((file) => file.path === path));
+        return preferred ?? data.files[0]?.path ?? '';
       });
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Unable to inspect Git working tree');
+      if (!signal?.aborted) {
+        setError(err instanceof Error ? err.message : 'Unable to load working changes.');
+      }
     } finally {
-      setLoading(false);
+      if (!signal?.aborted) setLoading(false);
     }
-  }
-
-  async function loadRefs() {
-    setRefsLoading(true);
-    try {
-      const res = await fetch(`/api/projects/${encodeURIComponent(project.id)}/git/refs`);
-      if (!res.ok) return;
-      const data = (await res.json()) as GitRefsPayload;
-      setRefsData(data);
-    } catch {
-      // non-fatal
-    } finally {
-      setRefsLoading(false);
-    }
-  }
+  }, [activeDocPath, gitUrl]);
 
   useEffect(() => {
-    void loadDiff(activeDocPath);
-    void loadRefs();
-    if (autoFetchOnOpen && project.git.remoteName) {
-      void handleFetch();
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [project.id]);
+    const controller = new AbortController();
+    void loadReview(controller.signal);
+    return () => controller.abort();
+  }, [loadReview]);
 
-  async function handleFetch() {
-    if (syncingAction) return;
-    setSyncingAction('fetch');
+  const reviewId = typeof review?.reviewId === 'string' && review.reviewId.trim() ? review.reviewId : null;
+  const canPublish = !loading && !publishing && Boolean(reviewId && selectedPaths.length && message.trim());
+
+  async function publishProposal(event: React.FormEvent) {
+    event.preventDefault();
+    if (!canPublish || !reviewId || publishingRef.current) return;
+
+    publishingRef.current = true;
+    setPublishing(true);
     setError(null);
-    setAuthPromptHost(null);
+    setPublished(null);
     try {
-      const res = await fetch(`/api/projects/${encodeURIComponent(project.id)}/git/fetch`, {
+      const response = await fetch(`${gitUrl}/propose`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ includePrRefs: includePrRefsOnFetch })
+        mode: 'same-origin',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-FocusWiki-Intent': 'propose'
+        },
+        body: JSON.stringify({ reviewId, message: message.trim(), paths: selectedPaths })
       });
-      const body = (await res.json()) as GitRefsPayload & {
-        error?: string;
-        host?: string | null;
-        message?: string;
-      };
-      if (!res.ok) {
-        if (res.status === 401 || body.error === 'auth_required') {
-          setAuthPromptHost(body.host ?? null);
-        }
-        throw new Error(body.message ?? 'Fetch failed');
-      }
-      setRefsData(body);
-      setCommitResult(
-        `Fetched remote branches${body.pullRequests.length > 0 ? ` and ${body.pullRequests.length} PR refs` : ''} from ${body.remoteName ?? 'origin'}.`
-      );
-      await onCommitted();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Fetch failed');
-    } finally {
-      setSyncingAction(null);
-    }
-  }
+      const result = await response.json().catch(() => null) as { sha?: unknown; url?: unknown } | null;
 
-  async function handlePull() {
-    if (syncingAction) return;
-    setSyncingAction('pull');
-    setError(null);
-    setAuthPromptHost(null);
-    try {
-      const res = await fetch(`/api/projects/${encodeURIComponent(project.id)}/git/pull`, {
-        method: 'POST'
-      });
-      const body = (await res.json()) as {
-        status?: GitRepoStatus;
-        summary?: string;
-        updated?: boolean;
-        error?: string;
-        host?: string | null;
-        message?: string;
-      };
-      if (!res.ok) {
-        if (res.status === 401 || body.error === 'auth_required') {
-          setAuthPromptHost(body.host ?? null);
-        }
-        throw new Error(body.message ?? 'Pull failed');
+      if ([409, 410, 412].includes(response.status)) {
+        setReview(null);
+        setSelectedPaths([]);
+        setRetry(false);
+        setError('This review is stale or the upstream base moved. Start a new review and select the files again.');
+        return;
       }
-      const notice = body.summary ?? 'Pulled latest changes from remote.';
-      setCommitResult(notice);
-      await loadDiff(activeDocPath);
-      await loadRefs();
-      if (onRepoSynced) {
-        await onRepoSynced(notice);
-      } else {
-        await onCommitted();
+      if ([401, 403, 404].includes(response.status)) {
+        setError('Publishing is unavailable for this repository. Ask your workspace operator to check managed Git access.');
+        return;
       }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Pull failed');
-    } finally {
-      setSyncingAction(null);
-    }
-  }
-
-  async function handleCheckoutTarget(target: {
-    kind: 'local' | 'remote' | 'pr';
-    ref: string;
-    prNumber?: number;
-  }) {
-    if (syncingAction) return;
-    setSyncingAction('checkout');
-    setError(null);
-    setAuthPromptHost(null);
-    try {
-      const res = await fetch(`/api/projects/${encodeURIComponent(project.id)}/git/checkout`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(target)
-      });
-      const body = (await res.json()) as {
-        status?: GitRepoStatus;
-        branch?: string;
-        error?: string;
-        host?: string | null;
-        message?: string;
-      };
-      if (!res.ok) {
-        if (res.status === 401 || body.error === 'auth_required') {
-          setAuthPromptHost(body.host ?? null);
-        }
-        throw new Error(body.message ?? 'Branch checkout failed');
+      if (response.status === 400 || response.status === 422) {
+        setRetry(false);
+        setError('The server rejected this proposal. Check the message and selected files before trying again.');
+        return;
       }
-      const notice = `Switched repository to ${body.branch ?? target.ref}.`;
-      setCommitResult(notice);
-      if (target.kind === 'pr') setPrNumberInput('');
-      await loadDiff(activeDocPath);
-      await loadRefs();
-      if (onRepoSynced) {
-        await onRepoSynced(notice);
-      } else {
-        await onCommitted();
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Checkout failed');
-    } finally {
-      setSyncingAction(null);
-    }
-  }
-
-  async function handleCommit(e: React.FormEvent) {
-    e.preventDefault();
-    if (!commitMessage.trim() || review.status.isClean || !selectedPaths.length) return;
-    setCommitting(true);
-    setError(null);
-    setAuthPromptHost(null);
-    try {
-      const selection: GitCommitSelection = {
-        paths: selectedPaths.length === review.status.changedFiles.length ? undefined : selectedPaths
-      };
-      const res = await fetch(`/api/projects/${encodeURIComponent(project.id)}/git/commit`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          message: commitMessage.trim(),
-          authorName: authorName.trim() || 'Workspace Author',
-          ...(defaultAuthorEmail?.trim() ? { authorEmail: defaultAuthorEmail.trim() } : {}),
-          ...selection,
-          expectedSnapshotDigest: review.snapshotDigest
-        })
-      });
-
-      const payload = (await res.json()) as {
-        sha?: string;
-        subject?: string;
-        status?: GitRepoStatus;
-        error?: string;
-        message?: string;
-        latestReview?: GitChangeReviewPayload;
-      };
-
-      if (res.status === 409 && payload.latestReview) {
-        setReview(payload.latestReview);
-        setSelectedPaths((previous) => previous.filter((path) => payload.latestReview!.status.changedFiles.some((file) => file.path === path)));
-        const nextFiles = payload.latestReview.files.map((f) => f.path);
-        if (!nextFiles.includes(selectedPath)) {
-          setSelectedPath(nextFiles[0] ?? '');
-        }
-        setError(
-          payload.message ??
-            'Working files changed since this review opened. Inspect the updated file list before committing.'
-        );
+      if (!response.ok || typeof result?.sha !== 'string' || !result.sha.trim()) {
+        setRetry(true);
+        setError(UNCONFIRMED_PROPOSAL);
         return;
       }
 
-      if (!res.ok) {
-        throw new Error(payload.message ?? 'Git commit failed');
-      }
-
-      setCommitMessage('');
-      setCommitResult(
-        `Committed ${payload.sha}: ${payload.subject} (saved on local branch ${review.status.branch}; never pushed).`
-      );
-      await loadDiff();
-      await onCommitted();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Git commit failed');
+      setPublished({ sha: result.sha, url: pullRequestLink(result.url) });
+      setReview(null);
+      setSelectedPaths([]);
+      setMessage('');
+      setRetry(false);
+      void onStatusChanged().catch(() => undefined);
+    } catch {
+      setRetry(true);
+      setError(UNCONFIRMED_PROPOSAL);
     } finally {
-      setCommitting(false);
+      publishingRef.current = false;
+      setPublishing(false);
     }
   }
 
-  const selectedFile: ChangeFileSummary | null =
-    review.files.find((f) => f.path === selectedPath) ?? review.files[0] ?? null;
-
-  const status = review.status;
-  const changedCount = status.changedFiles.length;
+  const selectedFile = review?.files.find((file) => file.path === selectedPath) ?? review?.files[0] ?? null;
+  const projectStatus: ProjectGitStatusView = project.git;
+  const status: ProjectGitStatusView = review?.status ?? projectStatus;
+  const checkoutStatus = projectStatus.state ? projectStatus : status;
+  const changedCount = review?.files.length ?? 0;
 
   function renderFileIcon(file: ChangeFileSummary) {
     if (file.status === 'added' || file.status === 'untracked') {
@@ -833,118 +689,60 @@ export function GitDrawerModal({
     );
   }
 
-  const filterNeedle = branchFilter.trim().toLowerCase();
-  const localBranches = (refsData?.branches ?? []).filter(
-    (b) =>
-      b.kind === 'local' &&
-      (!filterNeedle ||
-        b.name.toLowerCase().includes(filterNeedle) ||
-        b.subject.toLowerCase().includes(filterNeedle))
-  );
-  const remoteBranches = (refsData?.branches ?? []).filter(
-    (b) =>
-      b.kind === 'remote' &&
-      (!filterNeedle ||
-        b.name.toLowerCase().includes(filterNeedle) ||
-        b.subject.toLowerCase().includes(filterNeedle))
-  );
-  const prRefs = (refsData?.pullRequests ?? []).filter(
-    (pr) =>
-      !filterNeedle ||
-      `#${pr.number}`.includes(filterNeedle) ||
-      pr.localBranch.toLowerCase().includes(filterNeedle) ||
-      (pr.subject ?? '').toLowerCase().includes(filterNeedle)
-  );
-  const hasRemote = Boolean(refsData?.hasRemote ?? status.remoteName);
-  const aheadCount = refsData?.ahead ?? status.ahead ?? 0;
-  const behindCount = refsData?.behind ?? status.behind ?? 0;
-
   return (
-    <div className="modal-backdrop" onClick={onClose}>
+    <div className="modal-backdrop" onClick={dismiss}>
       <div
         ref={modalRef}
         className="modal-panel change-review-modal"
-        onClick={(e) => e.stopPropagation()}
+        onClick={(event) => event.stopPropagation()}
         role="dialog"
         aria-modal="true"
-        aria-label="Repository Git sync, branches, and working changes"
+        aria-labelledby="change-review-title"
         tabIndex={-1}
       >
         <div className="change-review-header">
           <div className="change-review-title-block">
             <div className="change-review-title-row">
-              <h2>Repository Git</h2>
-              <span className="code-chip">
-                <GitBranch size={11} aria-hidden="true" /> {status.branch}
-                {status.headSha ? ` @ ${status.headSha}` : ''}
-              </span>
-              {aheadCount > 0 && (
-                <span className="code-chip git-sync-chip" title={`${aheadCount} local commit(s) ahead`}>
-                  <ArrowUp size={11} aria-hidden="true" /> {aheadCount}
-                </span>
-              )}
-              {behindCount > 0 && (
-                <span className="code-chip git-sync-chip is-behind" title={`${behindCount} commit(s) behind remote`}>
-                  <ArrowDown size={11} aria-hidden="true" /> {behindCount}
+              <h2 id="change-review-title">Review working changes</h2>
+              {status.branch && status.branch !== 'uninitialized' && (
+                <span className="code-chip">
+                  <GitBranch size={11} aria-hidden="true" /> {status.branch}
+                  {status.headSha && <span title={status.headSha}>@ {status.headSha.slice(0, 12)}</span>}
                 </span>
               )}
             </div>
             <div className="change-review-checkout" title={project.rootPath}>
-              Checkout: <code>{project.rootPath}</code>
-              {refsData?.remoteUrl && (
-                <span className="git-remote-inline" title={refsData.remoteUrl}>
-                  {' '}· Remote: <code>{refsData.remoteUrl}</code>
-                </span>
+              Checkout <code>{project.rootPath}</code>
+            </div>
+            <div className="change-review-status">
+              {managedGitLabel(projectStatus)}
+              {hasWorkingTreeStatus(checkoutStatus) && <> · {workingTreeLabel(checkoutStatus)}</>}
+              {hasWorkingTreeStatus(checkoutStatus) && Boolean(checkoutStatus.ahead || checkoutStatus.behind) && (
+                <> · {checkoutStatus.ahead ?? 0} ahead, {checkoutStatus.behind ?? 0} behind last known upstream</>
               )}
+              {projectStatus.fetchState === 'pending' && <> · Upstream check pending</>}
+              {projectStatus.fetchState === 'unavailable' && <> · Upstream check unavailable</>}
             </div>
           </div>
 
           <div className="change-review-header-actions">
-            {hasRemote && (
-              <>
-                <button
-                  type="button"
-                  className="btn btn-compact"
-                  onClick={() => void handleFetch()}
-                  disabled={Boolean(syncingAction) || committing}
-                  title="Fetch latest remote branches and pull request refs"
-                >
-                  <RefreshCw size={13} aria-hidden="true" />
-                  <span>{syncingAction === 'fetch' ? 'Fetching…' : 'Fetch'}</span>
-                </button>
-                <button
-                  type="button"
-                  className="btn btn-compact"
-                  onClick={() => void handlePull()}
-                  disabled={!status.isClean || Boolean(syncingAction) || committing}
-                  title={
-                    !status.isClean
-                      ? 'Commit or revert local changes before pulling'
-                      : 'Fast-forward pull current branch from remote'
-                  }
-                >
-                  <Download size={13} aria-hidden="true" />
-                  <span>{syncingAction === 'pull' ? 'Pulling…' : 'Pull'}</span>
-                </button>
-              </>
-            )}
             <button
               type="button"
               className="btn btn-compact"
               onClick={() => {
-                void loadDiff(selectedPath);
-                void loadRefs();
+                void loadReview();
+                void onStatusChanged().catch(() => undefined);
               }}
-              disabled={loading || committing || Boolean(syncingAction)}
-              title="Refresh Git status"
+              disabled={loading || publishing}
             >
               <RefreshCw size={13} aria-hidden="true" />
-              <span>Refresh</span>
+              <span>New review</span>
             </button>
             <button
               type="button"
               className="icon-btn panel-close-btn change-review-close-btn"
-              onClick={onClose}
+              onClick={dismiss}
+              disabled={publishing}
               aria-label="Close Git dialog"
               title="Close"
             >
@@ -953,411 +751,204 @@ export function GitDrawerModal({
           </div>
         </div>
 
-        <div className="git-modal-subbar">
-          <div className="mode-switch" role="tablist" aria-label="Git inspection view">
-            <button
-              type="button"
-              role="tab"
-              aria-selected={modalTab === 'changes'}
-              className={modalTab === 'changes' ? 'active' : ''}
-              onClick={() => setModalTab('changes')}
-            >
-              <span>Working changes{changedCount > 0 ? ` (${changedCount})` : ''}</span>
-            </button>
-            <button
-              type="button"
-              role="tab"
-              aria-selected={modalTab === 'branches'}
-              className={modalTab === 'branches' ? 'active' : ''}
-              onClick={() => setModalTab('branches')}
-            >
-              <GitBranch size={12} aria-hidden="true" />
-              <span>Branches & PRs</span>
-            </button>
-          </div>
-        </div>
-
-        {commitResult && (
-          <div className="notice-banner change-review-banner">
-            <span>{commitResult}</span>
+        {published && (
+          <div className="notice-banner change-review-banner" role="status">
+            <span>
+              Pull request published for <code>{published.sha}</code>. Check its review and merge status on your Git host.
+              {!published.url && ' The server returned no usable link.'}
+            </span>
+            {published.url && (
+              <a className="btn btn-compact" href={published.url} target="_blank" rel="noopener noreferrer">
+                Open pull request <ExternalLink size={13} aria-hidden="true" />
+              </a>
+            )}
           </div>
         )}
 
         {error && (
-          <div className="notice-banner conflict change-review-banner">
-            <span>{error}</span>
-            {authPromptHost && onOpenCredentialsSettings && (
-              <button
-                type="button"
-                className="btn btn-compact"
-                onClick={() => {
-                  onClose();
-                  onOpenCredentialsSettings(authPromptHost);
-                }}
-              >
-                <KeyRound size={12} aria-hidden="true" />
-                <span>Configure PAT for {authPromptHost}</span>
-              </button>
+          <div className="notice-banner conflict change-review-banner" role="alert">{error}</div>
+        )}
+
+        {loading ? (
+          <div className="change-review-empty" role="status">Inspecting files saved on disk…</div>
+        ) : review && changedCount > 0 ? (
+          <div className="change-review-body">
+            <aside className="change-file-rail" aria-label="Changed files in working copy">
+              <div className="change-rail-heading">
+                Changed files ({review.files.length})
+              </div>
+              <div className="change-file-list">
+                {review.files.map((file) => {
+                  const active = selectedFile?.path === file.path && viewMode !== 'raw-all';
+                  return (
+                    <div className="change-file-select-row" key={file.path}>
+                      {reviewId && (
+                        <label className="change-file-checkbox">
+                          <input
+                            type="checkbox"
+                            aria-label={`Include ${file.path} in proposal`}
+                            checked={selectedPaths.includes(file.path)}
+                            disabled={publishing || retry}
+                            onChange={(event) => {
+                              const checked = event.target.checked;
+                              setSelectedPaths((previous) => checked
+                                ? [...previous, file.path]
+                                : previous.filter((path) => path !== file.path));
+                            }}
+                          />
+                        </label>
+                      )}
+                      <button
+                        type="button"
+                        className={`change-file-item ${active ? 'active' : ''}`}
+                        onClick={() => {
+                          setSelectedPath(file.path);
+                          if (viewMode === 'raw-all') {
+                            setViewMode('rich');
+                          }
+                        }}
+                      >
+                        <div className="change-file-item-top">
+                          {renderFileIcon(file)}
+                          <span className="change-file-human">{file.humanTitle}</span>
+                        </div>
+                        <div className="change-file-path">
+                          {file.oldPath ? `${file.oldPath} → ${file.path}` : file.path}
+                        </div>
+                        <div className="change-file-meta-row">
+                          <span
+                            className={`change-status-tag is-${
+                              file.formattingOnly ? 'formatting' : file.status
+                            }`}
+                          >
+                            {file.formattingOnly ? 'formatting' : file.status}
+                          </span>
+                          <span className="change-file-summary">{file.summaryLabel}</span>
+                        </div>
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            </aside>
+
+            <section className="change-detail-pane" aria-label="Selected file comparison">
+              {selectedFile && (
+                <>
+                  <div className="change-detail-toolbar">
+                    <div className="change-detail-identity">
+                      <div className="change-detail-title">{selectedFile.humanTitle}</div>
+                      <div className="change-detail-path">
+                        {selectedFile.oldPath
+                          ? `${selectedFile.oldPath} → ${selectedFile.path}`
+                          : selectedFile.path}
+                      </div>
+                    </div>
+
+                    <div
+                      className="mode-switch change-view-switch"
+                      role="group"
+                      aria-label="Diff display mode"
+                    >
+                      <button
+                        type="button"
+                        className={viewMode === 'rich' ? 'active' : ''}
+                        aria-pressed={viewMode === 'rich'}
+                        onClick={() => setViewMode('rich')}
+                      >
+                        Rich review
+                      </button>
+                      <button
+                        type="button"
+                        className={viewMode === 'raw-file' ? 'active' : ''}
+                        aria-pressed={viewMode === 'raw-file'}
+                        onClick={() => setViewMode('raw-file')}
+                      >
+                        Raw diff
+                      </button>
+                      {review.files.length > 1 && (
+                        <button
+                          type="button"
+                          className={viewMode === 'raw-all' ? 'active' : ''}
+                          aria-pressed={viewMode === 'raw-all'}
+                          onClick={() => setViewMode('raw-all')}
+                        >
+                          All raw ({review.files.length})
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="change-detail-scroll">
+                    {viewMode === 'rich' ? (
+                      renderSelectedFileRichBody(selectedFile)
+                    ) : viewMode === 'raw-file' ? (
+                      <pre className="diff-viewer">
+                        {selectedFile.rawPatch || 'No textual git diff lines for this file.'}
+                      </pre>
+                    ) : (
+                      <pre className="diff-viewer">
+                        {review.diff || 'No uncommitted diff lines.'}
+                      </pre>
+                    )}
+                  </div>
+                </>
+              )}
+            </section>
+          </div>
+        ) : (
+          <div className="change-review-empty">
+            {review?.status.isClean === true && (
+              <CheckCircle2 size={20} aria-hidden="true" />
             )}
+            <div>
+              {review?.status.isClean === true
+                ? 'No reviewable changes in this snapshot.'
+                : review
+                  ? 'The server returned no files for review.'
+                  : 'Start a new review to compare the files currently saved on disk.'}
+              {reviewId && review?.commitScopeNote && <p>{review.commitScopeNote}</p>}
+            </div>
           </div>
         )}
 
-        {modalTab === 'changes' ? (
-          <>
-            {loading ? (
-              <div className="change-review-empty">Inspecting working copy against HEAD…</div>
-            ) : status.isClean || review.files.length === 0 ? (
-              <div className="change-review-empty">
-                <CheckCircle2 size={20} aria-hidden="true" />
-                <div>
-                  <strong>Working copy matches HEAD ({status.branch})</strong>
-                  <p>
-                    Autosaved edits, comment updates, and new components appear here before you commit.
-                  </p>
-                </div>
-              </div>
-            ) : (
-              <div className="change-review-body">
-                <aside className="change-file-rail" aria-label="Changed files in working copy">
-                  <div className="change-rail-heading">
-                    Changed files ({review.files.length})
-                  </div>
-                  <div className="change-file-list">
-                    {review.files.map((file) => {
-                      const active = selectedFile?.path === file.path && viewMode !== 'raw-all';
-                      return (
-                        <div className="change-file-select-row" key={file.path}>
-                          <input type="checkbox" aria-label={`Include ${file.path} in commit`} checked={selectedPaths.includes(file.path)} disabled={committing} onChange={(e) => {
-                            setSelectedPaths((previous) => e.target.checked ? [...previous, file.path] : previous.filter((path) => path !== file.path));
-                          }} />
-                          <button
-                            type="button"
-                            className={`change-file-item ${active ? 'active' : ''}`}
-                            onClick={() => {
-                              setSelectedPath(file.path);
-                              if (viewMode === 'raw-all') {
-                                setViewMode('rich');
-                              }
-                            }}
-                          >
-                            <div className="change-file-item-top">
-                              {renderFileIcon(file)}
-                              <span className="change-file-human">{file.humanTitle}</span>
-                            </div>
-                            <div className="change-file-path">
-                              {file.oldPath ? `${file.oldPath} → ${file.path}` : file.path}
-                            </div>
-                            <div className="change-file-meta-row">
-                              <span
-                                className={`change-status-tag is-${
-                                  file.formattingOnly ? 'formatting' : file.status
-                                }`}
-                              >
-                                {file.formattingOnly ? 'formatting' : file.status}
-                              </span>
-                              <span className="change-file-summary">{file.summaryLabel}</span>
-                            </div>
-                          </button>
-                        </div>
-                      );
-                    })}
-                  </div>
-                </aside>
-
-                <section className="change-detail-pane" aria-label="Selected file comparison">
-                  {selectedFile && (
-                    <>
-                      <div className="change-detail-toolbar">
-                        <div className="change-detail-identity">
-                          <div className="change-detail-title">{selectedFile.humanTitle}</div>
-                          <div className="change-detail-path">
-                            {selectedFile.oldPath
-                              ? `${selectedFile.oldPath} → ${selectedFile.path}`
-                              : selectedFile.path}
-                          </div>
-                        </div>
-
-                        <div
-                          className="mode-switch change-view-switch"
-                          role="group"
-                          aria-label="Diff display mode"
-                        >
-                          <button
-                            type="button"
-                            className={viewMode === 'rich' ? 'active' : ''}
-                            onClick={() => setViewMode('rich')}
-                          >
-                            Rich review
-                          </button>
-                          <button
-                            type="button"
-                            className={viewMode === 'raw-file' ? 'active' : ''}
-                            onClick={() => setViewMode('raw-file')}
-                          >
-                            Raw diff
-                          </button>
-                          {review.files.length > 1 && (
-                            <button
-                              type="button"
-                              className={viewMode === 'raw-all' ? 'active' : ''}
-                              onClick={() => setViewMode('raw-all')}
-                            >
-                              All raw ({review.files.length})
-                            </button>
-                          )}
-                        </div>
-                      </div>
-
-                      <div className="change-detail-scroll">
-                        {viewMode === 'rich' ? (
-                          renderSelectedFileRichBody(selectedFile)
-                        ) : viewMode === 'raw-file' ? (
-                          <pre className="diff-viewer">
-                            {selectedFile.rawPatch || 'No textual git diff lines for this file.'}
-                          </pre>
-                        ) : (
-                          <pre className="diff-viewer">
-                            {review.diff || 'No uncommitted diff lines.'}
-                          </pre>
-                        )}
-                      </div>
-                    </>
-                  )}
-                </section>
-              </div>
-            )}
-
-            <form className="change-commit-footer" onSubmit={(e) => void handleCommit(e)}>
-              <div className="change-commit-scope">
-                <FileDiff size={13} aria-hidden="true" />
-                <span>
-                  {`${selectedPaths.length} of ${changedCount} changed files selected. Local branch ${status.branch} (never pushes).`}
-                </span>
-              </div>
-              <div className="change-commit-inputs">
-                <input
-                  type="text"
-                  className="field-input commit-message-input"
-                  aria-label="Commit message"
-                  placeholder={
-                    status.isClean
-                      ? 'No uncommitted changes'
-                      : 'Summarize these changes for local Git history…'
-                  }
-                  value={commitMessage}
-                  onChange={(e) => setCommitMessage(e.target.value)}
-                  disabled={status.isClean || committing}
-                />
-                <input
-                  type="text"
-                  className="field-input commit-author-input"
-                  aria-label="Commit author name"
-                  placeholder="Author name"
-                  value={authorName}
-                  onChange={(e) => setAuthorName(e.target.value)}
-                  disabled={status.isClean || committing}
-                />
-                <button
-                  type="submit"
-                  className="btn btn-primary commit-submit-btn"
-                  disabled={status.isClean || !selectedPaths.length || !commitMessage.trim() || committing}
-                >
-                  {committing
-                    ? 'Committing…'
-                    : selectedPaths.length > 0
-                      ? `Commit ${selectedPaths.length} ${selectedPaths.length === 1 ? 'file' : 'files'}`
-                      : 'Commit changes'}
-                </button>
-              </div>
-            </form>
-          </>
-        ) : (
-          <div className="git-branches-panel">
-            {!status.isClean && (
-              <div className="git-dirty-guard-banner">
-                Working copy has {changedCount} uncommitted{' '}
-                {changedCount === 1 ? 'file' : 'files'}. Commit or revert changes before switching
-                branches or pulling.
-              </div>
-            )}
-
-            <div className="git-branches-toolbar">
-              <div className="search-box git-branch-filter-box">
-                <Search size={13} className="search-icon" aria-hidden="true" />
-                <input
-                  type="search"
-                  className="search-input"
-                  aria-label="Filter branches and pull requests"
-                  placeholder="Filter branches or PRs…"
-                  value={branchFilter}
-                  onChange={(e) => setBranchFilter(e.target.value)}
-                />
-              </div>
-
-              {hasRemote && (
-                <form
-                  className="git-pr-quick-form"
-                  onSubmit={(e) => {
-                    e.preventDefault();
-                    const num = Number.parseInt(prNumberInput.trim().replace(/^#/, ''), 10);
-                    if (!Number.isInteger(num) || num <= 0) {
-                      setError('Enter a positive pull request number.');
-                      return;
-                    }
-                    void handleCheckoutTarget({ kind: 'pr', ref: `pr/${num}`, prNumber: num });
-                  }}
-                >
-                  <input
-                    type="text"
-                    className="field-input field-code git-pr-input"
-                    aria-label="Pull request number"
-                    placeholder="PR #"
-                    value={prNumberInput}
-                    onChange={(e) => setPrNumberInput(e.target.value)}
-                    disabled={!status.isClean || Boolean(syncingAction)}
-                  />
-                  <button
-                    type="submit"
-                    className="btn btn-compact"
-                    disabled={!status.isClean || !prNumberInput.trim() || Boolean(syncingAction)}
-                    title="Fetch and check out pull request by number"
-                  >
-                    <GitPullRequest size={13} aria-hidden="true" />
-                    <span>Checkout PR</span>
-                  </button>
-                </form>
-              )}
+        {review && !reviewId && changedCount > 0 && (
+          <div className="change-proposal-footer">
+            <div className="change-proposal-scope">
+              This review is available for inspection. Ask your workspace operator to enable publishing.
             </div>
-
-            {refsLoading ? (
-              <div className="change-review-empty">Loading branches and pull requests…</div>
-            ) : (
-              <div className="git-refs-scroll">
-                <section className="git-ref-group">
-                  <div className="git-ref-group-heading">
-                    <span>Pull requests ({prRefs.length})</span>
-                    {hasRemote && (
-                      <span className="git-ref-group-hint">
-                        Click Fetch above to refresh PR heads from remote
-                      </span>
-                    )}
-                  </div>
-                  {prRefs.length === 0 ? (
-                    <div className="git-ref-empty">
-                      No fetched PR branches yet. Use Fetch or enter a PR # above.
-                    </div>
-                  ) : (
-                    <div className="git-ref-list">
-                      {prRefs.map((pr) => (
-                        <div
-                          key={pr.ref}
-                          className={`git-ref-row ${pr.checkedOut ? 'is-current' : ''}`}
-                        >
-                          <div className="git-ref-main">
-                            <div className="git-ref-title">
-                              <GitPullRequest size={13} aria-hidden="true" />
-                              <strong>PR #{pr.number}</strong>
-                              <span className="code-chip">{pr.sha}</span>
-                              {pr.checkedOut && <span className="git-current-pill">Active</span>}
-                            </div>
-                            {pr.subject && <div className="git-ref-subject">{pr.subject}</div>}
-                          </div>
-                          {!pr.checkedOut && (
-                            <button
-                              type="button"
-                              className="btn btn-compact"
-                              disabled={!status.isClean || Boolean(syncingAction)}
-                              onClick={() =>
-                                void handleCheckoutTarget({
-                                  kind: 'pr',
-                                  ref: pr.localBranch,
-                                  prNumber: pr.number
-                                })
-                              }
-                            >
-                              Switch
-                            </button>
-                          )}
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </section>
-
-                <section className="git-ref-group">
-                  <div className="git-ref-group-heading">
-                    <span>Local branches ({localBranches.length})</span>
-                  </div>
-                  {localBranches.length === 0 ? (
-                    <div className="git-ref-empty">No matching local branches.</div>
-                  ) : (
-                    <div className="git-ref-list">
-                      {localBranches.map((br) => (
-                        <div
-                          key={br.name}
-                          className={`git-ref-row ${br.isCurrent ? 'is-current' : ''}`}
-                        >
-                          <div className="git-ref-main">
-                            <div className="git-ref-title">
-                              <GitBranch size={13} aria-hidden="true" />
-                              <code>{br.name}</code>
-                              <span className="code-chip">{br.sha}</span>
-                              {br.isCurrent && <span className="git-current-pill">Active</span>}
-                            </div>
-                            {br.subject && <div className="git-ref-subject">{br.subject}</div>}
-                          </div>
-                          {!br.isCurrent && (
-                            <button
-                              type="button"
-                              className="btn btn-compact"
-                              disabled={!status.isClean || Boolean(syncingAction)}
-                              onClick={() =>
-                                void handleCheckoutTarget({ kind: 'local', ref: br.name })
-                              }
-                            >
-                              Switch
-                            </button>
-                          )}
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </section>
-
-                {remoteBranches.length > 0 && (
-                  <section className="git-ref-group">
-                    <div className="git-ref-group-heading">
-                      <span>Remote branches ({remoteBranches.length})</span>
-                    </div>
-                    <div className="git-ref-list">
-                      {remoteBranches.map((br) => (
-                        <div key={br.name} className="git-ref-row">
-                          <div className="git-ref-main">
-                            <div className="git-ref-title">
-                              <GitBranch size={13} aria-hidden="true" />
-                              <code>{br.name}</code>
-                              <span className="code-chip">{br.sha}</span>
-                            </div>
-                            {br.subject && <div className="git-ref-subject">{br.subject}</div>}
-                          </div>
-                          <button
-                            type="button"
-                            className="btn btn-compact"
-                            disabled={!status.isClean || Boolean(syncingAction)}
-                            onClick={() =>
-                              void handleCheckoutTarget({ kind: 'remote', ref: br.name })
-                            }
-                          >
-                            Checkout
-                          </button>
-                        </div>
-                      ))}
-                    </div>
-                  </section>
-                )}
-              </div>
-            )}
           </div>
+        )}
+        {reviewId && changedCount > 0 && (
+          <form className="change-proposal-footer" onSubmit={(event) => void publishProposal(event)}>
+            <div className="change-proposal-scope" id="proposal-scope">
+              <FileDiff size={13} aria-hidden="true" />
+              <span>
+                {selectedPaths.length} of {changedCount} selected. Saved changes are local until you propose them.
+              </span>
+            </div>
+            {review?.commitScopeNote && <div className="change-proposal-note">{review.commitScopeNote}</div>}
+            <div className="change-proposal-inputs">
+              <input
+                type="text"
+                className="field-input"
+                aria-label="Proposal message"
+                placeholder="Summarize the selected changes"
+                value={message}
+                onChange={(event) => setMessage(event.target.value)}
+                disabled={publishing || retry}
+              />
+              <button
+                type="submit"
+                className="btn btn-primary"
+                disabled={!canPublish}
+                aria-describedby="proposal-scope"
+              >
+                <GitPullRequest size={14} aria-hidden="true" />
+                {publishing ? 'Proposing…' : retry ? 'Retry proposal' : 'Propose changes'}
+              </button>
+            </div>
+          </form>
         )}
       </div>
     </div>

@@ -125,9 +125,12 @@ describe('LAN HTTP security, safe assets, and concurrent writes', () => {
   it('grants opaque-origin asset CORS only with a valid URL for that project', async () => {
     const otherRepo = path.join(root, 'other-repo');
     fs.cpSync(repo, otherRepo, { recursive: true });
-    const otherProject = hub.registry.add({
+    const otherProject = {
       id: 'other', name: 'Other Observatory', description: '', rootPath: otherRepo, defaultDoc: 'README.md'
-    });
+    };
+    const projects = hub.registry.list();
+    await hub.close();
+    hub = makeHub({ projects: [...projects, otherProject] });
     fs.writeFileSync(path.join(repo, 'embeds/data.mjs'), 'export const cometCount = 2;');
     fs.writeFileSync(path.join(otherRepo, 'embeds/data.mjs'), 'export const cometCount = 3;');
 
@@ -147,9 +150,8 @@ describe('LAN HTTP security, safe assets, and concurrent writes', () => {
     const otherOrigin = await request(hub.app).get(moduleUrl).set('Origin', 'https://elsewhere.example').expect(200);
     expect(otherOrigin.headers['access-control-allow-origin']).toBeUndefined();
     await request(hub.app).get(moduleUrl.replace('/fixture/', '/other/')).set('Origin', 'null').expect(403);
-    hub.registry.remove('fixture');
-    hub.registry.remove('other');
-    hub.registry.add({ ...otherProject, id: 'fixture' });
+    await hub.close();
+    hub = makeHub({ projects: [{ ...otherProject, id: 'fixture' }] });
     await request(hub.app).get(moduleUrl).set('Origin', 'null').expect(403);
   });
 
@@ -178,27 +180,17 @@ describe('LAN HTTP security, safe assets, and concurrent writes', () => {
     });
   });
 
-  it('omits redirected embed roots from local inspection, import and discovery', async () => {
-    const allowed = path.join(root, 'imports');
-    const imported = path.join(allowed, 'moon-catalog');
-    const elsewhere = path.join(root, 'unregistered');
-    fs.mkdirSync(imported, { recursive: true });
-    fs.mkdirSync(elsewhere);
-    fs.writeFileSync(path.join(imported, 'README.md'), '# Moon Catalog');
-    fs.writeFileSync(path.join(elsewhere, 'index.html'), '<p>Fictional moon</p>');
-    fs.symlinkSync(elsewhere, path.join(imported, 'embeds'));
-
-    await hub.close();
-    hub = makeHub({ allowedImportRoots: [allowed] });
-    const inspection = await request(hub.app).post('/api/projects/inspect-local').send({ path: imported }).expect(200);
-    expect(inspection.body.embedCount).toBe(0);
-    const result = await request(hub.app).post('/api/projects/import')
-      .send({ mode: 'local', path: imported, id: 'moon-catalog' }).expect(201);
-    expect(result.body.project.embeds).toEqual([]);
-    await request(hub.app).get('/embed-sandbox/moon-catalog/embeds/index.html').expect(403);
-    await request(hub.app).post('/api/projects/moon-catalog/embeds')
-      .send({ src: 'embeds/new.html', source: '<p>New fixture</p>' }).expect(403);
-    expect(fs.readdirSync(elsewhere)).toEqual(['index.html']);
+  it('omits redirected embed roots in enrolled projects', async () => {
+    const external = path.join(root, 'unregistered');
+    fs.mkdirSync(external);
+    fs.writeFileSync(path.join(external, 'index.html'), '<p>Fictional moon</p>');
+    fs.rmSync(path.join(repo, 'embeds'), { recursive: true });
+    fs.symlinkSync(external, path.join(repo, 'embeds'));
+    const list = await request(hub.app).get('/api/projects').expect(200);
+    expect(list.body.projects[0].embeds).toEqual([]);
+    await request(hub.app).get('/embed-sandbox/fixture/embeds/index.html').expect(403);
+    await request(hub.app).post('/api/projects/fixture/embeds').send({ src: 'embeds/new.html', source: 'Unused' }).expect(403);
+    expect(fs.readdirSync(external)).toEqual(['index.html']);
   });
 
   it('skips symlinked embed entries and rejects internal, external and missing-target aliases', async () => {
@@ -227,33 +219,11 @@ describe('LAN HTTP security, safe assets, and concurrent writes', () => {
     expect(fs.existsSync(path.join(component, 'missing.txt'))).toBe(false);
   });
 
-  it('denies local imports and file remotes for an explicitly empty import allowlist', async () => {
-    await hub.close();
-    hub = makeHub({
-      configPath: path.join(root, 'config/projects.json'),
-      managedReposDir: path.join(root, 'managed'),
-      allowedImportRoots: []
-    });
-    expect(hub.registry.allowedImportRoots).toEqual([]);
-    for (const candidate of [repo, path.join(root, 'absent')]) {
-      await request(hub.app).post('/api/projects/inspect-local').send({ path: candidate }).expect(403);
-      await request(hub.app).post('/api/projects/import').send({ mode: 'local', path: candidate }).expect(403);
-    }
-    await request(hub.app).post('/api/projects/inspect-remote').send({ url: pathToFileURL(repo).href }).expect(403);
+  it('refuses legacy local and file remote imports', async () => {
+    await request(hub.app).post('/api/projects/inspect-local').send({ path: repo }).expect(410);
+    await request(hub.app).post('/api/projects/import').send({ mode: 'local', path: repo }).expect(410);
+    await request(hub.app).post('/api/projects/inspect-remote').send({ url: pathToFileURL(repo).href }).expect(410);
     await request(hub.app).get(docUrl).expect(200);
-  });
-
-  it('defaults local imports to the managed repository directory', async () => {
-    const managed = path.join(root, 'managed');
-    const projectPath = path.join(managed, 'moon-catalog');
-    fs.mkdirSync(projectPath, { recursive: true });
-    fs.writeFileSync(path.join(projectPath, 'README.md'), '# Moon Catalog');
-    await hub.close();
-    hub = makeHub({ managedReposDir: managed, configPath: path.join(root, 'config/projects.json') });
-    expect(hub.registry.allowedImportRoots).toEqual([fs.realpathSync(managed)]);
-    await request(hub.app).post('/api/projects/inspect-local').send({ path: repo }).expect(403);
-    await request(hub.app).post('/api/projects/import').send({ mode: 'local', path: projectPath }).expect(201);
-    await request(hub.app).get('/api/projects/moon-catalog/doc').expect(200);
   });
 
   it('adds a compatible SPA CSP and baseline security headers to HTML', async () => {
@@ -272,9 +242,9 @@ describe('LAN HTTP security, safe assets, and concurrent writes', () => {
   it('bounds expensive API calls per peer and returns Retry-After without throttling health reads', async () => {
     await hub.close();
     hub = makeHub({ rateLimit: { maxRequests: 2, windowMs: 60000 } });
-    await request(hub.app).post('/api/projects/import').send({ mode: 'invalid' }).expect(400);
-    await request(hub.app).post('/api/projects/missing/git/fetch').send({}).expect(404);
-    const response = await request(hub.app).post('/api/projects/missing/git/pull')
+    await request(hub.app).get('/api/projects/missing/git/diff').expect(404);
+    await request(hub.app).post('/api/projects/missing/git/propose').send({}).expect(404);
+    const response = await request(hub.app).post('/api/projects/missing/git/propose')
       .set('X-Forwarded-For', '203.0.113.90').send({}).expect(429);
     expect(Number(response.headers['retry-after'])).toBeGreaterThan(0);
     await request(hub.app).get('/api/health').expect(200);
@@ -398,12 +368,12 @@ describe('LAN HTTP security, safe assets, and concurrent writes', () => {
     expect(matches.body.results).toHaveLength(60);
   });
 
-  it('returns safe JSON and logs unexpected internal errors with stack traces', async () => {
+  it('returns safe JSON and avoids logging private request failure details', async () => {
     const log = vi.spyOn(console, 'error').mockImplementation(() => {});
     vi.spyOn(hub.registry, 'list').mockImplementation(() => { throw new Error('private internal detail'); });
     const response = await request(hub.app).get('/api/projects').expect(500);
     expect(response.body).toEqual({ error: 'server_error', message: 'Unexpected server error.' });
-    expect(log).toHaveBeenCalledWith(expect.any(String), expect.stringContaining('Error: private internal detail\n'));
+    expect(log).toHaveBeenCalledWith('[focuswiki] Unexpected request error.');
   });
 
   it('queues async same-key operations, permits independent keys, and recovers after rejection', async () => {

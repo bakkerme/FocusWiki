@@ -69,16 +69,15 @@ describe('Hub API & Repository Integration (Acceptance Scenarios 1–9)', () => 
     fs.rmSync(tmpRoot, { recursive: true, force: true });
   });
 
-  it('lists projects with Git branch/clean state, seeded docs, embeds, and cross-project search', async () => {
+  it('lists projects with Git unavailable flags, seeded docs, embeds, and cross-project search', async () => {
     const health = await request(hub.app).get('/healthz').expect(200);
-    expect(health.body).toMatchObject({ status: 'ok', projectCount: 2 });
+    expect(health.body).toEqual({ ok: true });
 
     const listRes = await request(hub.app).get('/api/projects').expect(200);
     expect(listRes.body.projects).toHaveLength(2);
 
     const rpg = listRes.body.projects.find((p: { id: string }) => p.id === 'cindervault-rpg');
-    expect(rpg.git.branch).toBe('main');
-    expect(rpg.git.isClean).toBe(true);
+    expect(rpg.git).toMatchObject({ state: 'unmanaged', isClean: null });
     expect(rpg.embeds.map((e: { src: string }) => e.src)).toEqual([
       'embeds/difficulty-playground/index.html',
       'embeds/state-explorer/index.html',
@@ -133,8 +132,8 @@ describe('Hub API & Repository Integration (Acceptance Scenarios 1–9)', () => 
     // Uncommitted working tree changes show up before any git commit
     const projRes = await request(hub.app).get('/api/projects').expect(200);
     const rpg = projRes.body.projects.find((p: { id: string }) => p.id === 'cindervault-rpg');
-    expect(rpg.git.isClean).toBe(false);
-    expect(rpg.git.changedFiles.some((f: { path: string }) => f.path === 'docs/vault-breach-action.md')).toBe(true);
+    expect(rpg.git).toMatchObject({ state: 'unmanaged', isClean: null });
+    expect(rpg.git.changedFiles).toEqual([]);
   });
 
   it('supports adding a fourth project-authored component using only project files and documented syntax (Scenario 3)', async () => {
@@ -293,85 +292,13 @@ describe('Hub API & Repository Integration (Acceptance Scenarios 1–9)', () => 
     expect(fs.readFileSync(savedCopyAbs, 'utf8')).toBe(staleEditorVersion);
   });
 
-  it('exposes rich + raw Git diff, guards stale snapshots, and commits locally without forced OpenBot attribution (Scenario 8)', async () => {
-    const doc = await request(hub.app)
-      .get('/api/projects/helios-lab/doc?path=docs/cold-start-runbook.md')
-      .expect(200);
-
-    await request(hub.app)
-      .put('/api/projects/helios-lab/doc')
-      .send({
-        path: 'docs/cold-start-runbook.md',
-        markdown: `${doc.body.markdown}\n## Thermal Soak Note\n\nAllow 15 minutes before alignment.\n`,
-        baseRevision: doc.body.revision
-      })
-      .expect(200);
-
-    const diffRes = await request(hub.app).get('/api/projects/helios-lab/git/diff').expect(200);
-    expect(diffRes.body.status.isClean).toBe(false);
-    expect(diffRes.body.diff).toContain('+Allow 15 minutes before alignment.');
-    expect(diffRes.body.snapshotDigest).toBeTruthy();
-    expect(diffRes.body.files).toHaveLength(1);
-    expect(diffRes.body.files[0].category).toBe('markdown');
-    expect(diffRes.body.files[0].markdownReview.substantiveCount).toBeGreaterThanOrEqual(1);
-
-    // Concurrent working-tree file added after opening review -> stale expectedSnapshotDigest returns 409
-    fs.writeFileSync(path.join(labDir, 'docs/new-checklist.md'), '# Checklist\n\n- [ ] Check UPS\n', 'utf8');
-    const staleCommit = await request(hub.app)
-      .post('/api/projects/helios-lab/git/commit')
-      .send({
-        message: 'Document 15-minute thermal soak window',
-        authorName: 'Bench Reviewer',
-        expectedSnapshotDigest: diffRes.body.snapshotDigest
-      })
-      .expect(409);
-    expect(staleCommit.body.error).toBe('working_tree_changed');
-    expect(staleCommit.body.latestReview.files).toHaveLength(2);
-
-    // Commit with refreshed snapshotDigest succeeds with zero forced OpenBot trailer
-    const commitRes = await request(hub.app)
-      .post('/api/projects/helios-lab/git/commit')
-      .send({
-        message: 'Document 15-minute thermal soak window',
-        authorName: 'Bench Reviewer',
-        expectedSnapshotDigest: staleCommit.body.latestReview.snapshotDigest
-      })
-      .expect(200);
-
-    expect(commitRes.body.status.isClean).toBe(true);
-
-    const gitLogBody = execFileSync('git', ['log', '-1', '--format=%B'], {
-      cwd: labDir,
-      encoding: 'utf8'
-    });
-    const gitLogAuthor = execFileSync('git', ['log', '-1', '--format=%an <%ae>'], {
-      cwd: labDir,
-      encoding: 'utf8'
-    }).trim();
-
-    expect(gitLogBody.trim()).toBe('Document 15-minute thermal soak window');
-    expect(gitLogBody).not.toContain('OpenBot');
-    expect(gitLogBody).not.toContain('Co-authored-by:');
-    expect(gitLogAuthor).toBe('Bench Reviewer <test@local.invalid>');
-
-    // Intentional user-supplied trailers remain preserved verbatim
-    fs.writeFileSync(path.join(labDir, 'docs/new-checklist.md'), '# Checklist\n\n- [x] Check UPS\n', 'utf8');
-    const customTrailerMsg =
-      'Complete UPS verification\n\nCo-authored-by: Alex Collaborator <alex@example.org>';
-    await request(hub.app)
-      .post('/api/projects/helios-lab/git/commit')
-      .send({
-        message: customTrailerMsg,
-        authorName: 'Bench Reviewer'
-      })
-      .expect(200);
-
-    const trailerLog = execFileSync('git', ['log', '-1', '--format=%B'], {
-      cwd: labDir,
-      encoding: 'utf8'
-    });
-    expect(trailerLog.trim()).toBe(customTrailerMsg);
-    expect(trailerLog).not.toContain('OpenBot');
+  it('keeps fictional local documents available with remote Git actions disabled', async () => {
+    await request(hub.app).get('/api/projects/helios-lab/doc?path=docs/cold-start-runbook.md').expect(200);
+    await request(hub.app).get('/api/projects/helios-lab/git/diff').expect(404);
+    await request(hub.app).post('/api/projects/helios-lab/git/commit').send({ message: 'Fictional draft' }).expect(410);
+    await request(hub.app).post('/api/projects/helios-lab/git/propose').send({
+      reviewId: 'fictional-review', message: 'Fictional draft', paths: ['docs/cold-start-runbook.md']
+    }).expect(404);
   });
 
   it('rejects path traversal, .git exposure, secret filenames, and unregistered projects (Scenario 9)', async () => {

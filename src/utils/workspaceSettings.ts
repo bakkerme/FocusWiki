@@ -1,14 +1,8 @@
 export type ThemeMode = 'system' | 'light' | 'dark';
-export type GitDrawerDefaultTab = 'changes' | 'branches';
 
 export interface WorkspaceSettings {
   themeMode: ThemeMode;
   reviewerName: string;
-  commitAuthorName: string;
-  commitAuthorEmail: string;
-  defaultGitTab: GitDrawerDefaultTab;
-  autoFetchOnGitOpen: boolean;
-  includePrRefsOnFetch: boolean;
 }
 
 export const WORKSPACE_SETTINGS_STORAGE_KEY = 'focus:workspace-settings:v1';
@@ -16,12 +10,7 @@ export const WORKSPACE_SETTINGS_VERSION = 1;
 
 export const DEFAULT_WORKSPACE_SETTINGS: WorkspaceSettings = {
   themeMode: 'system',
-  reviewerName: 'Reviewer',
-  commitAuthorName: 'Workspace Author',
-  commitAuthorEmail: '',
-  defaultGitTab: 'changes',
-  autoFetchOnGitOpen: false,
-  includePrRefsOnFetch: true
+  reviewerName: 'Reviewer'
 };
 
 export const THEME_MODE_OPTIONS: readonly { id: ThemeMode; label: string; description: string }[] = [
@@ -32,10 +21,6 @@ export const THEME_MODE_OPTIONS: readonly { id: ThemeMode; label: string; descri
 
 function isValidThemeMode(val: unknown): val is ThemeMode {
   return val === 'system' || val === 'light' || val === 'dark';
-}
-
-function isValidGitTab(val: unknown): val is GitDrawerDefaultTab {
-  return val === 'changes' || val === 'branches';
 }
 
 function sanitizeString(val: unknown, fallback: string, maxLen = 120): string {
@@ -71,32 +56,11 @@ export function loadWorkspaceSettings(
       return { ...DEFAULT_WORKSPACE_SETTINGS };
     }
     const reviewer = sanitizeString(parsed.reviewerName, DEFAULT_WORKSPACE_SETTINGS.reviewerName);
-    const commitName = sanitizeString(
-      parsed.commitAuthorName,
-      DEFAULT_WORKSPACE_SETTINGS.commitAuthorName
-    );
-    const commitEmail = sanitizeString(
-      parsed.commitAuthorEmail,
-      DEFAULT_WORKSPACE_SETTINGS.commitAuthorEmail
-    );
     return {
       themeMode: isValidThemeMode(parsed.themeMode)
         ? parsed.themeMode
         : DEFAULT_WORKSPACE_SETTINGS.themeMode,
-      reviewerName: reviewer.trim() || DEFAULT_WORKSPACE_SETTINGS.reviewerName,
-      commitAuthorName: commitName.trim() || DEFAULT_WORKSPACE_SETTINGS.commitAuthorName,
-      commitAuthorEmail: commitEmail.trim(),
-      defaultGitTab: isValidGitTab(parsed.defaultGitTab)
-        ? parsed.defaultGitTab
-        : DEFAULT_WORKSPACE_SETTINGS.defaultGitTab,
-      autoFetchOnGitOpen:
-        typeof parsed.autoFetchOnGitOpen === 'boolean'
-          ? parsed.autoFetchOnGitOpen
-          : DEFAULT_WORKSPACE_SETTINGS.autoFetchOnGitOpen,
-      includePrRefsOnFetch:
-        typeof parsed.includePrRefsOnFetch === 'boolean'
-          ? parsed.includePrRefsOnFetch
-          : DEFAULT_WORKSPACE_SETTINGS.includePrRefsOnFetch
+      reviewerName: reviewer.trim() || DEFAULT_WORKSPACE_SETTINGS.reviewerName
     };
   } catch {
     return { ...DEFAULT_WORKSPACE_SETTINGS };
@@ -118,21 +82,7 @@ export function saveWorkspaceSettings(
         : DEFAULT_WORKSPACE_SETTINGS.themeMode,
       reviewerName:
         sanitizeString(settings.reviewerName, DEFAULT_WORKSPACE_SETTINGS.reviewerName).trim() ||
-        DEFAULT_WORKSPACE_SETTINGS.reviewerName,
-      commitAuthorName:
-        sanitizeString(
-          settings.commitAuthorName,
-          DEFAULT_WORKSPACE_SETTINGS.commitAuthorName
-        ).trim() || DEFAULT_WORKSPACE_SETTINGS.commitAuthorName,
-      commitAuthorEmail: sanitizeString(
-        settings.commitAuthorEmail,
-        DEFAULT_WORKSPACE_SETTINGS.commitAuthorEmail
-      ).trim(),
-      defaultGitTab: isValidGitTab(settings.defaultGitTab)
-        ? settings.defaultGitTab
-        : DEFAULT_WORKSPACE_SETTINGS.defaultGitTab,
-      autoFetchOnGitOpen: Boolean(settings.autoFetchOnGitOpen),
-      includePrRefsOnFetch: Boolean(settings.includePrRefsOnFetch)
+        DEFAULT_WORKSPACE_SETTINGS.reviewerName
     };
     storage.setItem(WORKSPACE_SETTINGS_STORAGE_KEY, JSON.stringify(payload));
     return true;

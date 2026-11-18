@@ -1,20 +1,25 @@
 #!/bin/sh
 set -eu
 
-umask 0007
-
-mkdir -p /app/config /app/repos /app/sample-repos
-
-if [ ! -f "/app/config/projects.json" ] && [ -f "/app/config/projects.default.json" ]; then
-  echo "[entrypoint] Initializing /app/config/projects.json from projects.default.json..."
-  mkdir -p /app/config
-  cp /app/config/projects.default.json /app/config/projects.json
-  chmod 0660 /app/config/projects.json
-fi
-
-if [ ! -d "/app/sample-repos/cindervault-rpg/.git" ] || [ ! -d "/app/sample-repos/helios-lab/.git" ]; then
-  echo "[entrypoint] Initializing sample Git repositories in /app/sample-repos..."
-  node dist/server/scripts/seed-repos.js
-fi
-
-exec node dist/server/server/index.js
+case "${1:-web}" in
+  web)
+    umask 0007
+    exec node dist/server/server/index.js
+    ;;
+  git-worker)
+    umask 0077
+    if [ ! -f dist/server/server/gitRunner.js ]; then
+      echo '[focuswiki] Git worker module is missing from this image.' >&2
+      exit 1
+    fi
+    : "${FOCUSWIKI_GIT_SOCKET:?}" "${FOCUSWIKI_ENROLLMENT_FILE:?}" \
+      "${FOCUSWIKI_REPOS_DIR:?}" "${FOCUSWIKI_GIT_STATE_DIR:?}" \
+      "${FOCUSWIKI_GITHUB_APP_KEY_FILE:?}" "${FOCUSWIKI_GITHUB_APP_ID:?}" \
+      "${FOCUSWIKI_GITHUB_INSTALLATION_ID:?}"
+    exec node dist/server/server/gitRunner.js
+    ;;
+  *)
+    echo '[focuswiki] Expected web or git-worker.' >&2
+    exit 2
+    ;;
+esac

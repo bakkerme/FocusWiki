@@ -173,3 +173,34 @@ height: 380
     expect(codeRev.hunks.length).toBeGreaterThan(0);
   });
 });
+
+describe('Markdown comparison limits', () => {
+  it('uses a source-only review when block or table alignment exceeds the matrix budget', () => {
+    const paragraphs = (prefix: string) => Array.from({ length: 450 }, (_, i) => prefix + i).join('\n\n');
+    const table = (prefix: string) => '| Page |\n| --- |\n' +
+      Array.from({ length: 450 }, (_, i) => `| ${prefix}${i} |`).join('\n');
+
+    for (const document of [paragraphs, table]) {
+      expect(buildMarkdownFileReview(document('Old '), document('New '))).toMatchObject({
+        limited: 'source-only', entries: [], formattingOnlyCount: 0
+      });
+    }
+  });
+
+  it('keeps block changes when an individual word diff or the shared word budget is exhausted', () => {
+    const paragraph = (word: string, count: number) => Array(count).fill(word).join(' ');
+    const largeWordDiff = buildMarkdownFileReview(paragraph('elm', 230), paragraph('oak', 230));
+    expect(largeWordDiff).toMatchObject({ limited: 'word-detail', substantiveCount: 1 });
+    expect(largeWordDiff.entries).toMatchObject([{ type: 'modified', wordDiff: [{ op: 'del' }, { op: 'add' }] }]);
+
+    const blocks = (word: string) => Array.from({ length: 5 }, (_, i) => `${i} ${paragraph(word, 160)}`).join('\n\n');
+    const shared = buildMarkdownFileReview(blocks('elm'), blocks('oak'));
+    expect(shared).toMatchObject({ limited: 'word-detail', substantiveCount: 5 });
+    expect(shared.entries[0]).toMatchObject({ type: 'modified', wordDiff: expect.arrayContaining([{ op: 'equal', text: '0 ' }]) });
+    expect(shared.entries[4]).toMatchObject({ type: 'modified', wordDiff: [{ op: 'del' }, { op: 'add' }] });
+  });
+
+  it('bounds source bytes for one-sided previews', () => {
+    expect(buildMarkdownFileReview(null, 'é'.repeat(33_000))).toMatchObject({ limited: 'source-only', entries: [] });
+  });
+});

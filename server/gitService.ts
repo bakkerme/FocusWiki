@@ -7,6 +7,7 @@ import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { PathBoundaryError, resolveSafeProjectPath } from './pathGuard.js';
 import path from 'node:path';
+import { readRepositoryFile } from './repositoryScan.js';
 import { promisify } from 'node:util';
 import {
   type ChangeFileSummary,
@@ -34,6 +35,15 @@ import {
 const execFileAsync = promisify(execFile);
 
 const MAX_REVIEW_FILE_BYTES = 256 * 1024;
+const MAX_REVIEW_FILES = 48;
+const MAX_REVIEW_INPUT_BYTES = 8 * 1024 * 1024;
+const MAX_REVIEW_PATCH_BYTES = 4 * 1024 * 1024;
+const MAX_UNTRACKED_PATCH_BYTES = 16_000;
+
+function reviewLimitError(): GitOperationError {
+  return new GitOperationError('This working tree exceeds the change review limits. Use Git locally to review and commit these changes.', 413);
+}
+
 const GIT_NETWORK_TIMEOUT_MS = 60_000;
 
 export class WorkingTreeSnapshotMismatchError extends Error {
@@ -103,6 +113,8 @@ export function buildGitEnv(askpass?: string): NodeJS.ProcessEnv {
 interface RunGitOptions {
   scopeSafeDir?: boolean;
   timeoutMs?: number;
+  maxBuffer?: number;
+  signal?: AbortSignal;
   credential?: ResolvedGitCredential | null;
   remoteUrl?: string;
   allowedFileRoots?: string[];
@@ -154,6 +166,7 @@ async function runGit(
       if (rewrites.trim()) throw new GitOperationError('Repository URL rewrite rules are not permitted for remote operations.', 403);
     }
   }
+  options.signal?.throwIfAborted();
   let credentialDir: string | undefined;
   const credential = options.credential;
   const secrets = credential ? [credential.token, credential.username] : [];
@@ -176,8 +189,8 @@ async function runGit(
       fs.writeFileSync(askpass, '#!/bin/sh\ncase "$1" in\n*sername*) cat "$(dirname "$0")/username" ;;\n*) cat "$(dirname "$0")/token" ;;\nesac\n', { mode: 0o700 });
     }
     const { stdout } = await execFileAsync('git', buildGitArgs(cwd, args, options), {
-      cwd, encoding: 'buffer', maxBuffer: 8 * 1024 * 1024,
-      timeout: options.timeoutMs ?? 30_000, env: buildGitEnv(askpass)
+      cwd, encoding: 'buffer', maxBuffer: options.maxBuffer ?? 8 * 1024 * 1024,
+      timeout: options.timeoutMs ?? 30_000, signal: options.signal, env: buildGitEnv(askpass)
     });
     return stdout;
   } catch (err) {
@@ -459,26 +472,26 @@ function formatPorcelainStatus(
   return 'modified';
 }
 
-async function resolvePrimaryRemote(projectRoot: string): Promise<{ name: string | null; url: string | null }> {
+async function resolvePrimaryRemote(projectRoot: string, options?: RunGitOptions): Promise<{ name: string | null; url: string | null }> {
   try {
-    const remotesRaw = (await runGitText(projectRoot, ['remote'])).trim();
+    const remotesRaw = (await runGitText(projectRoot, ['remote'], options)).trim();
     const remotes = remotesRaw
       .split(/\r?\n/)
       .map((r) => r.trim())
       .filter(Boolean);
     if (remotes.length === 0) return { name: null, url: null };
     const chosen = remotes.includes('origin') ? 'origin' : remotes[0];
-    const urlRaw = (await runGitText(projectRoot, ['remote', 'get-url', chosen])).trim();
+    const urlRaw = (await runGitText(projectRoot, ['remote', 'get-url', chosen], options)).trim();
     return { name: chosen, url: urlRaw ? sanitizeRemoteUrl(urlRaw) : null };
   } catch {
     return { name: null, url: null };
   }
 }
 
-async function readAheadBehind(projectRoot: string): Promise<{ ahead: number; behind: number }> {
+async function readAheadBehind(projectRoot: string, options?: RunGitOptions): Promise<{ ahead: number; behind: number }> {
   try {
     const raw = (
-      await runGitText(projectRoot, ['rev-list', '--left-right', '--count', 'HEAD...@{upstream}'])
+      await runGitText(projectRoot, ['rev-list', '--left-right', '--count', 'HEAD...@{upstream}'], options)
     ).trim();
     const parts = raw.split(/\s+/);
     const ahead = Number.parseInt(parts[0] ?? '0', 10) || 0;
@@ -489,7 +502,9 @@ async function readAheadBehind(projectRoot: string): Promise<{ ahead: number; be
   }
 }
 
-export async function getGitRepoStatus(projectRoot: string): Promise<GitRepoStatus> {
+export async function getGitRepoStatus(projectRoot: string, browseSignal?: AbortSignal): Promise<GitRepoStatus> {
+  const options = browseSignal ? { signal: browseSignal, timeoutMs: 1_500, maxBuffer: 256 * 1024 } : undefined;
+  browseSignal?.throwIfAborted();
   if (!fs.existsSync(path.join(projectRoot, '.git'))) {
     return {
       branch: 'uninitialized',
@@ -506,10 +521,10 @@ export async function getGitRepoStatus(projectRoot: string): Promise<GitRepoStat
 
   let branch = 'HEAD';
   try {
-    branch = (await runGitText(projectRoot, ['symbolic-ref', '--short', 'HEAD'])).trim();
+    branch = (await runGitText(projectRoot, ['symbolic-ref', '--short', 'HEAD'], options)).trim();
   } catch {
     try {
-      branch = (await runGitText(projectRoot, ['rev-parse', '--abbrev-ref', 'HEAD'])).trim();
+      branch = (await runGitText(projectRoot, ['rev-parse', '--abbrev-ref', 'HEAD'], options)).trim();
     } catch {
       branch = 'main';
     }
@@ -518,7 +533,7 @@ export async function getGitRepoStatus(projectRoot: string): Promise<GitRepoStat
   let headSha = '';
   let headSubject = 'No commits yet';
   try {
-    const logLine = (await runGitText(projectRoot, ['log', '-1', '--format=%h\t%s'])).trim();
+    const logLine = (await runGitText(projectRoot, ['log', '-1', '--format=%h\t%s'], options)).trim();
     if (logLine) {
       const [sha, ...rest] = logLine.split('\t');
       headSha = sha ?? '';
@@ -528,8 +543,12 @@ export async function getGitRepoStatus(projectRoot: string): Promise<GitRepoStat
     // Unborn branch
   }
 
-  const statusBuf = await runGitBuffer(projectRoot, ['status', '--porcelain=v1', '-uall', '-z']);
-  const tokens = statusBuf.toString('utf8').split('\0');
+  const statusBuf = await runGitBuffer(projectRoot, ['status', '--porcelain=v1', '-uall', '-z'], options).catch((error) => {
+    if (!browseSignal) throw error;
+    browseSignal.throwIfAborted();
+    return null;
+  });
+  const tokens = statusBuf?.toString('utf8').split('\0') ?? [];
   const changedFiles: GitChangedFile[] = [];
 
   for (let idx = 0; idx < tokens.length; idx++) {
@@ -555,14 +574,16 @@ export async function getGitRepoStatus(projectRoot: string): Promise<GitRepoStat
     }
   }
 
-  const remote = await resolvePrimaryRemote(projectRoot);
-  const { ahead, behind } = await readAheadBehind(projectRoot);
+  const remote = await resolvePrimaryRemote(projectRoot, options);
+  const { ahead, behind } = await readAheadBehind(projectRoot, options);
+  browseSignal?.throwIfAborted();
 
   return {
     branch,
     headSha,
     headSubject,
-    isClean: changedFiles.length === 0,
+    isClean: statusBuf !== null && changedFiles.length === 0,
+    ...(statusBuf === null ? { statusIncomplete: true } : {}),
     changedFiles,
     remoteName: remote.name,
     remoteUrl: remote.url,
@@ -573,7 +594,8 @@ export async function getGitRepoStatus(projectRoot: string): Promise<GitRepoStat
 
 export async function computeWorkingTreeSnapshotDigest(
   projectRoot: string,
-  status?: GitRepoStatus
+  status?: GitRepoStatus,
+  reviewedFiles?: ReadonlyMap<string, Buffer>
 ): Promise<string> {
   const current = status ?? (await getGitRepoStatus(projectRoot));
   const hash = crypto.createHash('sha256');
@@ -582,6 +604,11 @@ export async function computeWorkingTreeSnapshotDigest(
   const sorted = [...current.changedFiles].sort((a, b) => a.path.localeCompare(b.path));
   for (const item of sorted) {
     hash.update(`file:${item.status}:${item.oldPath ?? ''}:${item.path}\n`);
+    if (reviewedFiles) {
+      const contents = reviewedFiles.get(item.path);
+      hash.update(contents ? `sha:${crypto.createHash('sha256').update(contents).digest('hex')}\n` : 'sha:missing\n');
+      continue;
+    }
     const abs = path.join(projectRoot, item.path);
     try {
       if (fs.existsSync(abs) && fs.statSync(abs).isFile()) {
@@ -601,53 +628,79 @@ export async function computeWorkingTreeSnapshotDigest(
   return hash.digest('hex').slice(0, 24);
 }
 
-async function readHeadBlobBuffer(projectRoot: string, relPath: string): Promise<Buffer | null> {
+async function readHeadBlobBuffer(projectRoot: string, relPath: string, options: RunGitOptions): Promise<Buffer | null> {
   try {
-    return await runGitBuffer(projectRoot, ['show', `HEAD:${relPath}`]);
-  } catch {
+    return await runGitBuffer(projectRoot, ['show', `HEAD:${relPath}`], options);
+  } catch (err) {
+    checkReviewGitError(err, options.signal);
     return null;
   }
+}
+
+function checkReviewGitError(err: unknown, signal?: AbortSignal): void {
+  signal?.throwIfAborted();
+  const code = (err as { code?: string | number | null }).code;
+  if (code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' || code === null) throw reviewLimitError();
 }
 
 async function readSingleFileRawPatch(
   projectRoot: string,
   file: GitChangedFile,
   afterBuf: Buffer | null,
-  isBinary: boolean
+  isBinary: boolean,
+  options: RunGitOptions
 ): Promise<string> {
   if (file.status === 'untracked') {
     if (isBinary) {
       return `diff --git a/${file.path} b/${file.path}\nnew binary file (${afterBuf?.length ?? 0} bytes)`;
     }
-    const raw = (afterBuf ? afterBuf.subarray(0, 16_000).toString('utf8') : '').replace(/\r\n/g, '\n');
+    const raw = (afterBuf ? afterBuf.subarray(0, MAX_UNTRACKED_PATCH_BYTES).toString('utf8') : '').replace(/\r\n/g, '\n');
     const lines = raw.split('\n');
     if (lines.length > 0 && lines[lines.length - 1] === '') lines.pop();
     const plus = lines.map((l) => `+${l}`).join('\n');
-    return `diff --git a/${file.path} b/${file.path}\nnew file (untracked)\n--- /dev/null\n+++ b/${file.path}\n${plus}`;
+    const notice = (afterBuf?.length ?? 0) > MAX_UNTRACKED_PATCH_BYTES
+      ? '\n[Untracked file preview truncated. Open the file to review its complete contents.]'
+      : '';
+    return `diff --git a/${file.path} b/${file.path}\nnew file (untracked)\n--- /dev/null\n+++ b/${file.path}\n${plus}${notice}`;
   }
 
   const pathArgs = file.oldPath ? [file.oldPath, file.path] : [file.path];
   try {
-    const out = await runGitText(projectRoot, ['diff', 'HEAD', '--', ...pathArgs]);
+    const out = await runGitText(projectRoot, ['diff', 'HEAD', '--', ...pathArgs], options);
     return out.trimEnd();
-  } catch {
+  } catch (err) {
+    checkReviewGitError(err, options.signal);
     try {
-      const stagedOut = await runGitText(projectRoot, ['diff', '--cached', '--', ...pathArgs]);
+      const stagedOut = await runGitText(projectRoot, ['diff', '--cached', '--', ...pathArgs], options);
       if (stagedOut.trim()) return stagedOut.trimEnd();
-    } catch {
+    } catch (err) {
+      checkReviewGitError(err, options.signal);
       // continue to working-tree diff fallback
     }
     try {
-      const out = await runGitText(projectRoot, ['diff', '--', ...pathArgs]);
+      const out = await runGitText(projectRoot, ['diff', '--', ...pathArgs], options);
       return out.trimEnd();
-    } catch {
+    } catch (err) {
+      checkReviewGitError(err, options.signal);
       return '';
     }
   }
 }
 
-export async function getGitWorkingDiff(projectRoot: string): Promise<GitChangeReviewPayload> {
-  const status = await getGitRepoStatus(projectRoot);
+export async function getGitWorkingDiff(projectRoot: string, requestSignal?: AbortSignal): Promise<GitChangeReviewPayload> {
+  const deadline = AbortSignal.timeout(8_000);
+  const signal = requestSignal ? AbortSignal.any([requestSignal, deadline]) : deadline;
+  try {
+    return await buildGitWorkingDiff(projectRoot, signal);
+  } catch (err) {
+    if (deadline.aborted && !requestSignal?.aborted) throw reviewLimitError();
+    throw err;
+  }
+}
+
+async function buildGitWorkingDiff(projectRoot: string, signal: AbortSignal): Promise<GitChangeReviewPayload> {
+  const status = await getGitRepoStatus(projectRoot, signal);
+  if (status.statusIncomplete || status.changedFiles.length > MAX_REVIEW_FILES) throw reviewLimitError();
   if (!fs.existsSync(path.join(projectRoot, '.git'))) {
     return {
       status,
@@ -658,11 +711,14 @@ export async function getGitWorkingDiff(projectRoot: string): Promise<GitChangeR
     };
   }
 
-  const snapshotDigest = await computeWorkingTreeSnapshotDigest(projectRoot, status);
   const files: ChangeFileSummary[] = [];
   const rawPatches: string[] = [];
+  const reviewedFiles = new Map<string, Buffer>();
+  let inputBytes = MAX_REVIEW_INPUT_BYTES;
+  let patchBytes = MAX_REVIEW_PATCH_BYTES;
 
   for (const ch of status.changedFiles) {
+    signal.throwIfAborted();
     const normStatus = (
       ['modified', 'added', 'deleted', 'renamed', 'untracked'].includes(ch.status)
         ? ch.status
@@ -673,14 +729,19 @@ export async function getGitWorkingDiff(projectRoot: string): Promise<GitChangeR
     const beforeBuf =
       normStatus === 'added' || normStatus === 'untracked'
         ? null
-        : await readHeadBlobBuffer(projectRoot, headLookupPath);
+        : await readHeadBlobBuffer(projectRoot, headLookupPath, { signal, maxBuffer: inputBytes, timeoutMs: 1_500 });
+    inputBytes -= beforeBuf?.length ?? 0;
 
     let afterBuf: Buffer | null = null;
     if (normStatus !== 'deleted') {
-      const abs = path.join(projectRoot, ch.path);
-      if (fs.existsSync(abs) && fs.statSync(abs).isFile()) {
-        afterBuf = fs.readFileSync(abs);
+      const contents = await readRepositoryFile(projectRoot, ch.path, inputBytes, signal);
+      if (!contents) {
+        throw new GitOperationError('A changed file could not be read safely. Refresh the review or inspect it with Git locally.', 409);
       }
+      if (!contents.complete) throw reviewLimitError();
+      afterBuf = contents.buffer;
+      inputBytes -= afterBuf.length;
+      reviewedFiles.set(ch.path, afterBuf);
     }
 
     const beforeBytes = beforeBuf?.length ?? 0;
@@ -698,7 +759,12 @@ export async function getGitWorkingDiff(projectRoot: string): Promise<GitChangeR
         ? afterBuf.subarray(0, MAX_REVIEW_FILE_BYTES).toString('utf8')
         : null;
 
-    const rawPatch = await readSingleFileRawPatch(projectRoot, ch, afterBuf, isBinary);
+    if (patchBytes <= 0) throw reviewLimitError();
+    const rawPatch = await readSingleFileRawPatch(projectRoot, ch, afterBuf, isBinary, {
+      signal, maxBuffer: patchBytes, timeoutMs: 1_500
+    });
+    patchBytes -= Buffer.byteLength(rawPatch) + 2;
+    if (patchBytes < 0) throw reviewLimitError();
     if (rawPatch) {
       rawPatches.push(rawPatch);
     }
@@ -724,7 +790,9 @@ export async function getGitWorkingDiff(projectRoot: string): Promise<GitChangeR
     }
 
     if (ch.path.endsWith('.md')) {
-      const mdReview = buildMarkdownFileReview(beforeText, afterText);
+      const mdReview = truncated
+        ? { limited: 'source-only' as const, substantiveCount: 0, formattingOnlyCount: 0, formattingOnlyTables: 0, entries: [] }
+        : buildMarkdownFileReview(beforeText, afterText);
       const formattingOnly =
         normStatus === 'modified' &&
         !truncated &&
@@ -732,7 +800,9 @@ export async function getGitWorkingDiff(projectRoot: string): Promise<GitChangeR
         mdReview.formattingOnlyCount > 0;
 
       let summaryLabel = '';
-      if (normStatus === 'added' || normStatus === 'untracked') {
+      if (mdReview.limited === 'source-only') {
+        summaryLabel = 'Raw diff only';
+      } else if (normStatus === 'added' || normStatus === 'untracked') {
         summaryLabel = `New document (${mdReview.substantiveCount} ${
           mdReview.substantiveCount === 1 ? 'block' : 'blocks'
         })`;
@@ -837,6 +907,8 @@ export async function getGitWorkingDiff(projectRoot: string): Promise<GitChangeR
     });
   }
 
+  signal.throwIfAborted();
+  const snapshotDigest = await computeWorkingTreeSnapshotDigest(projectRoot, status, reviewedFiles);
   const fileCount = status.changedFiles.length;
   const commitScopeNote =
     fileCount === 0

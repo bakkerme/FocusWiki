@@ -6,7 +6,7 @@
   "type": "module",
   "scripts": {
     "seed": "tsx scripts/seed-repos.ts",
-    "dev:server": "tsx watch server/index.ts",
+    "dev:server": "tsx watch server/index.ts --local-dev",
     "dev:client": "vite",
     "build:client": "vite build",
     "build:server": "tsc -p tsconfig.server.json",
@@ -31,7 +31,6 @@
     "@tiptap/pm": "3.34.0",
     "@tiptap/react": "3.34.0",
     "@tiptap/starter-kit": "3.34.0",
-    "chokidar": "^4.0.3",
     "express": "^4.21.2",
     "lucide-react": "^0.475.0",
     "react": "^18.3.1",

@@ -4,38 +4,31 @@ FocusWiki (shown as **Focus** in the UI) is a private, local-first documentation
 
 > **Sample Content Notice:** Both seeded repositories (`cindervault-rpg` and `helios-lab`) contain strictly fictional, synthetic prototype data.
 
-## Quick Start (Local Node Service)
+## Local development
 
 ```bash
-cd /workspace/wiki-prototype
-umask 0007
-npm install
-npm run seed          # Initializes sample-repos/cindervault-rpg and sample-repos/helios-lab
-npm run build         # Builds Vite client (dist/client) and TypeScript server (dist/server)
-npm test              # Runs Vitest unit + API integration suite
-
-# Manage background private server (binds 127.0.0.1:8088 and 100.117.116.91:8088)
-./scripts/server-ctl.sh start
-./scripts/server-ctl.sh status
-./scripts/server-ctl.sh stop
+npm ci
+npm run seed
+npm run dev:server   # Loopback API on 127.0.0.1:8088
+npm run dev:client   # In another terminal, Vite on 127.0.0.1:5173
 ```
 
-## Repository Import, Branches/PRs & Remote Sync
+To try the compiled client, stop the development API, run `npm run build`, then use `./scripts/server-ctl.sh start` and open `http://127.0.0.1:8088`. Stop it with `./scripts/server-ctl.sh stop`. Local development uses the fictional sample repositories and does not authorize proposal publication. Use `npm run typecheck`, `npm run build`, and `npm test` to verify changes. The browser tests require Playwright Chromium.
 
-You do not need to edit `config/projects.json` or restart the server to add repositories:
+## Managed repositories
 
-- **In the UI:** Click **+ Add** next to the `Repository` selector in the sidebar to:
-  1. **Clone URL:** Inspect remote branches and PR refs (`refs/pull/*/head` / `refs/merge-requests/*/head`), pick a starting branch or PR `#`, and clone directly into `repos/` (or `FOCUSWIKI_REPOS_DIR`).
-  2. **Local folder:** Inspect and attach an existing local checkout or plain Markdown folder inside `FOCUSWIKI_ALLOWED_IMPORT_ROOTS`.
-  3. **New repo:** Initialize a fresh Git-backed wiki repo with an initial commit on `main`.
-  4. **Connected:** Unregister a repository from Focus without deleting files on disk.
-- **Branches, PRs & Pull:** Click the topbar branch pill (`main · clean` / `↓N`) to open **Repository Git**, where you can **Fetch** remote branches and PR heads, **Pull** fast-forward updates (`--ff-only`, blocked safely if local edits exist), or switch to a local branch, remote branch, or PR `#` under **Branches & PRs**.
-- **HTTP API:**
-  - `POST /api/projects/inspect-remote` / `POST /api/projects/inspect-local`
-  - `POST /api/projects/import` (`mode`: `"clone" | "local" | "init"`) & `DELETE /api/projects/:projectId`
-  - `GET /api/projects/:projectId/git/refs`, `POST /api/projects/:projectId/git/fetch`, `POST /api/projects/:projectId/git/pull`, `POST /api/projects/:projectId/git/checkout`
+Use operator enrollment to connect a GitHub repository and a single base branch. Focus reads and edits shared working files while a separate Git worker fetches upstream changes and handles reviewed proposals. See [managed Git setup and migration](docs/MANAGED-GIT.md) for the process configuration, API and steps to preserve work from existing checkouts.
 
-Set `FOCUSWIKI_ALLOWED_IMPORT_ROOTS` to a comma-separated list of directories for local folder imports and `file://` Git remotes. When omitted, it defaults to the managed repository directory. An explicitly empty list disables both operations. Preconfigured projects can still be opened.
+## Managed Git and Pull Requests
+
+Use **Enrollment** in the sidebar to see how to request repository access. The workspace operator configures the working copy, upstream, and Git credentials on the server. The sidebar lists the repositories available to you.
+
+1. Edit a document as usual. **Saved locally** means FocusWiki wrote your draft to the local working copy. Inline comments and component changes also live in project files. Saving and opening a review have no upstream effect.
+2. Open **Review working changes** from the topbar Git status. Inspect the rich or raw diff, select the files to include, and enter a proposal message. Each new review starts with no files selected.
+3. Choose **Propose changes** to publish the selected snapshot as a pull request. Open the returned link to check the pull request and its merge status on the Git host.
+4. If the review becomes stale, choose **New review**, inspect the updated diff, and select the files again. If publishing is interrupted, **Retry proposal** resubmits the same review, file selection, and message. Your local draft stays on disk.
+
+**Backend dependency.** Publishing requires the managed enrollment, Git service, and proposal backend. The browser reads `GET /api/projects/:projectId/git/diff` for the existing rich review payload plus an opaque `reviewId`. It sends `POST /api/projects/:projectId/git/propose` with JSON `{reviewId, message, paths}` and `X-FocusWiki-Intent: propose` on the same origin. The server validates the review and selected paths, and returns `{url, sha}` on success. A diff without a review ID is available for inspection only.
 
 ## Images, Links, and Visual Editing
 
@@ -43,51 +36,17 @@ In **Edit → Visual**, use **Image** for a repository path or HTTP(S) URL, alte
 
 The link button opens a keyboard-accessible form (**Apply**, **Remove Link**, **Cancel**, or Escape). Document links such as `../overview.md#authentication` resolve relative to the current document; `#heading` links scroll within it. Headings have deterministic GitHub-style anchors, including duplicate suffixes. Selecting a table cell reveals row, column, and table deletion controls. These controls appear only in Edit mode.
 
-Clone imports now send an optional `shallow` boolean. The Git review defaults to all changed files checked; selecting a subset sends `paths` with the commit request, and selecting all omits it. **Integration dependency:** this UI branch requires the sibling server implementation of the assets route, shallow cloning, and selected-path commits. The base server does not yet implement those contracts. Its review UI has no re-anchor request to wrap; all existing create/reply/resolve/reopen failures now produce a dismissible alert and retain drafts.
-
 ### TipTap dependency limitation
 
 All TipTap packages are pinned together to `2.27.3`, the latest published v2 release verified on 2026-11-17. There is **no published patched v2** for [GHSA-cp6q-959q-f8rh](https://github.com/advisories/GHSA-cp6q-959q-f8rh): npm identifies every release below `3.30.4` as affected. `npm audit --omit=dev` therefore reports **33 moderate vulnerabilities** (one core advisory and dependent packages), rather than zero. A coordinated migration to patched v3 or an upstream v2 backport is required; audit reporting has not been suppressed.
 
-## Rootless Docker Packaging & Deployment (`ubuntu` uid 1000)
+## Private deployment
 
-`Dockerfile` and `compose.yaml` package the production build with persistent bind mounts for `./sample-repos`, `./repos` (`FOCUSWIKI_REPOS_DIR=/app/repos`), and `./config` (writable so UI/API imports persist in `projects.json`), dropped Linux capabilities (`cap_drop: [ALL]`), `no-new-privileges`, a `/healthz` healthcheck, and `restart: unless-stopped`.
-
-Docker URLs are **http://100.117.116.91:8088/** (private Tailscale) and **http://127.0.0.1:8089/** (loopback). This host's rootless Docker fails when publishing both addresses with the same host port; distinct host ports avoid that conflict. The container still listens on port `8088`. Nothing is published on the LAN address or a wildcard host address.
-
-The image includes the compiled seed script for first startup. Existing repositories are retained. Git trusts mounted sample checkouts explicitly and applies per-repo `-c safe.directory=<path>` for registered repositories without enabling wildcard trust.
-
-When deploying under the `ubuntu` account that owns the rootless Docker daemon (`/run/user/1000/docker.sock`), stop the standalone host Node listener on port `8088` first, then start Compose:
-
-```bash
-# As ubuntu (uid 1000):
-export XDG_RUNTIME_DIR=/run/user/1000
-export DOCKER_HOST=unix:///run/user/1000/docker.sock
-cd /workspace/wiki-prototype
-
-# Verify rootless mode
-docker info --format '{{json .SecurityOptions}}'
-
-# Build and start container
-docker compose up -d --build --wait --wait-timeout 60
-docker compose ps
-curl -fsS http://127.0.0.1:8089/healthz
-curl -fsS http://127.0.0.1:8089/api/projects
-
-# Test the built image using disposable repositories, without publishing ports.
-# Verifies first-run seeding, client assets, API writes, restart and recreation.
-node scripts/docker-smoke.mjs
-
-# Restart / stop
-docker compose restart
-docker compose down
-```
-
-The smoke test requires the rootless daemon and removes only its own temporary container and named volume. It does not modify `sample-repos`. `docker compose down` retains the bind-mounted project files. The Compose service runs detached and restarts with the existing daemon; no separate host Node server is needed. See `REVIEW.md` for the latest Docker verification and browser-test limits.
+The production stack runs a web service and a Git worker under rootless Docker. Host Tailscale Serve terminates HTTPS and connects to a private Unix socket. The web service has no IP network and the GitHub App key is mounted only in the worker. Deploy a release that includes the companion worker and Git API changes. See the [deployment runbook](docs/DEPLOYMENT.md) for configuration, host and tailnet checks, and migration and rollback procedures.
 
 ## Docker CI/CD
 
-GitHub Actions tests and builds the Docker image and publishes successful `main` builds to Google Artifact Registry at `gcr.io`. See [Docker CI/CD setup](docs/DOCKER-CICD.md) for the registry and GitHub configuration.
+GitHub Actions tests and builds the Docker image. Successful `main` builds that pass the two-service smoke test are eligible for publication to Google Artifact Registry at `gcr.io`. See [Docker CI/CD setup](docs/DOCKER-CICD.md) for the registry and GitHub configuration.
 
 ## Embedding Project-Authored Components
 
@@ -178,7 +137,7 @@ node .agents/skills/focuswiki-docs/scripts/validate-wiki.mjs .
 | `react`, `react-dom` | Workspace UI rendering | MIT |
 | `@tiptap/*`, `prosemirror-*` | Rich visual Markdown editor, tables, task lists, decorations | MIT |
 | `unified`, `remark-parse`, `remark-gfm`, `remark-frontmatter`, `remark-stringify` | Lossless Markdown AST parsing and serialization | MIT |
-| `express`, `chokidar` | Local HTTP API, sandboxed asset serving, and live file watching | MIT |
+| `express` | Local HTTP API and sandboxed asset serving | MIT |
 | `lucide-react` | Minimal UI iconography | ISC |
 | `@fontsource/jetbrains-mono` | Self-hosted WOFF2 monospace code & source font | OFL-1.1 |
 | `typescript`, `vite`, `vitest`, `supertest`, `tsx` | Build, typecheck, and automated test toolchain | Apache-2.0 / MIT |
@@ -190,6 +149,6 @@ See [`docs/SCREENSHOTS.md`](docs/SCREENSHOTS.md) for the unattended local Playwr
 
 ```bash
 npm run capture -- list
-npm run capture -- run --packet playwright-2026-11-15 --all --base-url http://100.117.116.91:8088
+npm run capture -- run --packet playwright-local --all --base-url http://127.0.0.1:8088
 npm run capture -- validate --packet playwright-2026-11-15
 ```
