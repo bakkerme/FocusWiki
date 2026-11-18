@@ -164,7 +164,8 @@ export function createExpensiveRequestLimiter(options: RateLimitOptions = {}): R
       return;
     }
     const now = Date.now();
-    const key = `${req.socket.remoteAddress ?? 'unknown'}:${read ? 'read' : 'write'}`;
+    const bucket = /^\/api\/projects\/[^/]+\/git\//i.test(req.path) ? 'git' : 'browse';
+    const key = `${req.socket.remoteAddress ?? 'unknown'}:${bucket}`;
     for (const [peer, timestamps] of peers) {
       if (timestamps[timestamps.length - 1] <= now - windowMs) peers.delete(peer);
     }
