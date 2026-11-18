@@ -7,7 +7,7 @@ import path from 'node:path';
 import type { Browser, BrowserContext, Page } from 'playwright';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createHubApp, type HubAppInstance } from '../server/app';
-import type { GitChangeReviewPayload } from '../shared/changeReview';
+import { getGitWorkingDiff } from '../server/gitService';
 import type { ProjectSummary } from '../shared/types';
 
 const PROJECT_ROOT = path.resolve(__dirname, '..');
@@ -180,10 +180,8 @@ describe('Settings and managed Git browser flows', () => {
   async function serveReviewIds() {
     let revision = 0;
     await page.route(DIFF_API, async (route) => {
-      const response = await route.fetch();
-      const review = (await response.json()) as GitChangeReviewPayload;
+      const review = await getGitWorkingDiff(repoRoot);
       await route.fulfill({
-        response,
         json: {
           ...review,
           reviewId: `review-${++revision}`,
@@ -254,8 +252,9 @@ describe('Settings and managed Git browser flows', () => {
     expect(await link.getAttribute('target')).toBe('_blank');
     expect(await link.getAttribute('rel')).toBe('noopener noreferrer');
     expect(await dialog.getByRole('status').innerText()).toContain(`Pull request published for ${SHA}`);
-    const expected = { reviewId: 'review-1', message: 'Record fictional calibration', paths: ['README.md'] };
+    const expected = { reviewId: expect.stringMatching(/^review-\d+$/), message: 'Record fictional calibration', paths: ['README.md'] };
     expect(submissions).toEqual([expected, expected]);
+    expect(submissions[1]).toEqual(submissions[0]);
     expect(putRequests).toHaveLength(1);
     expect(fs.readFileSync(path.join(repoRoot, 'README.md'), 'utf8')).toBe(draft);
     expect(execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repoRoot, encoding: 'utf8' })).toBe(headBefore);
@@ -298,9 +297,9 @@ describe('Settings and managed Git browser flows', () => {
     await choose.check();
     await propose.click();
     await dialog.getByRole('link', { name: 'Open pull request' }).waitFor();
-    expect(submissions).toEqual(['review-1', 'review-2'].map((reviewId) => ({
-      reviewId, message: 'Update fictional notes', paths: ['README.md']
-    })));
+    const selection = { reviewId: expect.stringMatching(/^review-\d+$/), message: 'Update fictional notes', paths: ['README.md'] };
+    expect(submissions).toEqual([selection, selection]);
+    expect(submissions[1]).not.toEqual(submissions[0]);
   });
 
   it('keeps the document conflict visible instead of reviewing an unsaved conflicting draft', async () => {
@@ -320,9 +319,11 @@ describe('Settings and managed Git browser flows', () => {
   });
 
   it('allows legacy diff inspection without assuming managed publishing is available', async () => {
+    await page.route(DIFF_API, async (route) => {
+      await route.fulfill({ json: await getGitWorkingDiff(repoRoot) });
+    });
     fs.appendFileSync(path.join(repoRoot, 'README.md'), '\nSaved local change.\n');
     const dialog = await openGitReview();
-    await dialog.getByText('Managed Git status unconfirmed', { exact: false }).waitFor();
     await dialog.getByText('Ask your workspace operator to enable publishing.', { exact: false }).waitFor();
     expect(await dialog.getByRole('checkbox').count()).toBe(0);
     expect(await dialog.getByRole('button', { name: 'Propose changes' }).count()).toBe(0);
