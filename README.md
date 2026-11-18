@@ -35,8 +35,6 @@ Use **Enrollment** in the sidebar to see how to request repository access. The w
 
 **Backend dependency.** Publishing requires the managed enrollment, Git service, and proposal backend. The browser reads `GET /api/projects/:projectId/git/diff` for the existing rich review payload plus an opaque `reviewId`. It sends `POST /api/projects/:projectId/git/propose` with JSON `{reviewId, message, paths}` and `X-FocusWiki-Intent: propose` on the same origin. The server validates the review and selected paths, and returns `{url, sha}` on success. A diff without a review ID is available for inspection only.
 
-Set `
-
 ## Images, Links, and Visual Editing
 
 In **Edit → Visual**, use **Image** for a repository path or HTTP(S) URL, alternative text, and an optional title. Inline and standalone Markdown images remain editable and retain their original `src`, `alt`, and `title` when saved. Repository image URLs resolve against the current document directory and render through `/api/projects/:projectId/assets/:path`; they are never rewritten into API URLs in Markdown. Remote images load directly from their host with no referrer.
