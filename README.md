@@ -174,7 +174,7 @@ node .agents/skills/focuswiki-docs/scripts/validate-wiki.mjs .
 | `react`, `react-dom` | Workspace UI rendering | MIT |
 | `@tiptap/*`, `prosemirror-*` | Rich visual Markdown editor, tables, task lists, decorations | MIT |
 | `unified`, `remark-parse`, `remark-gfm`, `remark-frontmatter`, `remark-stringify` | Lossless Markdown AST parsing and serialization | MIT |
-| `express`, `chokidar` | Local HTTP API, sandboxed asset serving, and live file watching | MIT |
+| `express` | Local HTTP API and sandboxed asset serving | MIT |
 | `lucide-react` | Minimal UI iconography | ISC |
 | `@fontsource/jetbrains-mono` | Self-hosted WOFF2 monospace code & source font | OFL-1.1 |
 | `typescript`, `vite`, `vitest`, `supertest`, `tsx` | Build, typecheck, and automated test toolchain | Apache-2.0 / MIT |

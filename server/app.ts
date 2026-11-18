@@ -7,11 +7,9 @@ import type {
   ConflictErrorPayload,
   DocTreeEntry,
   DocumentPayload,
-  EmbedAssetEntry,
   ProjectConfig,
   ProjectSummary,
   RepoInspectionResult,
-  SearchResultItem,
   ServerEnvironmentInfo
 } from '../shared/types.js';
 import {
@@ -61,6 +59,7 @@ import {
   slugifyProjectId
 } from './projectRegistry.js';
 import { ProjectWatcherHub, type WatcherHubOptions } from './watcher.js';
+import { BROWSE_LIMITS, SEARCH_LIMITS, ScanBudget, listConflictCopies, scanRepository, searchRepositories } from './repositoryScan.js';
 import { withKeyLock, writeFileAtomicSync } from './fileLock.js';
 import { createHttpSecurity, createExpensiveRequestLimiter, validateHost, type RateLimitOptions } from './httpSecurity.js';
 
@@ -86,112 +85,6 @@ const MIME_BY_EXT: Record<string, string> = {
   '.woff2': 'font/woff2',
   '.txt': 'text/plain; charset=utf-8'
 };
-
-const IGNORED_AGENT_DOC_NAMES = new Set(['AGENTS.md', 'CLAUDE.md', 'GEMINI.md']);
-
-function scanMarkdownDocs(project: ProjectConfig): DocTreeEntry[] {
-  const entries: DocTreeEntry[] = [];
-  const root = project.rootPath;
-  if (!fs.existsSync(root)) return entries;
-
-  function walk(dirAbs: string): void {
-    const items = fs.readdirSync(dirAbs, { withFileTypes: true });
-    for (const item of items) {
-      if (
-        item.name.startsWith('.') ||
-        item.name === 'node_modules' ||
-        item.name === 'embeds'
-      ) {
-        continue;
-      }
-      const full = path.join(dirAbs, item.name);
-      if (item.isDirectory()) {
-        walk(full);
-      } else if (
-        item.isFile() &&
-        item.name.endsWith('.md') &&
-        !IGNORED_AGENT_DOC_NAMES.has(item.name)
-      ) {
-        const relPath = path.relative(root, full).split(path.sep).join('/');
-        const raw = fs.readFileSync(full, 'utf8');
-        const stat = fs.statSync(full);
-        const sidecar = readCommentSidecar(root, relPath);
-        const openComments = sidecar.threads.filter((t) => t.status === 'open').length;
-        entries.push({
-          path: relPath,
-          title: extractDocumentTitle(raw, relPath),
-          updatedAt: stat.mtime.toISOString(),
-          openComments
-        });
-      }
-    }
-  }
-
-  walk(root);
-
-  entries.sort((a, b) => {
-    if (a.path === project.defaultDoc) return -1;
-    if (b.path === project.defaultDoc) return 1;
-    return a.path.localeCompare(b.path, undefined, { numeric: true, sensitivity: 'base' });
-  });
-
-  return entries;
-}
-
-function scanProjectEmbeds(projectRoot: string): EmbedAssetEntry[] {
-  const embedsRoot = path.join(projectRoot, 'embeds');
-  const results: EmbedAssetEntry[] = [];
-  if (!fs.existsSync(embedsRoot) || !fs.statSync(embedsRoot).isDirectory()) {
-    return results;
-  }
-
-  const subdirs = fs.readdirSync(embedsRoot, { withFileTypes: true });
-  for (const dirent of subdirs) {
-    if (dirent.isDirectory()) {
-      const compDir = path.join(embedsRoot, dirent.name);
-      const files = fs
-        .readdirSync(compDir)
-        .filter((f) => fs.statSync(path.join(compDir, f)).isFile())
-        .sort();
-      const htmlEntry = files.includes('index.html')
-        ? 'index.html'
-        : files.find((f) => f.endsWith('.html'));
-      if (htmlEntry) {
-        results.push({
-          src: `embeds/${dirent.name}/${htmlEntry}`,
-          name: dirent.name,
-          directory: `embeds/${dirent.name}`,
-          files
-        });
-      }
-    } else if (dirent.isFile() && dirent.name.endsWith('.html')) {
-      results.push({
-        src: `embeds/${dirent.name}`,
-        name: dirent.name.replace(/\.html$/i, ''),
-        directory: 'embeds',
-        files: [dirent.name]
-      });
-    }
-  }
-
-  results.sort((a, b) => a.src.localeCompare(b.src));
-  return results;
-}
-
-function listConflictCopiesForDoc(projectRoot: string, docRelPath: string): string[] {
-  const safePrefix = docRelPath.replace(/[^a-zA-Z0-9._-]/g, '__');
-  const results: string[] = [];
-  for (const hiddenDir of ['.focuswiki', '.cairn']) {
-    const conflictDir = path.join(projectRoot, hiddenDir, 'conflicts');
-    if (!fs.existsSync(conflictDir)) continue;
-    const files = fs
-      .readdirSync(conflictDir)
-      .filter((f) => f.startsWith(`${safePrefix}.`) && f.endsWith('.md'))
-      .map((f) => `${hiddenDir}/conflicts/${f}`);
-    results.push(...files);
-  }
-  return results.sort().reverse();
-}
 
 function pickSuggestedDefaultDoc(docs: DocTreeEntry[]): string {
   if (docs.length === 0) return 'README.md';
@@ -271,23 +164,53 @@ export function createHubApp(options: HubAppOptions): HubAppInstance {
     return project;
   }
 
-  async function buildProjectSummary(project: ProjectConfig): Promise<ProjectSummary> {
-    const git = await getGitRepoStatus(project.rootPath);
-    const docs = scanMarkdownDocs(project);
-    const embeds = scanProjectEmbeds(project.rootPath);
+  let activeBrowseRequests = 0;
+  const boundedBrowse = (work: (req: Request, res: Response, signal: AbortSignal, next: NextFunction) => Promise<void>) =>
+    async (req: Request, res: Response, next: NextFunction) => {
+      if (activeBrowseRequests >= 4) {
+        res.setHeader('Retry-After', '1');
+        res.status(503).json({ error: 'browse_busy', message: 'Workspace is busy. Please retry shortly.' });
+        return;
+      }
+      const controller = new AbortController();
+      const abort = () => controller.abort();
+      res.once('close', abort);
+      activeBrowseRequests++;
+      try {
+        await work(req, res, controller.signal, next);
+      } catch (err) {
+        if (!controller.signal.aborted) next(err);
+      } finally {
+        activeBrowseRequests--;
+        res.off('close', abort);
+      }
+    };
+
+  async function browseGitStatus(root: string, signal = AbortSignal.timeout(2_500)) {
+    try {
+      return await getGitRepoStatus(root, signal);
+    } catch {
+      return { branch: 'unknown', headSha: '', headSubject: '', isClean: false, changedFiles: [], statusIncomplete: true };
+    }
+  }
+
+  async function buildProjectSummary(project: ProjectConfig, budget = new ScanBudget(), gitSignal?: AbortSignal): Promise<ProjectSummary> {
+    const [git, scan] = await Promise.all([
+      browseGitStatus(project.rootPath, gitSignal),
+      scanRepository(project, budget)
+    ]);
     return {
       ...project,
       git,
-      docs,
-      embeds
+      ...scan,
+      ...(watcherEnabled && watcherHub.isWatchIncomplete(project.id) ? { watchIncomplete: true } : {})
     };
   }
 
-  async function inspectLocalDirectory(dirPath: string): Promise<RepoInspectionResult> {
+  async function inspectLocalDirectory(dirPath: string, signal?: AbortSignal): Promise<RepoInspectionResult> {
     const { realRoot } = registry.validateLocalImportDirectory(dirPath);
     const dirSlug = slugifyProjectId(path.basename(realRoot));
     const existing = registry.findByRootPath(realRoot);
-    const git = await getGitRepoStatus(realRoot);
     const isGitRepo = fs.existsSync(path.join(realRoot, '.git'));
     const tempProject: ProjectConfig = {
       id: dirSlug,
@@ -296,8 +219,11 @@ export function createHubApp(options: HubAppOptions): HubAppInstance {
       rootPath: realRoot,
       defaultDoc: 'README.md'
     };
-    const docs = scanMarkdownDocs(tempProject);
-    const embeds = scanProjectEmbeds(realRoot);
+    const gitDeadline = AbortSignal.timeout(2_500);
+    const [git, { docs, embeds, scanIncomplete }] = await Promise.all([
+      browseGitStatus(realRoot, signal ? AbortSignal.any([signal, gitDeadline]) : gitDeadline),
+      scanRepository(tempProject, new ScanBudget(undefined, signal))
+    ]);
 
     return {
       valid: true,
@@ -307,6 +233,7 @@ export function createHubApp(options: HubAppOptions): HubAppInstance {
       suggestedDefaultDoc: pickSuggestedDefaultDoc(docs),
       docCount: docs.length,
       embedCount: embeds.length,
+      ...(scanIncomplete ? { scanIncomplete } : {}),
       isGitRepo,
       branch: isGitRepo ? git.branch : undefined,
       remoteUrl: git.remoteUrl ?? null,
@@ -445,28 +372,30 @@ export function createHubApp(options: HubAppOptions): HubAppInstance {
   });
 
   // List registered projects + git status + doc tree + discovered embeds
-  app.get('/api/projects', async (_req, res, next) => {
-    try {
-      const summaries: ProjectSummary[] = [];
-      for (const project of registry.list()) {
-        summaries.push(await buildProjectSummary(project));
-      }
-      res.json({ projects: summaries });
-    } catch (err) {
-      next(err);
+  app.get('/api/projects', boundedBrowse(async (req, res, signal) => {
+    const offset = Number(req.query.offset ?? 0);
+    if (!Number.isSafeInteger(offset) || offset < 0) {
+      res.status(400).json({ error: 'invalid_offset', message: 'Offset must be a nonnegative integer.' });
+      return;
     }
-  });
+    const projects = registry.list();
+    const page = projects.slice(offset, offset + 24);
+    const budget = new ScanBudget(BROWSE_LIMITS, signal);
+    const gitSignal = AbortSignal.any([signal, AbortSignal.timeout(2_500)]);
+    const summaries: ProjectSummary[] = [];
+    for (const project of page) {
+      signal.throwIfAborted();
+      summaries.push(await buildProjectSummary(project, budget.child(), gitSignal));
+    }
+    const nextOffset = offset + page.length;
+    res.json({ projects: summaries, ...(nextOffset < projects.length ? { nextOffset } : {}) });
+  }));
 
   // Inspect a local directory before attaching it as a wiki repository
-  app.post('/api/projects/inspect-local', async (req, res, next) => {
-    try {
-      const dirPath = String(req.body?.path ?? '').trim();
-      const result = await inspectLocalDirectory(dirPath);
-      res.json(result);
-    } catch (err) {
-      next(err);
-    }
-  });
+  app.post('/api/projects/inspect-local', boundedBrowse(async (req, res, signal) => {
+    const dirPath = String(req.body?.path ?? '').trim();
+    res.json(await inspectLocalDirectory(dirPath, signal));
+  }));
 
   // Inspect a remote Git URL (branches & PR/MR refs) before cloning
   app.post('/api/projects/inspect-remote', async (req, res, next) => {
@@ -497,7 +426,7 @@ export function createHubApp(options: HubAppOptions): HubAppInstance {
   });
 
   // Import a repository via clone, local folder link, or fresh initialization
-  app.post('/api/projects/import', async (req, res, next) => {
+  app.post('/api/projects/import', boundedBrowse(async (req, res, _signal, next) => {
     try {
       const mode = String(req.body?.mode ?? '').trim();
       const requestedName = String(req.body?.name ?? '').trim();
@@ -586,7 +515,7 @@ export function createHubApp(options: HubAppOptions): HubAppInstance {
           credentialStore.upsert({ host: httpsHost, username, token });
         }
 
-        const scannedDocs = scanMarkdownDocs({
+        const { docs: scannedDocs } = await scanRepository({
           id,
           name,
           description,
@@ -676,10 +605,10 @@ export function createHubApp(options: HubAppOptions): HubAppInstance {
     } catch (err) {
       next(err);
     }
-  });
+  }));
 
   // Update repository metadata (display name, default page, description)
-  app.patch('/api/projects/:projectId', async (req, res, next) => {
+  app.patch('/api/projects/:projectId', boundedBrowse(async (req, res, _signal, next) => {
     try {
       const existing = getProjectOrThrow(req.params.projectId);
       const name = typeof req.body?.name === 'string' ? req.body.name.trim() : undefined;
@@ -717,7 +646,7 @@ export function createHubApp(options: HubAppOptions): HubAppInstance {
     } catch (err) {
       next(err);
     }
-  });
+  }));
 
   // Unregister a repository from FocusWiki (leaves repository files untouched on disk)
   app.delete('/api/projects/:projectId', async (req, res, next) => {
@@ -741,64 +670,18 @@ export function createHubApp(options: HubAppOptions): HubAppInstance {
   });
 
   // Full-text search across all registered projects
-  app.get('/api/search', (req, res, next) => {
-    try {
-      const q = String(req.query.q ?? '').trim();
-      if (!q) {
-        res.json({ results: [] });
-        return;
-      }
-      const needle = q.toLowerCase();
-      const results: SearchResultItem[] = [];
-
-      let scanned = 0;
-      let visited = 0;
-      let remainingBytes = 32 * 1024 * 1024;
-      const maxDocBytes = 2 * 1024 * 1024;
-      const atLimit = () => scanned >= 1000 || visited >= 20000 || remainingBytes <= 0 || results.length >= 60;
-      function searchDirectory(project: ProjectConfig, dir: string, depth = 0): void {
-        if (atLimit() || depth > 32) return;
-        const handle = fs.opendirSync(dir);
-        try {
-          let entry;
-          while (!atLimit() && (entry = handle.readSync())) {
-            visited++;
-            if (entry.name.startsWith('.') || ['node_modules', 'embeds'].includes(entry.name)) continue;
-            const full = path.join(dir, entry.name);
-            if (entry.isDirectory()) {
-              searchDirectory(project, full, depth + 1);
-              continue;
-            }
-            if (!entry.isFile() || !entry.name.endsWith('.md') || IGNORED_AGENT_DOC_NAMES.has(entry.name)) continue;
-            scanned++;
-            const size = fs.statSync(full).size;
-            if (size > maxDocBytes || size > remainingBytes) continue;
-            remainingBytes -= size;
-            const docPath = path.relative(project.rootPath, full).split(path.sep).join('/');
-            const raw = fs.readFileSync(full, 'utf8');
-            const title = extractDocumentTitle(raw, docPath);
-            const lines = raw.split(/\r?\n/);
-            for (let idx = 0; idx < lines.length && results.length < 60; idx++) {
-              if (lines[idx].toLowerCase().includes(needle)) {
-                results.push({ projectId: project.id, projectName: project.name, path: docPath,
-                  title, line: idx + 1, snippet: lines[idx].trim().slice(0, 180) });
-              }
-            }
-          }
-        } finally {
-          handle.closeSync();
-        }
-      }
-      for (const project of registry.list()) {
-        if (atLimit()) break;
-        if (fs.existsSync(project.rootPath)) searchDirectory(project, project.rootPath);
-      }
-
-      res.json({ results });
-    } catch (err) {
-      next(err);
+  app.get('/api/search', boundedBrowse(async (req, res, signal) => {
+    const query = String(req.query.q ?? '').trim();
+    if (!query) {
+      res.json({ results: [] });
+      return;
     }
-  });
+    if (query.length > 256) {
+      res.status(400).json({ error: 'query_too_long', message: 'Search queries are limited to 256 characters.' });
+      return;
+    }
+    res.json(await searchRepositories(registry.list(), query.toLowerCase(), new ScanBudget(SEARCH_LIMITS, signal)));
+  }));
 
   // Repository-local images only; executable documents belong in the embed sandbox.
   app.get('/api/projects/:projectId/assets/*', (req, res, next) => {
@@ -839,7 +722,7 @@ export function createHubApp(options: HubAppOptions): HubAppInstance {
   });
 
   // Read Markdown document + AST + resolved comments
-  app.get('/api/projects/:projectId/doc', (req, res, next) => {
+  app.get('/api/projects/:projectId/doc', async (req, res, next) => {
     try {
       const project = getProjectOrThrow(req.params.projectId);
       const docParam = String(req.query.path ?? project.defaultDoc);
@@ -860,7 +743,6 @@ export function createHubApp(options: HubAppOptions): HubAppInstance {
       const docJson = markdownToProseMirror(markdown);
       const sidecar = readCommentSidecar(project.rootPath, normalizedRelPath);
       const comments = resolveThreadsAgainstDoc(sidecar.threads, docJson);
-      const conflicts = listConflictCopiesForDoc(project.rootPath, normalizedRelPath);
 
       const payload: DocumentPayload = {
         projectId: project.id,
@@ -870,7 +752,7 @@ export function createHubApp(options: HubAppOptions): HubAppInstance {
         mtimeMs: stat.mtimeMs,
         docJson,
         comments,
-        conflicts
+        ...await listConflictCopies(project.rootPath, normalizedRelPath)
       };
       res.json(payload);
     } catch (err) {
@@ -970,7 +852,7 @@ export function createHubApp(options: HubAppOptions): HubAppInstance {
           savedAt: new Date().toISOString(),
           docJson,
           comments,
-          conflicts: listConflictCopiesForDoc(project.rootPath, normalizedRelPath)
+          ...await listConflictCopies(project.rootPath, normalizedRelPath)
         });
       });
     } catch (err) {
@@ -1173,15 +1055,10 @@ export function createHubApp(options: HubAppOptions): HubAppInstance {
   });
 
   // Git diff & status inspection
-  app.get('/api/projects/:projectId/git/diff', async (req, res, next) => {
-    try {
-      const project = getProjectOrThrow(req.params.projectId);
-      const result = await getGitWorkingDiff(project.rootPath);
-      res.json(result);
-    } catch (err) {
-      next(err);
-    }
-  });
+  app.get('/api/projects/:projectId/git/diff', boundedBrowse(async (req, res, signal) => {
+    const project = getProjectOrThrow(req.params.projectId);
+    res.json(await getGitWorkingDiff(project.rootPath, signal));
+  }));
 
   // Deliberate local Git commit (never pushes; preserves user message & identity without forced attribution)
   app.post('/api/projects/:projectId/git/commit', async (req, res, next) => {

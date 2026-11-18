@@ -136,6 +136,7 @@ export function App() {
 
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [searchResults, setSearchResults] = useState<SearchResultItem[]>([]);
+  const [searchNotice, setSearchNotice] = useState('');
 
   const [embedReloadToken, setEmbedReloadToken] = useState<number>(0);
   const [gitModalOpen, setGitModalOpen] = useState<boolean>(false);
@@ -331,11 +332,17 @@ export function App() {
   );
 
   const refreshProjects = useCallback(async (): Promise<ProjectSummary[]> => {
-    const res = await fetch('/api/projects');
-    if (!res.ok) throw new Error('Unable to load projects');
-    const data = (await res.json()) as { projects: ProjectSummary[] };
-    setProjects(data.projects);
-    return data.projects;
+    const projects: ProjectSummary[] = [];
+    let offset: number | undefined = 0;
+    while (offset !== undefined) {
+      const res = await fetch(offset ? `/api/projects?offset=${offset}` : '/api/projects');
+      if (!res.ok) throw new Error('Unable to load projects');
+      const page: { projects: ProjectSummary[]; nextOffset?: number } = await res.json();
+      projects.push(...page.projects);
+      offset = page.nextOffset;
+    }
+    setProjects(projects);
+    return projects;
   }, []);
 
   const syncUrlParams = useCallback((projectId: string, docPath: string, mode: WorkspaceMode) => {
@@ -366,7 +373,7 @@ export function App() {
       );
       if (!res.ok) {
         setStatusNotice(`Could not open ${docPath} (${res.status})`);
-        return;
+        return false;
       }
 
       const payload = (await res.json()) as DocumentPayload;
@@ -412,6 +419,7 @@ export function App() {
       if (isDifferentDoc && typeof window !== 'undefined' && !document.body.dataset.overlayLocked) {
         window.scrollTo(0, 0);
       }
+      return true;
     },
     [syncUrlParams]
   );
@@ -434,19 +442,19 @@ export function App() {
         const urlDoc = params.get('doc');
 
         const chosenProj = list.find((p) => p.id === urlProject) ?? list[0];
-        const chosenDoc =
-          urlDoc && chosenProj.docs.some((d) => d.path === urlDoc)
-            ? urlDoc
-            : chosenProj.docs.some((d) => d.path === chosenProj.defaultDoc)
-              ? chosenProj.defaultDoc
-              : chosenProj.docs[0]?.path || '';
-
-        if (chosenDoc) {
-          await loadDocument(chosenProj.id, chosenDoc);
-        } else {
-          setActiveProjectId(chosenProj.id);
-          setActiveDocPath('');
+        if (urlDoc && (chosenProj.docs.some((doc) => doc.path === urlDoc) ||
+          (chosenProj.id === urlProject && chosenProj.scanIncomplete))) {
+          if (await loadDocument(chosenProj.id, urlDoc)) return;
         }
+
+        const chosenDoc = chosenProj.docs.some((doc) => doc.path === chosenProj.defaultDoc)
+          ? chosenProj.defaultDoc
+          : chosenProj.docs[0]?.path;
+        if (chosenDoc && await loadDocument(chosenProj.id, chosenDoc)) return;
+        setActiveProjectId(chosenProj.id);
+        setActiveDocPath('');
+      } catch (err) {
+        if (!cancelled) setStatusNotice(err instanceof Error ? err.message : 'Unable to load projects');
       } finally {
         if (!cancelled) {
           setInitialLoaded(true);
@@ -588,6 +596,19 @@ export function App() {
 
   // Live SSE listener for external file / bot edits
   useEffect(() => {
+    let summaryTimer: number | undefined;
+    const queueSummaryRefresh = () => {
+      if (summaryTimer !== undefined) return;
+      summaryTimer = window.setTimeout(async () => {
+        try {
+          await refreshProjects();
+        } catch {
+          setStatusNotice('Project list could not refresh. Reload to try again.');
+        } finally {
+          summaryTimer = undefined;
+        }
+      }, 1_250);
+    };
     const es = new EventSource('/api/events');
     es.onmessage = (ev) => {
       try {
@@ -596,14 +617,18 @@ export function App() {
           projectId?: string;
           relPath?: string;
           kind?: string;
+          reason?: string;
         };
         if (msg.type === 'projects:updated') {
-          void refreshProjects();
+          if (msg.reason === 'watch-overflow' && msg.projectId === activeProjectIdRef.current) {
+            setStatusNotice('Some live updates were skipped. Reload to read the latest files.');
+          }
+          queueSummaryRefresh();
           return;
         }
         if (msg.type !== 'workspace:changed') return;
 
-        void refreshProjects();
+        queueSummaryRefresh();
 
         if (msg.projectId !== activeProjectIdRef.current) return;
 
@@ -677,6 +702,7 @@ export function App() {
       }
     };
     return () => {
+      window.clearTimeout(summaryTimer);
       es.close();
     };
   }, [refreshProjects]);
@@ -684,18 +710,26 @@ export function App() {
   // Cross-project search
   useEffect(() => {
     const q = searchQuery.trim();
-    if (!q) {
-      setSearchResults([]);
-      return;
-    }
+    setSearchResults([]);
+    setSearchNotice(q ? 'Searching…' : '');
+    if (!q) return;
+    const controller = new AbortController();
     const timer = window.setTimeout(async () => {
-      const res = await fetch(`/api/search?q=${encodeURIComponent(q)}`);
-      if (res.ok) {
-        const data = (await res.json()) as { results: SearchResultItem[] };
+      try {
+        const res = await fetch(`/api/search?q=${encodeURIComponent(q)}`, { signal: controller.signal });
+        const data = (await res.json()) as { results: SearchResultItem[]; scanIncomplete?: boolean; message?: string };
+        if (!res.ok) throw new Error(data.message ?? 'Search could not finish. Please try again.');
         setSearchResults(data.results);
+        setSearchNotice(data.scanIncomplete ? 'Search reached its limits. Results may be incomplete.' : '');
+      } catch (err) {
+        if (controller.signal.aborted) return;
+        setSearchNotice(err instanceof Error ? err.message : 'Search could not finish. Please try again.');
       }
     }, 150);
-    return () => window.clearTimeout(timer);
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+    };
   }, [searchQuery]);
 
   async function openProjectSummary(proj: ProjectSummary, preferredDoc?: string) {
@@ -1244,6 +1278,7 @@ export function App() {
             importTriggerRef={importTriggerRef}
             searchQuery={searchQuery}
             searchResults={searchResults}
+            searchNotice={searchNotice}
             onChangeSearch={setSearchQuery}
             onSelectProject={(id) => void handleSelectProject(id)}
             onSelectDoc={(projId, docPath) => void handleSelectDoc(projId, docPath)}
@@ -1294,8 +1329,10 @@ export function App() {
                     className={`git-status-btn ${activeProject.git.isClean ? 'is-clean' : 'dirty'}`}
                     onClick={() => void handleOpenGitModal()}
                     aria-label={`Repository ${activeProject.name} on branch ${activeProject.git.branch}, ${
-                      activeProject.git.isClean
-                        ? 'working tree clean'
+                      activeProject.git.statusIncomplete
+                        ? 'working tree status unavailable'
+                        : activeProject.git.isClean
+                          ? 'working tree clean'
                         : `${activeProject.git.changedFiles.length} uncommitted ${
                             activeProject.git.changedFiles.length === 1 ? 'file' : 'files'
                           }`
@@ -1304,7 +1341,9 @@ export function App() {
                   >
                     <GitBranch size={12} aria-hidden="true" />
                     <span className="git-branch-name">{activeProject.git.branch}</span>
-                    {!activeProject.git.isClean ? (
+                    {activeProject.git.statusIncomplete ? (
+                      <span className="git-status-word">status unavailable</span>
+                    ) : !activeProject.git.isClean ? (
                       <>
                         <span className="git-dirty-count">
                           {activeProject.git.changedFiles.length}

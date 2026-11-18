@@ -430,6 +430,7 @@ export function GitDrawerModal({
   const [modalTab, setModalTab] = useState<'changes' | 'branches'>(defaultTab);
   const [loading, setLoading] = useState<boolean>(true);
   const [refsLoading, setRefsLoading] = useState<boolean>(true);
+  const [reviewAvailable, setReviewAvailable] = useState(false);
   const [review, setReview] = useState<GitChangeReviewPayload>({
     status: project.git,
     diff: '',
@@ -459,14 +460,16 @@ export function GitDrawerModal({
   });
 
   async function loadDiff(preferredPath?: string) {
+    setReviewAvailable(false);
     setLoading(true);
     setError(null);
     setAuthPromptHost(null);
     try {
       const res = await fetch(`/api/projects/${encodeURIComponent(project.id)}/git/diff`);
-      if (!res.ok) throw new Error(`Failed to read working-tree changes (${res.status})`);
-      const data = (await res.json()) as GitChangeReviewPayload;
+      const data = (await res.json()) as GitChangeReviewPayload & { message?: string };
+      if (!res.ok) throw new Error(data.message ?? `Failed to read working-tree changes (${res.status})`);
       setReview(data);
+      setReviewAvailable(true);
       setSelectedPaths(data.status.changedFiles.map((file) => file.path));
       const candidates = data.files.map((f) => f.path);
       setSelectedPath((prev) => {
@@ -625,7 +628,7 @@ export function GitDrawerModal({
 
   async function handleCommit(e: React.FormEvent) {
     e.preventDefault();
-    if (!commitMessage.trim() || review.status.isClean || !selectedPaths.length) return;
+    if (!reviewAvailable || !commitMessage.trim() || review.status.isClean || !selectedPaths.length) return;
     setCommitting(true);
     setError(null);
     setAuthPromptHost(null);
@@ -722,11 +725,18 @@ export function GitDrawerModal({
 
     if (file.category === 'markdown' && file.markdownReview) {
       const md = file.markdownReview;
+      if (md.limited === 'source-only') {
+        return (
+          <div className="rich-truncation-banner">
+            This document exceeds the rich comparison limits. Switch to Raw git diff to review the source changes.
+          </div>
+        );
+      }
       return (
         <div className="rich-markdown-review">
-          {file.truncated && (
+          {md.limited === 'word-detail' && (
             <div className="rich-truncation-banner">
-              Large document preview truncated at 256 KB. Switch to Raw git diff to inspect full patch lines.
+              Some text is shown as a whole replacement because word-level comparison reached its limits.
             </div>
           )}
 
@@ -1006,6 +1016,8 @@ export function GitDrawerModal({
           <>
             {loading ? (
               <div className="change-review-empty">Inspecting working copy against HEAD…</div>
+            ) : !reviewAvailable ? (
+              <div className="change-review-empty">Working-tree review is unavailable.</div>
             ) : status.isClean || review.files.length === 0 ? (
               <div className="change-review-empty">
                 <CheckCircle2 size={20} aria-hidden="true" />
@@ -1160,7 +1172,7 @@ export function GitDrawerModal({
                 <button
                   type="submit"
                   className="btn btn-primary commit-submit-btn"
-                  disabled={status.isClean || !selectedPaths.length || !commitMessage.trim() || committing}
+                  disabled={!reviewAvailable || status.isClean || !selectedPaths.length || !commitMessage.trim() || committing}
                 >
                   {committing
                     ? 'Committing…'

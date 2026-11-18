@@ -688,6 +688,9 @@ export function ImportRepoModal(props: Props) {
                     {localPreview.isGitRepo ? ` · Git branch ${localPreview.branch}` : ' · plain folder (non-Git)'}
                   </span>
                 </div>
+                {localPreview.scanIncomplete && (
+                  <div className="import-inspect-warn">Inspection was partial. Page and embed counts may be incomplete.</div>
+                )}
                 {localPreview.alreadyRegisteredId && (
                   <div className="import-inspect-warn">
                     Already connected as <code>{localPreview.alreadyRegisteredId}</code>.
