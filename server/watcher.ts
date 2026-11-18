@@ -51,6 +51,7 @@ export class ProjectWatcherHub {
     if (this.watchers.has(project.id)) return;
     const watcher = chokidar.watch(project.rootPath, {
       ignoreInitial: true,
+      followSymlinks: false,
       ignored: (watchedPath: string) => {
         const rel = path.relative(project.rootPath, watchedPath).split(path.sep).join('/');
         if (!rel || rel.startsWith('..')) return false;

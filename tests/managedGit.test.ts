@@ -1,0 +1,336 @@
+import { execFileSync } from 'node:child_process';
+import fs from 'node:fs';
+import net from 'node:net';
+import os from 'node:os';
+import path from 'node:path';
+import request from 'supertest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { createHubApp, type HubAppInstance } from '../server/app.js';
+import { loadEnrollment } from '../server/enrollment.js';
+import { GitQueue } from '../server/gitQueue.js';
+import type { ProposalContext, ProposalService } from '../server/gitProtocol.js';
+import { startGitRunner } from '../server/gitRunner.js';
+import { GitSocketClient } from '../server/gitSocketClient.js';
+import { ProjectRegistry } from '../server/projectRegistry.js';
+
+const fixture = vi.hoisted(() => ({ source: '', fetches: [] as string[][] }));
+
+vi.mock('node:child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:child_process')>();
+  return {
+    ...actual,
+    spawn(command: string, args: string[], options: Parameters<typeof actual.spawn>[2] & { env?: NodeJS.ProcessEnv }) {
+      const fetchIndex = args.indexOf('fetch');
+      if (command !== '/usr/bin/git' || fetchIndex < 0) return actual.spawn(command, args, options);
+
+      const remote = args[fetchIndex + 6];
+      if (remote !== 'https://github.com/fictional-observatory/amber-wiki.git' || !fixture.source) {
+        throw new Error('Only disposable test transport is allowed.');
+      }
+      expect(options.env?.GIT_CONFIG_KEY_0).toBe('http.https://github.com/.extraHeader');
+      expect(options.env?.GIT_CONFIG_VALUE_0).toBe('Authorization: Basic ' +
+        Buffer.from('x-access-token:fictional-read-token').toString('base64'));
+      expect(args.join(' ')).not.toContain('fictional-read-token');
+      fixture.fetches.push(args);
+      const localArgs = [...args.slice(0, fetchIndex), '-c', 'protocol.file.allow=always', ...args.slice(fetchIndex)];
+      localArgs[fetchIndex + 8] = fixture.source;
+      const env = { ...options.env };
+      delete env.GIT_CONFIG_COUNT;
+      delete env.GIT_CONFIG_KEY_0;
+      delete env.GIT_CONFIG_VALUE_0;
+      return actual.spawn(command, localArgs, { ...options, env });
+    }
+  };
+});
+
+const entry = {
+  id: 'amber', name: 'Amber Observatory', remote: 'https://github.com/Fictional-Observatory/Amber-Wiki',
+  branch: 'main', defaultDoc: 'README.md'
+};
+const proposalInput = { reviewId: 'test-review', message: 'Calibrate fictional optics', paths: ['README.md'] };
+
+function git(cwd: string, args: string[]): string {
+  return execFileSync('/usr/bin/git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+}
+
+describe('managed Git service', () => {
+  let root: string;
+  let reposDir: string;
+  let stateDir: string;
+  let enrollmentFile: string;
+  let socketPath: string;
+  let workTree: string;
+  let gitDir: string;
+  let hub: HubAppInstance | undefined;
+  let runner: Awaited<ReturnType<typeof startGitRunner>> | undefined;
+
+  beforeEach(() => {
+    fixture.source = '';
+    fixture.fetches.length = 0;
+    root = fs.mkdtempSync(path.join(os.tmpdir(), 'fw-git-'));
+    reposDir = path.join(root, 'repos');
+    stateDir = path.join(root, 'state');
+    const socketDir = path.join(root, 'socket');
+    for (const dir of [reposDir, stateDir, socketDir]) fs.mkdirSync(dir, { mode: 0o700 });
+    workTree = path.join(reposDir, entry.id);
+    gitDir = path.join(stateDir, entry.id, 'git');
+    socketPath = path.join(socketDir, 'git.sock');
+    enrollmentFile = path.join(root, 'enrollment.json');
+    fs.writeFileSync(enrollmentFile, JSON.stringify({ projects: [entry] }), { mode: 0o444 });
+  });
+
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    await hub?.close();
+    await runner?.close();
+    hub = undefined;
+    runner = undefined;
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  async function start(proposalService?: ProposalService) {
+    runner = await startGitRunner({ enrollmentFile, reposDir, stateDir, socketPath, proposalService });
+    return new GitSocketClient(socketPath);
+  }
+
+  function app(auth?: 'allow' | 'deny', branch = 'main', actor = 'fictional-reviewer') {
+    const projects = loadEnrollment(enrollmentFile).map((project) => ({ ...project, branch }));
+    return createHubApp({
+      registry: new ProjectRegistry([], { projects, reposDir }),
+      gitSocketPath: socketPath,
+      proposalAuth: auth === 'allow' ? (_req, res, next) => {
+        res.locals.proposalActor = actor;
+        next();
+      } :
+        auth === 'deny' ? (_req, res) => { res.sendStatus(403); } : undefined,
+      enableWatcher: false
+    });
+  }
+
+  function upstream() {
+    fixture.source = path.join(root, 'upstream');
+    fs.mkdirSync(fixture.source);
+    git(fixture.source, ['init', '-b', 'main']);
+    git(fixture.source, ['config', 'user.name', 'Fictional optical bench maintainer']);
+    git(fixture.source, ['config', 'user.email', 'optics@example.invalid']);
+    fs.writeFileSync(path.join(fixture.source, 'README.md'), '# Amber Observatory\n');
+    git(fixture.source, ['add', 'README.md']);
+    git(fixture.source, ['commit', '-m', 'Initial fictional optics document']);
+    return git(fixture.source, ['rev-parse', 'HEAD']);
+  }
+
+  function companion(base: string): ProposalService {
+    return {
+      enforcesManagedBase: true,
+      getRepoToken: vi.fn(async (ctx: ProposalContext, mode) => {
+        expect(mode).toBe('read');
+        expect(ctx).toMatchObject({ gitDir, remote: 'https://github.com/fictional-observatory/amber-wiki.git', branch: 'focuswiki/bootstrap' });
+        expect(fs.statSync(ctx.workTree).isDirectory()).toBe(true);
+        return 'fictional-read-token';
+      }),
+      reviewProposal: vi.fn(async () => ({
+        reviewId: 'test-review', snapshotDigest: 'test-snapshot', diff: 'reviewed text', commitScopeNote: '',
+        files: [], status: {
+          branch: 'main', headSha: base, headSubject: '', isClean: false,
+          changedFiles: [{ path: 'README.md', status: 'modified' }]
+        }
+      })),
+      publishProposal: vi.fn(async () => ({
+        url: 'https://github.com/Fictional-Observatory/Amber-Wiki/pull/7', sha: base
+      }))
+    };
+  }
+
+  it('rejects non-canonical authority, duplicate IDs, filesystem paths, and dangerous refs in enrollment', () => {
+    const cases = [
+      [{ ...entry, remote: 'file:///fictional/wiki.git' }],
+      [{ ...entry, remote: 'https://github.com.example.test/fictional/wiki' }],
+      [{ ...entry, remote: 'https://fictional@github.com/fictional/wiki' }],
+      [{ ...entry, remote: 'https://github.com:443/fictional/wiki' }],
+      [{ ...entry, remote: 'https://github.com/fictional/wiki?ref=main' }],
+      [{ ...entry, remote: 'https://github.com/fictional/%2e%2e' }],
+      [{ ...entry, rootPath: '/fictional/wiki' }],
+      [{ ...entry, id: '../fictional' }],
+      [{ ...entry, branch: 'main:refs/heads/fictional' }],
+      [{ ...entry, branch: 'main/.hidden' }],
+      [{ ...entry, defaultDoc: '.git/index.md' }],
+      [entry, entry]
+    ];
+    const candidate = path.join(root, 'candidate.json');
+    for (const projects of cases) {
+      fs.writeFileSync(candidate, JSON.stringify({ projects }));
+      expect(() => loadEnrollment(candidate)).toThrow('Invalid managed project');
+    }
+  });
+
+  it('keeps existing working files browsable and fails closed without worker or auth dependencies', async () => {
+    fs.mkdirSync(path.join(workTree, '.git'), { recursive: true });
+    fs.writeFileSync(path.join(workTree, '.git', 'config'), 'fictional legacy metadata');
+    fs.writeFileSync(path.join(workTree, 'README.md'), '# Keep my local draft\n');
+    hub = app();
+    const list = await request(hub.app).get('/api/projects').expect(200);
+    expect(list.body.projects[0]).toMatchObject({
+      workingTreeAvailable: true,
+      git: { state: 'unavailable', isClean: null, headSha: '' },
+      docs: [{ path: 'README.md' }]
+    });
+    await request(hub.app).get('/api/projects/amber/doc').expect(200);
+    await request(hub.app).get('/api/search?q=local%20draft').expect(200).expect(({ body }) => {
+      expect(body.results).toHaveLength(1);
+    });
+    for (const route of [
+      '/api/projects/import', '/api/projects/inspect-remote', '/api/projects/inspect-local',
+      '/api/settings/credentials/test', '/api/projects/amber/git/commit', '/api/projects/amber/git/pull',
+      '/api/projects/amber/git/fetch', '/api/projects/amber/git/checkout', '/api/projects/amber/git/push'
+    ]) await request(hub.app).post(route).send({ url: 'file:///fictional/repo' }).expect(410);
+    await request(hub.app).get('/api/settings/credentials').expect(410);
+    await request(hub.app).get('/api/projects/amber/git/refs').expect(410);
+    await request(hub.app).delete('/api/projects/amber').expect(410);
+    await request(hub.app).get('/api/projects/amber/git/diff').expect(503);
+    await request(hub.app).post('/api/projects/amber/git/propose').send(proposalInput).expect(503);
+
+    const client = await start();
+    expect(fs.statSync(socketPath).mode & 0o777).toBe(0o660);
+    await expect(client.review(loadEnrollment(enrollmentFile)[0], 'fictional-reviewer')).rejects.toMatchObject({ code: 'proposal_unavailable' });
+    expect(fs.readdirSync(stateDir)).toEqual([]);
+    expect(fs.readFileSync(path.join(workTree, '.git', 'config'), 'utf8')).toBe('fictional legacy metadata');
+  });
+
+  it('materializes only the initial base, reports dirty status, fetches updates and dispatches authenticated proposals', async () => {
+    const base = upstream();
+    const service = companion(base);
+    const client = await start(service);
+    await vi.waitFor(async () => {
+      expect((await client.statuses()).amber).toMatchObject({
+        state: 'ready', headSha: base, isClean: true, fetchState: 'current', behind: 0
+      });
+    }, { timeout: 10_000 });
+    expect(fs.existsSync(path.join(workTree, '.git'))).toBe(false);
+    expect(fs.readFileSync(path.join(workTree, 'README.md'), 'utf8')).toBe('# Amber Observatory\n');
+    expect(git(gitDir, ['--git-dir=.', 'symbolic-ref', 'HEAD'])).toBe('refs/heads/main');
+
+    fs.writeFileSync(path.join(workTree, 'README.md'), '# An external draft\n');
+    fs.writeFileSync(path.join(workTree, 'local-only.md'), '# A new local page\n');
+    fs.mkdirSync(path.join(workTree, '.focuswiki'));
+    fs.writeFileSync(path.join(workTree, '.focuswiki', 'recovery.md'), '# Recover this draft\n');
+    fs.writeFileSync(path.join(fixture.source, 'README.md'), '# A different upstream revision\n');
+    git(fixture.source, ['add', 'README.md']);
+    git(fixture.source, ['commit', '-m', 'Change the upstream draft base']);
+    const now = Date.now();
+    vi.spyOn(Date, 'now').mockImplementation(() => now + 65_000);
+
+    await vi.waitFor(async () => {
+      expect((await client.statuses()).amber).toMatchObject({
+        state: 'ready', headSha: base, isClean: false, behind: 1, fetchState: 'current',
+        changedFiles: [{ path: 'README.md' }, { path: 'local-only.md' }]
+      });
+    }, { timeout: 10_000 });
+    expect(fixture.fetches).toHaveLength(2);
+    expect(fixture.fetches[0].at(-1)).toBe('+refs/heads/main:refs/remotes/origin/main');
+    expect(fs.readFileSync(path.join(workTree, 'README.md'), 'utf8')).toBe('# An external draft\n');
+    expect(fs.readFileSync(path.join(workTree, 'local-only.md'), 'utf8')).toBe('# A new local page\n');
+    expect(fs.readFileSync(path.join(workTree, '.focuswiki/recovery.md'), 'utf8')).toBe('# Recover this draft\n');
+
+    const unauthorized = app('deny');
+    await request(unauthorized.app).get('/api/projects/amber/git/diff').expect(403);
+    await request(unauthorized.app).post('/api/projects/amber/git/propose').send(proposalInput).expect(403);
+    await unauthorized.close();
+    expect(service.reviewProposal).not.toHaveBeenCalled();
+    expect(service.publishProposal).not.toHaveBeenCalled();
+
+    hub = app('allow');
+    await request(hub.app).get('/api/projects').expect(200).expect(({ body }) => {
+      expect(body.projects[0].git).toMatchObject({ state: 'ready', behind: 1 });
+    });
+    const review = await request(hub.app).get('/api/projects/amber/git/diff').expect('Cache-Control', 'no-store').expect(200);
+    expect(review.body).toMatchObject({ status: { branch: 'main' }, diff: 'reviewed text' });
+    expect(review.body.reviewId).toMatch(/^[a-f0-9-]{36}\.test-review$/);
+    const ctx = vi.mocked(service.reviewProposal).mock.calls[0][0];
+    expect(ctx).toEqual({
+      projectId: 'amber', workTree, gitDir, branch: expect.stringMatching(/^focuswiki\/[a-f0-9]{40}$/),
+      remote: 'https://github.com/fictional-observatory/amber-wiki.git'
+    });
+    const input = { ...proposalInput, reviewId: review.body.reviewId };
+
+    await request(hub.app).post('/api/projects/amber/git/propose').send({ ...input, paths: [] }).expect(400);
+    await request(hub.app).post('/api/projects/amber/git/propose').send({ ...input, paths: ['../README.md'] }).expect(400);
+    await request(hub.app).post('/api/projects/amber/git/propose').send({ ...input, remote: 'https://elsewhere.test/r' }).expect(400);
+    expect(service.publishProposal).not.toHaveBeenCalled();
+    delete service.enforcesManagedBase;
+    await request(hub.app).post('/api/projects/amber/git/propose').send(input).expect(503);
+    expect(service.publishProposal).not.toHaveBeenCalled();
+    service.enforcesManagedBase = true;
+    await request(hub.app).post('/api/projects/amber/git/propose').send(input).expect(200, {
+      url: 'https://github.com/Fictional-Observatory/Amber-Wiki/pull/7', sha: base
+    });
+    expect(service.publishProposal).toHaveBeenCalledWith(ctx, proposalInput);
+
+    const differentActor = app('allow', 'main', 'fictional-other-reviewer');
+    vi.mocked(service.publishProposal).mockImplementationOnce(async (other) => {
+      expect(other.branch).not.toBe(ctx.branch);
+      throw Object.assign(new Error('Review unavailable for this actor'), { statusCode: 409 });
+    });
+    await request(differentActor.app).post('/api/projects/amber/git/propose').send(input).expect(409);
+    await differentActor.close();
+
+    vi.mocked(service.publishProposal).mockRejectedValueOnce(Object.assign(new Error('fictional-token-sensitive-error'), { statusCode: 409 }));
+    const conflict = await request(hub.app).post('/api/projects/amber/git/propose').send(input).expect(409);
+    expect(conflict.body.error).toBe('proposal_conflict');
+    expect(conflict.text).not.toContain('fictional-token-sensitive-error');
+
+    const staleWeb = app('allow', 'other');
+    await request(staleWeb.app).get('/api/projects/amber/git/diff').expect(404);
+    await staleWeb.close();
+
+    await runner?.close();
+    const restarted = await start();
+    await vi.waitFor(async () => {
+      expect((await restarted.statuses()).amber).toMatchObject({
+        state: 'ready', headSha: base, isClean: false, behind: 1, fetchState: 'unavailable'
+      });
+    });
+    expect(fs.readFileSync(path.join(workTree, 'README.md'), 'utf8')).toBe('# An external draft\n');
+  });
+
+  it('rejects generic socket commands and does not adopt a project directory or replace a symlink', async () => {
+    const base = upstream();
+    const service = companion(base);
+    fs.symlinkSync(fixture.source, workTree, 'dir');
+    const client = await start(service);
+    const reply = await new Promise<string>((resolve, reject) => {
+      const socket = net.createConnection(socketPath);
+      let body = '';
+      socket.setEncoding('utf8');
+      socket.on('connect', () => socket.write(JSON.stringify({ verb: 'fetch', remote: 'file:///fictional' }) + '\n'));
+      socket.on('data', (data) => { body += data; });
+      socket.on('end', () => resolve(body));
+      socket.on('error', reject);
+    });
+    expect(JSON.parse(reply)).toEqual({ ok: false, error: 'invalid_git_request' });
+    expect((await client.statuses()).amber).toMatchObject({ state: 'unavailable', isClean: null });
+    expect(service.getRepoToken).not.toHaveBeenCalled();
+    expect(fs.readlinkSync(workTree)).toBe(fixture.source);
+    hub = app('allow');
+    await request(hub.app).get('/api/projects/amber/doc').expect(404);
+  });
+});
+
+it('bounds the queue, withdraws canceled work, and serializes jobs on the same checkout', async () => {
+  const queue = new GitQueue(1, 1);
+  const controller = new AbortController();
+  let finish!: () => void;
+  const running = queue.run('amber', controller.signal, () => new Promise<void>((resolve) => { finish = resolve; }));
+  const waiting = new AbortController();
+  const work = vi.fn(async () => 'done');
+  const canceled = queue.run('amber', waiting.signal, work);
+  await expect(queue.run('amber', controller.signal, work)).rejects.toMatchObject({ code: 'git_busy' });
+  waiting.abort();
+  await expect(canceled).rejects.toMatchObject({ code: 'git_timeout' });
+  const next = queue.run('amber', controller.signal, work);
+  expect(work).not.toHaveBeenCalled();
+  finish();
+  await running;
+  await expect(next).resolves.toBe('done');
+  expect(work).toHaveBeenCalledTimes(1);
+  queue.close();
+});

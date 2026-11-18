@@ -93,13 +93,8 @@ export interface GitCredentialSummary {
 }
 
 export interface ServerEnvironmentInfo {
-  managedReposDir: string;
-  allowedImportRoots: string[];
-  configPath: string | null;
-  credentialsPath: string | null;
-  encryptionMode: 'env-key' | 'file-key' | 'memory-only';
-  sshClientAvailable: boolean;
   projectCount: number;
+  managedProjectCount: number;
 }
 
 export interface DocTreeEntry {
@@ -116,8 +111,17 @@ export interface EmbedAssetEntry {
   files: string[];
 }
 
+export type ProjectGitStatus = (
+  | (GitRepoStatus & { state: 'ready'; checkedAt: string; changesTruncated: boolean })
+  | (Omit<GitRepoStatus, 'isClean'> & { state: 'unmanaged' | 'pending' | 'unavailable'; isClean: null })
+) & {
+  fetchState?: 'pending' | 'current' | 'unavailable';
+  fetchedAt?: string;
+};
+
 export interface ProjectSummary extends ProjectConfig {
-  git: GitRepoStatus;
+  git: ProjectGitStatus;
+  workingTreeAvailable: boolean;
   docs: DocTreeEntry[];
   embeds: EmbedAssetEntry[];
 }

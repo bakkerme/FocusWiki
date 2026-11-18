@@ -44,7 +44,6 @@ const helpers = `
   import assert from 'node:assert/strict';
   import fs from 'node:fs';
   import { createHash } from 'node:crypto';
-  import { execFileSync } from 'node:child_process';
   const root = '/app/sample-repos/cindervault-rpg';
   const docPath = 'docs/vault-breach-action.md';
   const route = '/api/projects/cindervault-rpg';
@@ -63,11 +62,15 @@ const helpers = `
     const { projects } = await api('/api/projects');
     assert.equal(projects.length, 2);
     for (const project of projects) {
-      assert.equal(project.git.branch, 'main');
-      assert.ok(project.git.headSha);
+      assert.equal(project.git.state, 'unmanaged');
+      assert.equal(project.git.isClean, null);
+      assert.equal(project.workingTreeAvailable, true);
+      assert.equal(fs.existsSync(project.rootPath + '/.git'), false);
       assert.ok(project.docs.length >= 3);
       assert.ok(project.embeds.length >= 1);
     }
+    await api(route + '/git/commit', 'POST', {}, 410);
+    await api('/api/settings/credentials', 'GET', undefined, 410);
     const htmlRes = await fetch('http://127.0.0.1:8088/');
     assert.equal(htmlRes.status, 200);
     const html = await htmlRes.text();
@@ -86,7 +89,7 @@ try {
   }
   docker('volume', 'create', volume);
   await start();
-  console.log('PASS: fresh image seeds both Git repositories and becomes healthy');
+  console.log('PASS: fresh image serves both fictional projects and becomes healthy');
 
   const expected = inContainer(helpers + `
     const doc = await check();
@@ -112,11 +115,10 @@ try {
       revision: persisted.revision,
       hashes: ['docs/vault-breach-action.md', 'docs/vault-breach-action.comments.json',
         'embeds/docker-smoke/index.html'].map(p =>
-          createHash('sha256').update(fs.readFileSync(root + '/' + p)).digest('hex')),
-      head: execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim()
+          createHash('sha256').update(fs.readFileSync(root + '/' + p)).digest('hex'))
     }));
   `);
-  console.log('PASS: production client assets, Git status, docs, comments and component writes');
+  console.log('PASS: production client assets, retired Git routes, docs, comments and component writes');
 
   function verifyPersistence() {
     const actual = inContainer(helpers + `
@@ -126,8 +128,7 @@ try {
         revision: doc.revision,
         hashes: ['docs/vault-breach-action.md', 'docs/vault-breach-action.comments.json',
           'embeds/docker-smoke/index.html'].map(p =>
-            createHash('sha256').update(fs.readFileSync(root + '/' + p)).digest('hex')),
-        head: execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim()
+            createHash('sha256').update(fs.readFileSync(root + '/' + p)).digest('hex'))
       }));
     `);
     assert.deepEqual(JSON.parse(actual), JSON.parse(expected));
@@ -136,7 +137,7 @@ try {
   docker('restart', name);
   await ready();
   verifyPersistence();
-  console.log('PASS: restart preserves document, comment, component and Git HEAD');
+  console.log('PASS: restart preserves documents, comments and components');
 
   docker('rm', '-f', name);
   await start();

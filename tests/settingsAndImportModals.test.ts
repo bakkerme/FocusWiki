@@ -7,12 +7,11 @@ import path from 'node:path';
 import type { Browser, BrowserContext, Page } from 'playwright';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createHubApp, type HubAppInstance } from '../server/app';
-import { CredentialStore } from '../server/credentialStore';
 
 const PROJECT_ROOT = path.resolve(__dirname, '..');
 const INITIAL_DOC = '# Aurora Handbook\n\nFictional observatory operating notes.\n';
 
-describe('Settings, repository import, and Git drawer browser flows', () => {
+describe('Settings and document browsing', () => {
   let browser: Browser;
   let context: BrowserContext;
   let page: Page;
@@ -51,12 +50,6 @@ describe('Settings, repository import, and Git drawer browser flows', () => {
         id: 'aurora-handbook', name: 'Aurora Handbook', description: 'Fictional test fixture',
         rootPath: repoRoot, defaultDoc: 'README.md'
       }],
-      configPath: path.join(tmpRoot, 'config', 'projects.json'),
-      managedReposDir: path.join(tmpRoot, 'managed'),
-      allowedImportRoots: [tmpRoot],
-      credentialStore: new CredentialStore({
-        credentialsPath: path.join(tmpRoot, 'config', 'credentials.enc.json'), env: {}
-      }),
       clientDistDir: path.join(PROJECT_ROOT, 'dist', 'client'),
       enableWatcher: false
     });
@@ -151,78 +144,4 @@ describe('Settings, repository import, and Git drawer browser flows', () => {
     expect(execFileSync('git', ['status', '--porcelain'], { cwd: repoRoot, encoding: 'utf8' })).toBe('');
   });
 
-  it('shows the credentials empty state and persists then removes a fictional host credential through the UI', async () => {
-    await openSettings();
-    await page.locator('[data-settings-section="credentials"]').click();
-    await page.getByText('No HTTPS tokens configured', { exact: true }).waitFor();
-    await page.getByLabel('Git host', { exact: true }).fill('git.example.test');
-    await page.getByLabel('Username (optional)', { exact: true }).fill('fictional-author');
-    const token = 'fictional-test-token-123456789';
-    await page.locator('.settings-cred-form input[type="password"]').fill(token);
-    await page.getByRole('button', { name: 'Save token', exact: true }).click();
-    await page.locator('.is-cred-item:has-text("git.example.test")').waitFor();
-    expect(await page.locator('.is-cred-item').textContent()).not.toContain(token);
-    expect(hub.credentialStore.list().map((cred) => cred.host)).toEqual(['git.example.test']);
-    expect(fs.readFileSync(hub.credentialStore.credentialsPath!, 'utf8')).not.toContain(token);
-    await page.keyboard.press('Escape');
-    await openSettings();
-    await page.locator('[data-settings-section="credentials"]').click();
-    await page.locator('.is-cred-item').getByRole('button', { name: 'Remove', exact: true }).click();
-    await page.getByText('No HTTPS tokens configured', { exact: true }).waitFor();
-    expect(hub.credentialStore.list()).toEqual([]);
-  });
-
-  it('switches Clone URL / Local folder / New repo panels, rejects an invalid URL, and creates and opens a new wiki', async () => {
-    await openSettings();
-    await page.locator('[data-settings-section="repositories"]').click();
-    await page.getByRole('button', { name: 'Add or clone repo…', exact: true }).click();
-    const dialog = page.locator('.import-repo-modal');
-    await dialog.waitFor();
-    await dialog.getByRole('tab', { name: 'Clone URL', exact: true }).click();
-    await dialog.getByLabel('Git repository URL').fill('not-a-repository-url');
-    await dialog.getByRole('button', { name: 'Clone & import', exact: true }).click();
-    await dialog.locator('.import-error-banner').waitFor();
-    expect((await dialog.locator('.import-error-banner').innerText()).trim().length).toBeGreaterThan(10);
-    await dialog.getByRole('tab', { name: 'Local folder', exact: true }).click();
-    await dialog.getByLabel('Existing directory path').waitFor();
-    expect(await dialog.locator('.import-error-banner').count()).toBe(0);
-    await dialog.getByRole('tab', { name: 'New repo', exact: true }).click();
-    await dialog.getByLabel('Repository name', { exact: true }).fill('Silver Comet Notes');
-    await dialog.getByLabel('Initial page path', { exact: true }).fill('docs/start.md');
-    await dialog.getByRole('button', { name: 'Create repository', exact: true }).click();
-    await dialog.waitFor({ state: 'detached' });
-    await page.waitForFunction(() => document.querySelector('.ProseMirror h1')?.textContent === 'Silver Comet Notes');
-    await page.waitForFunction(() => (document.querySelector('#projectSelect') as HTMLSelectElement)?.value === 'silver-comet-notes');
-    const created = hub.registry.list().find((project) => project.id === 'silver-comet-notes')!;
-    expect(fs.readFileSync(path.join(created.rootPath, 'docs/start.md'), 'utf8')).toContain('# Silver Comet Notes');
-    expect(execFileSync('git', ['branch', '--show-current'], { cwd: created.rootPath, encoding: 'utf8' }).trim()).toBe('main');
-    expect(execFileSync('git', ['status', '--porcelain'], { cwd: created.rootPath, encoding: 'utf8' })).toBe('');
-  });
-
-  it('inspects the current branch and edited document diff, commits through Git UI, and returns to clean status', async () => {
-    await page.locator('.btn-edit-entry').click();
-    await page.getByRole('button', { name: 'Markdown source', exact: true }).click();
-    await page.locator('textarea.markdown-source-editor').fill(`${INITIAL_DOC}\nCalibration checked by the fictional crew.\n`);
-    await page.locator('.btn-done-editing').click();
-    await page.waitForSelector('.workbench[data-workspace-mode="read"]');
-    await page.locator('.git-status-btn').click();
-    const dialog = page.locator('.change-review-modal');
-    await dialog.locator('.change-file-item').waitFor();
-    expect(await dialog.locator('.change-review-title-row').innerText()).toContain('main');
-    await dialog.getByRole('tab', { name: 'Branches & PRs', exact: true }).click();
-    await dialog.locator('.git-ref-row.is-current').waitFor();
-    expect(await dialog.locator('.git-ref-row.is-current').innerText()).toContain('main');
-    await dialog.getByRole('tab', { name: /Working changes/ }).click();
-    expect(await dialog.locator('.change-file-item').count()).toBe(1);
-    expect(await dialog.locator('.change-file-path').innerText()).toContain('README.md');
-    await dialog.getByRole('button', { name: 'Raw diff', exact: true }).click();
-    await page.waitForFunction(() => document.querySelector('.diff-viewer')?.textContent?.includes('+Calibration checked by the fictional crew.'));
-    await dialog.getByLabel('Commit message', { exact: true }).fill('Record fictional calibration');
-    await dialog.getByLabel('Commit author name', { exact: true }).fill('Fictional Crew');
-    await dialog.locator('.commit-submit-btn').click();
-    await dialog.locator('.change-review-banner:has-text("Committed")').waitFor();
-    await dialog.locator('.change-review-empty:has-text("Working copy matches HEAD")').waitFor();
-    expect(execFileSync('git', ['status', '--porcelain'], { cwd: repoRoot, encoding: 'utf8' })).toBe('');
-    expect(execFileSync('git', ['log', '-1', '--format=%B'], { cwd: repoRoot, encoding: 'utf8' }).trim()).toBe('Record fictional calibration');
-  });
 });

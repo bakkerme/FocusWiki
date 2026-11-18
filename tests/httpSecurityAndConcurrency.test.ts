@@ -127,9 +127,9 @@ describe('LAN HTTP security, safe assets, and concurrent writes', () => {
   it('bounds expensive API calls per peer and returns Retry-After without throttling health reads', async () => {
     await hub.close();
     hub = makeHub({ rateLimit: { maxRequests: 2, windowMs: 60000 } });
-    await request(hub.app).post('/api/projects/import').send({ mode: 'invalid' }).expect(400);
-    await request(hub.app).post('/api/projects/missing/git/fetch').send({}).expect(404);
-    const response = await request(hub.app).post('/api/projects/missing/git/pull')
+    await request(hub.app).get('/api/projects/missing/git/diff').expect(404);
+    await request(hub.app).post('/api/projects/missing/git/propose').send({}).expect(404);
+    const response = await request(hub.app).post('/api/projects/missing/git/propose')
       .set('X-Forwarded-For', '203.0.113.90').send({}).expect(429);
     expect(Number(response.headers['retry-after'])).toBeGreaterThan(0);
     await request(hub.app).get('/api/health').expect(200);
@@ -220,12 +220,12 @@ describe('LAN HTTP security, safe assets, and concurrent writes', () => {
     expect(matches.body.results).toHaveLength(60);
   });
 
-  it('returns safe JSON and logs unexpected internal errors with stack traces', async () => {
+  it('returns safe JSON and avoids logging private request failure details', async () => {
     const log = vi.spyOn(console, 'error').mockImplementation(() => {});
     vi.spyOn(hub.registry, 'list').mockImplementation(() => { throw new Error('private internal detail'); });
     const response = await request(hub.app).get('/api/projects').expect(500);
     expect(response.body).toEqual({ error: 'server_error', message: 'Unexpected server error.' });
-    expect(log).toHaveBeenCalledWith(expect.any(String), expect.stringContaining('Error: private internal detail\n'));
+    expect(log).toHaveBeenCalledWith('[focuswiki] Unexpected request error.');
   });
 
   it('queues async same-key operations, permits independent keys, and recovers after rejection', async () => {

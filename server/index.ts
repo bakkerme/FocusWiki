@@ -2,37 +2,30 @@ import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import type { RequestHandler } from 'express';
 import type { ProjectConfig } from '../shared/types.js';
 import { createHubApp } from './app.js';
+import { loadEnrollment } from './enrollment.js';
+import { ProjectRegistry } from './projectRegistry.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT_DIR = path.resolve(__dirname, __dirname.includes(`${path.sep}dist${path.sep}`) ? '../../..' : '..');
 
-function resolveConfigPath(): string {
-  return process.env.PROJECTS_CONFIG
-    ? path.resolve(process.env.PROJECTS_CONFIG)
-    : path.join(ROOT_DIR, 'config', 'projects.json');
-}
-
 function loadProjectsConfig(configPath: string): ProjectConfig[] {
-  if (!fs.existsSync(configPath)) {
-    const defaultTemplatePath = path.join(path.dirname(configPath), 'projects.default.json');
-    if (fs.existsSync(defaultTemplatePath)) {
-      fs.mkdirSync(path.dirname(configPath), { recursive: true, mode: 0o770 });
-      fs.copyFileSync(defaultTemplatePath, configPath);
-      fs.chmodSync(configPath, 0o660);
-    } else {
-      throw new Error(
-        `Missing projects config at ${configPath}. Run "npm run seed" first to initialize sample repositories.`
-      );
-    }
-  }
-
   const raw = JSON.parse(fs.readFileSync(configPath, 'utf8')) as { projects: ProjectConfig[] };
   return raw.projects.map((p) => ({
     ...p,
-    rootPath: path.isAbsolute(p.rootPath) ? p.rootPath : path.resolve(path.dirname(configPath), '..', p.rootPath)
+    rootPath: path.resolve(path.dirname(configPath), '..', p.rootPath)
   }));
+}
+
+async function loadProposalAuth(): Promise<RequestHandler | undefined> {
+  try {
+    const mod = await import(new URL('./proposalAuth.js', import.meta.url).href);
+    if (typeof mod.proposalAuth === 'function') return mod.proposalAuth;
+  } catch {
+    // Missing or failed auth initialization leaves both proposal routes closed.
+  }
 }
 
 async function main(): Promise<void> {
@@ -43,33 +36,22 @@ async function main(): Promise<void> {
     ? path.resolve(process.env.CLIENT_DIST_DIR)
     : path.join(ROOT_DIR, 'dist', 'client');
 
-  const configPath = resolveConfigPath();
-  const rawCredPath = process.env.CAIRN_CREDENTIALS_FILE ?? process.env.FOCUSWIKI_CREDENTIALS_FILE;
-  const credentialsPath = rawCredPath
-    ? path.resolve(rawCredPath)
-    : path.join(path.dirname(configPath), '.git-credentials.enc.json');
-  const rawReposDir = process.env.FOCUSWIKI_REPOS_DIR ?? process.env.CAIRN_REPOS_DIR;
-  const managedReposDir = rawReposDir
-    ? path.resolve(rawReposDir)
-    : path.join(ROOT_DIR, 'repos');
-  const rawAllowedImportRoots =
-    process.env.FOCUSWIKI_ALLOWED_IMPORT_ROOTS ?? process.env.CAIRN_ALLOWED_IMPORT_ROOTS;
-  const allowedImportRoots = rawAllowedImportRoots !== undefined
-    ? rawAllowedImportRoots
-        .split(',')
-        .map((p) => p.trim())
-        .filter(Boolean)
-    : [managedReposDir];
-
-  const projects = loadProjectsConfig(configPath);
+  const enrollmentFile = process.env.FOCUSWIKI_ENROLLMENT_FILE;
+  const reposDir = process.env.FOCUSWIKI_REPOS_DIR;
+  let registry: ProjectRegistry;
+  if (enrollmentFile) {
+    if (!reposDir) throw new Error('Set FOCUSWIKI_REPOS_DIR for managed enrollment.');
+    registry = new ProjectRegistry([], { projects: loadEnrollment(enrollmentFile), reposDir });
+  } else {
+    // Static browse-only mode is also used by the fictional demo.
+    const config = process.env.PROJECTS_CONFIG || path.join(ROOT_DIR, 'config', 'projects.default.json');
+    registry = new ProjectRegistry(loadProjectsConfig(config));
+  }
   const hub = createHubApp({
-    projects,
-    configPath,
-    credentialsPath,
-    managedReposDir,
-    allowedImportRoots,
-    clientDistDir,
-    enableWatcher: true
+    registry,
+    gitSocketPath: process.env.FOCUSWIKI_GIT_SOCKET,
+    proposalAuth: enrollmentFile ? await loadProposalAuth() : undefined,
+    clientDistDir
   });
 
   const server = http.createServer(hub.app);

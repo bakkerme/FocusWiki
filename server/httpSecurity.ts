@@ -86,7 +86,8 @@ export function createExpensiveRequestLimiter(options: RateLimitOptions = {}): R
   const windowMs = positive(options.windowMs ?? Number(process.env.FOCUSWIKI_RATE_LIMIT_WINDOW_MS ?? 60000), 60000);
   const peers = new Map<string, number[]>();
   return (req, res, next) => {
-    if (req.method !== 'POST' || !/^\/api\/(?:projects\/(?:inspect-remote|import)|(?:settings\/)?credentials\/test|projects\/[^/]+\/git\/(?:fetch|pull))\/?$/i.test(req.path)) {
+    if (!((req.method === 'GET' && /^\/api\/projects\/[^/]+\/git\/diff\/?$/i.test(req.path)) ||
+        (req.method === 'POST' && /^\/api\/projects\/[^/]+\/git\/propose\/?$/i.test(req.path)))) {
       next();
       return;
     }

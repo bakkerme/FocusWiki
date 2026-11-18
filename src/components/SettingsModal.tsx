@@ -1474,7 +1474,7 @@ export function SettingsModal(props: Props) {
               <div className="settings-section-stack">
                 <div className="settings-group-block">
                   <div className="settings-group-head-row">
-                    <h3 className="settings-group-title">Server Storage &amp; Paths</h3>
+                    <h3 className="settings-group-title">Repository enrollment</h3>
                     <button
                       type="button"
                       className="btn btn-compact"
@@ -1491,56 +1491,14 @@ export function SettingsModal(props: Props) {
                         <div className="settings-row-desc">Reading server configuration…</div>
                       </div>
                     ) : envInfo ? (
-                      <>
-                        <div className="settings-card-row">
-                          <div className="settings-row-copy">
-                            <div className="settings-row-title">Managed clones directory</div>
-                            <div className="settings-row-desc settings-mono-desc">
-                              {envInfo.managedReposDir}
-                            </div>
+                      <div className="settings-card-row">
+                        <div className="settings-row-copy">
+                          <div className="settings-row-title">Managed repositories</div>
+                          <div className="settings-row-desc">
+                            {envInfo.managedProjectCount} of {envInfo.projectCount} repositories are enrolled.
                           </div>
                         </div>
-                        <div className="settings-card-row">
-                          <div className="settings-row-copy">
-                            <div className="settings-row-title">Allowed local import roots</div>
-                            <div className="settings-row-desc settings-mono-desc">
-                              {envInfo.allowedImportRoots.join(', ')}
-                            </div>
-                          </div>
-                        </div>
-                        <div className="settings-card-row">
-                          <div className="settings-row-copy">
-                            <div className="settings-row-title">Registry config file</div>
-                            <div className="settings-row-desc settings-mono-desc">
-                              {envInfo.configPath ?? 'In-memory (no config file)'}
-                            </div>
-                          </div>
-                        </div>
-                        <div className="settings-card-row">
-                          <div className="settings-row-copy">
-                            <div className="settings-row-title">Encrypted credentials store</div>
-                            <div className="settings-row-desc settings-mono-desc">
-                              {envInfo.credentialsPath ?? 'Memory-only (ephemeral key)'}
-                            </div>
-                          </div>
-                          <span className="settings-badge is-ok">{envInfo.encryptionMode}</span>
-                        </div>
-                        <div className="settings-card-row">
-                          <div className="settings-row-copy">
-                            <div className="settings-row-title">SSH transport client</div>
-                            <div className="settings-row-desc">
-                              OpenSSH client availability for <code>git@host:...</code> remotes.
-                            </div>
-                          </div>
-                          <span
-                            className={`settings-badge ${
-                              envInfo.sshClientAvailable ? 'is-ok' : 'is-warn'
-                            }`}
-                          >
-                            {envInfo.sshClientAvailable ? 'Available' : 'Not installed'}
-                          </span>
-                        </div>
-                      </>
+                      </div>
                     ) : (
                       <div className="settings-card-row">
                         <div className="settings-row-desc">Unable to load environment info.</div>

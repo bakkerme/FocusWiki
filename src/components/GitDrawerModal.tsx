@@ -431,7 +431,7 @@ export function GitDrawerModal({
   const [loading, setLoading] = useState<boolean>(true);
   const [refsLoading, setRefsLoading] = useState<boolean>(true);
   const [review, setReview] = useState<GitChangeReviewPayload>({
-    status: project.git,
+    status: { ...project.git, isClean: project.git.isClean === true },
     diff: '',
     snapshotDigest: '',
     commitScopeNote: '',

@@ -1291,10 +1291,12 @@ export function App() {
 
                   <button
                     type="button"
-                    className={`git-status-btn ${activeProject.git.isClean ? 'is-clean' : 'dirty'}`}
+                    className={`git-status-btn ${activeProject.git.isClean === null ? '' : activeProject.git.isClean ? 'is-clean' : 'dirty'}`}
                     onClick={() => void handleOpenGitModal()}
                     aria-label={`Repository ${activeProject.name} on branch ${activeProject.git.branch}, ${
-                      activeProject.git.isClean
+                      activeProject.git.isClean === null
+                        ? 'Git status unavailable'
+                        : activeProject.git.isClean
                         ? 'working tree clean'
                         : `${activeProject.git.changedFiles.length} uncommitted ${
                             activeProject.git.changedFiles.length === 1 ? 'file' : 'files'
@@ -1304,7 +1306,9 @@ export function App() {
                   >
                     <GitBranch size={12} aria-hidden="true" />
                     <span className="git-branch-name">{activeProject.git.branch}</span>
-                    {!activeProject.git.isClean ? (
+                    {activeProject.git.isClean === null ? (
+                      <span className="git-status-word">Git status unavailable</span>
+                    ) : !activeProject.git.isClean ? (
                       <>
                         <span className="git-dirty-count">
                           {activeProject.git.changedFiles.length}

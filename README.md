@@ -20,20 +20,9 @@ npm test              # Runs Vitest unit + API integration suite
 ./scripts/server-ctl.sh stop
 ```
 
-## Repository Import, Branches/PRs & Remote Sync
+## Managed repositories
 
-You do not need to edit `config/projects.json` or restart the server to add repositories:
-
-- **In the UI:** Click **+ Add** next to the `Repository` selector in the sidebar to:
-  1. **Clone URL:** Inspect remote branches and PR refs (`refs/pull/*/head` / `refs/merge-requests/*/head`), pick a starting branch or PR `#`, and clone directly into `repos/` (or `FOCUSWIKI_REPOS_DIR`).
-  2. **Local folder:** Inspect and attach an existing local checkout or plain Markdown folder inside `FOCUSWIKI_ALLOWED_IMPORT_ROOTS`.
-  3. **New repo:** Initialize a fresh Git-backed wiki repo with an initial commit on `main`.
-  4. **Connected:** Unregister a repository from Focus without deleting files on disk.
-- **Branches, PRs & Pull:** Click the topbar branch pill (`main · clean` / `↓N`) to open **Repository Git**, where you can **Fetch** remote branches and PR heads, **Pull** fast-forward updates (`--ff-only`, blocked safely if local edits exist), or switch to a local branch, remote branch, or PR `#` under **Branches & PRs**.
-- **HTTP API:**
-  - `POST /api/projects/inspect-remote` / `POST /api/projects/inspect-local`
-  - `POST /api/projects/import` (`mode`: `"clone" | "local" | "init"`) & `DELETE /api/projects/:projectId`
-  - `GET /api/projects/:projectId/git/refs`, `POST /api/projects/:projectId/git/fetch`, `POST /api/projects/:projectId/git/pull`, `POST /api/projects/:projectId/git/checkout`
+Use operator enrollment to connect a GitHub repository and a single base branch. Focus reads and edits shared working files while a separate Git worker fetches upstream changes and handles reviewed proposals. See [managed Git setup and migration](docs/MANAGED-GIT.md) for the process configuration, API and steps to preserve work from existing checkouts.
 
 ## Images, Links, and Visual Editing
 
@@ -41,47 +30,21 @@ In **Edit → Visual**, use **Image** for a repository path or HTTP(S) URL, alte
 
 The link button opens a keyboard-accessible form (**Apply**, **Remove Link**, **Cancel**, or Escape). Document links such as `../overview.md#authentication` resolve relative to the current document; `#heading` links scroll within it. Headings have deterministic GitHub-style anchors, including duplicate suffixes. Selecting a table cell reveals row, column, and table deletion controls. These controls appear only in Edit mode.
 
-Clone imports now send an optional `shallow` boolean. The Git review defaults to all changed files checked; selecting a subset sends `paths` with the commit request, and selecting all omits it. **Integration dependency:** this UI branch requires the sibling server implementation of the assets route, shallow cloning, and selected-path commits. The base server does not yet implement those contracts. Its review UI has no re-anchor request to wrap; all existing create/reply/resolve/reopen failures now produce a dismissible alert and retain drafts.
-
 ### TipTap dependency limitation
 
 All TipTap packages are pinned together to `2.27.3`, the latest published v2 release verified on 2026-11-17. There is **no published patched v2** for [GHSA-cp6q-959q-f8rh](https://github.com/advisories/GHSA-cp6q-959q-f8rh): npm identifies every release below `3.30.4` as affected. `npm audit --omit=dev` therefore reports **33 moderate vulnerabilities** (one core advisory and dependent packages), rather than zero. A coordinated migration to patched v3 or an upstream v2 backport is required; audit reporting has not been suppressed.
 
-## Rootless Docker Packaging & Deployment (`ubuntu` uid 1000)
+## Rootless Docker demo
 
-`Dockerfile` and `compose.yaml` package the production build with persistent bind mounts for `./sample-repos`, `./repos` (`FOCUSWIKI_REPOS_DIR=/app/repos`), and `./config` (writable so UI/API imports persist in `projects.json`), dropped Linux capabilities (`cap_drop: [ALL]`), `no-new-privileges`, a `/healthz` healthcheck, and `restart: unless-stopped`.
-
-Docker URLs are **http://100.117.116.91:8088/** (private Tailscale) and **http://127.0.0.1:8089/** (loopback). This host's rootless Docker fails when publishing both addresses with the same host port; distinct host ports avoid that conflict. The container still listens on port `8088`. Nothing is published on the LAN address or a wildcard host address.
-
-The image includes the compiled seed script for first startup. Existing repositories are retained. Git trusts mounted sample checkouts explicitly and applies per-repo `-c safe.directory=<path>` for registered repositories without enabling wildcard trust.
-
-When deploying under the `ubuntu` account that owns the rootless Docker daemon (`/run/user/1000/docker.sock`), stop the standalone host Node listener on port `8088` first, then start Compose:
+The default Compose file serves fictional documents using a persistent named volume and a loopback port.
 
 ```bash
-# As ubuntu (uid 1000):
-export XDG_RUNTIME_DIR=/run/user/1000
-export DOCKER_HOST=unix:///run/user/1000/docker.sock
-cd /workspace/wiki-prototype
-
-# Verify rootless mode
-docker info --format '{{json .SecurityOptions}}'
-
-# Build and start container
-docker compose up -d --build --wait --wait-timeout 60
-docker compose ps
-curl -fsS http://127.0.0.1:8089/healthz
-curl -fsS http://127.0.0.1:8089/api/projects
-
-# Test the built image using disposable repositories, without publishing ports.
-# Verifies first-run seeding, client assets, API writes, restart and recreation.
-node scripts/docker-smoke.mjs
-
-# Restart / stop
-docker compose restart
+docker compose up -d --build --wait
+node scripts/docker-smoke.mjs focuswiki:latest
 docker compose down
 ```
 
-The smoke test requires the rootless daemon and removes only its own temporary container and named volume. It does not modify `sample-repos`. `docker compose down` retains the bind-mounted project files. The Compose service runs detached and restarts with the existing daemon; no separate host Node server is needed. See `REVIEW.md` for the latest Docker verification and browser-test limits.
+The image health check uses `/api/health`. The smoke test uses a disposable container and volume to check document, comment and component persistence. For managed Git use the [worker setup](docs/MANAGED-GIT.md).
 
 ## Docker CI/CD
 
