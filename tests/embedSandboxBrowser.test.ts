@@ -53,7 +53,11 @@ it('runs sibling embed assets in an opaque iframe and on direct navigation', asy
 
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
     const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
-    browser = await chromium.launch({ headless: true, chromiumSandbox: true });
+    browser = await chromium.launch({
+      headless: true,
+      chromiumSandbox: true,
+      channel: process.platform === 'linux' && process.env.RUNNER_ENVIRONMENT === 'github-hosted' ? 'chrome' : undefined
+    });
     const page = await browser.newPage();
     await page.goto(base);
     const frame = page.frameLocator('iframe');
