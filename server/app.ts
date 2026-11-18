@@ -62,7 +62,7 @@ import {
 } from './projectRegistry.js';
 import { ProjectWatcherHub, type WatcherHubOptions } from './watcher.js';
 import { withKeyLock, writeFileAtomicSync } from './fileLock.js';
-import { createHttpSecurity, createExpensiveRequestLimiter, validateHost, type RateLimitOptions } from './httpSecurity.js';
+import { createHttpSecurity, createExpensiveRequestLimiter, validateHost, type RateLimitOptions, type ServeAccessOptions } from './httpSecurity.js';
 
 export function computeRevision(content: string): string {
   return crypto.createHash('sha256').update(content, 'utf8').digest('hex').slice(0, 16);
@@ -223,13 +223,13 @@ export interface HubAppOptions {
   clientDistDir?: string;
   enableWatcher?: boolean;
   allowedHosts?: string[];
+  serveAccess?: ServeAccessOptions;
   rateLimit?: RateLimitOptions | false;
   sse?: WatcherHubOptions;
 }
 
 export function createHubApp(options: HubAppOptions): HubAppInstance {
   const app = express();
-  const startedAt = Date.now();
   const registry =
     options.registry ??
     new ProjectRegistry({
@@ -256,7 +256,7 @@ export function createHubApp(options: HubAppOptions): HubAppInstance {
   }
 
   app.disable('x-powered-by');
-  app.use(createHttpSecurity({ allowedHosts: options.allowedHosts }));
+  app.use(createHttpSecurity({ allowedHosts: options.allowedHosts, serveAccess: options.serveAccess }));
   if (options.rateLimit !== false) app.use(createExpensiveRequestLimiter(options.rateLimit));
   app.use(express.json({ limit: '4mb' }));
 
@@ -314,17 +314,7 @@ export function createHubApp(options: HubAppOptions): HubAppInstance {
     };
   }
 
-  app.get('/api/health', (_req, res) => { res.json({ ok: true }); });
-
-  // Healthcheck
-  app.get('/healthz', (_req, res) => {
-    res.json({
-      status: 'ok',
-      service: 'focuswiki',
-      projectCount: registry.list().length,
-      uptimeSec: Math.round((Date.now() - startedAt) / 1000)
-    });
-  });
+  app.get(['/api/health', '/healthz'], (_req, res) => { res.json({ ok: true }); });
 
   // SSE stream for external file & comment updates
   app.get('/api/events', (req, res) => {
@@ -1346,13 +1336,15 @@ export function createHubApp(options: HubAppOptions): HubAppInstance {
       if (!host || !['http', 'https'].includes(proto)) {
         throw new PathBoundaryError('Invalid request authority.', 400);
       }
-      const allowedProjectAssetPrefix = `${proto}://${host}/embed-sandbox/${encodeURIComponent(project.id)}/`;
+      const browserOrigin: string = res.locals.browserOrigin ?? `${proto}://${host}`;
+      const allowedProjectAssetPrefix = `${browserOrigin}/embed-sandbox/${encodeURIComponent(project.id)}/`;
 
       // Strict defense-in-depth CSP:
       // Paired with <iframe sandbox="allow-scripts"> (opaque null origin, NO allow-same-origin),
       // components can run their own inline/sibling scripts & styles, cannot fetch external or hub APIs,
       // and cannot read parent DOM or storage.
       const csp = [
+        'sandbox allow-scripts',
         "default-src 'none'",
         `script-src 'unsafe-inline' ${allowedProjectAssetPrefix}`,
         `style-src 'unsafe-inline' ${allowedProjectAssetPrefix}`,

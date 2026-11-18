@@ -1,6 +1,6 @@
 # Docker CI/CD for `gcr.io`
 
-The [GitHub Actions workflow](../.github/workflows/docker.yml) runs type checks, the production build, the Vitest suite with Chromium, and the Docker smoke test on pull requests and pushes to `main`. A successful `main` run publishes the same tested Linux amd64 image as `gcr.io/PROJECT_ID/focuswiki:COMMIT_SHA`. The registry stores the release for use by the private Docker deployment.
+The [GitHub Actions workflow](../.github/workflows/docker.yml) runs type checks, the production build, the Vitest suite with Chromium, and the Docker smoke test on pull requests and pushes to `main`. The smoke test uses disposable files, an isolated network configuration and a dummy App key. It exercises the web-only phase even before the worker lands. Publication requires the two-service phase and a worker image with the managed proposal service. Once the `registry-publish` environment rules pass, the job publishes the same tested Linux amd64 image as `gcr.io/PROJECT_ID/focuswiki:COMMIT_SHA`.
 
 Google retired Container Registry in 2025. The `gcr.io` hostname maps to the `gcr.io` repository in the `us` multi-region of Artifact Registry. [Google's `gcr.io` documentation](https://docs.cloud.google.com/artifact-registry/docs/transition/gcr-repositories)
 
@@ -39,7 +39,7 @@ gcloud iam workload-identity-pools providers create-oidc "$provider" \
   --display-name='FocusWiki GitHub OIDC' \
   --issuer-uri=https://token.actions.githubusercontent.com \
   --attribute-mapping='google.subject=assertion.sub,attribute.repository_id=assertion.repository_id' \
-  --attribute-condition="assertion.repository_id == '${repo_id}' && assertion.ref == 'refs/heads/main' && assertion.workflow_ref == '${github_repo}/.github/workflows/docker.yml@refs/heads/main' && assertion.event_name in ['push', 'workflow_dispatch']"
+  --attribute-condition="assertion.repository_id == '${repo_id}' && assertion.ref == 'refs/heads/main' && assertion.workflow_ref == '${github_repo}/.github/workflows/docker.yml@refs/heads/main' && assertion.environment == 'registry-publish' && assertion.event_name in ['push', 'workflow_dispatch']"
 
 gcloud iam service-accounts add-iam-policy-binding "$service_account" \
   --project="$project_id" --role=roles/iam.workloadIdentityUser \
@@ -52,7 +52,7 @@ gcloud artifacts repositories add-iam-policy-binding gcr.io \
 
 ## Enable publishing in GitHub
 
-With repository settings access, set the three Actions variables. The publish job uses Workload Identity Federation to obtain a short-lived access token.
+With repository settings access, create the `registry-publish` environment and restrict its deployment branch policy to `main`. Require a reviewer if the release policy calls for approval. Protect `main` with pull requests and the build status check. Update any existing Workload Identity Federation provider to match the condition above, then set the three Actions variables. The publish job uses Workload Identity Federation to obtain a short-lived access token.
 
 ```bash
 gh variable set GCP_PROJECT_ID --repo "$github_repo" --body "$project_id"
@@ -69,12 +69,10 @@ gcloud artifacts docker images describe "gcr.io/${project_id}/focuswiki:COMMIT_S
 
 ## Deploy a published image on the private host
 
-From the directory containing `compose.yaml`, use the rootless Docker account with Artifact Registry Reader access. Pin the pull to the digest printed in the publish log.
+Use the rootless Docker account with Artifact Registry Reader access. Pin the pull to the digest printed in the publish log and follow the [deployment runbook](DEPLOYMENT.md) to configure enrollment, Tailscale Serve, host controls and the Git worker.
 
 ```bash
 gcloud auth configure-docker gcr.io
-image="gcr.io/${project_id}/focuswiki@sha256:RELEASE_DIGEST"
-docker pull "$image"
-docker tag "$image" focuswiki:latest
-docker compose up -d --no-build --pull never --wait
+export FOCUSWIKI_IMAGE="gcr.io/${project_id}/focuswiki@sha256:RELEASE_DIGEST"
+docker pull "$FOCUSWIKI_IMAGE"
 ```

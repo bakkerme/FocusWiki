@@ -73,3 +73,7 @@ Images use TipTap's inline Image extension, allowing both image-only paragraphs 
 Heading IDs come from ProseMirror decorations rather than persisted attributes, so navigating a document never changes repository content. A per-document slugger tracks duplicates and suffix collisions. Relative `.md` links are resolved before navigation; fragments are applied after the target editor mounts. Same-document fragments use reduced-motion-aware `scrollIntoView`.
 
 React, TipTap, ProseMirror, and the Markdown parser have explicit Rollup vendor chunks. TipTap stays on the latest published v2 (`2.27.3`) for extension compatibility, but that release remains covered by GHSA-cp6q-959q-f8rh. The requested zero-advisory audit is blocked by the absence of an upstream patched v2 release; do not interpret the version update as a security fix.
+
+## 8. Private deployment access
+
+Host Tailscale Serve is the HTTPS ingress. Production web accepts HTTP only on its dedicated Unix socket, with no IP network. The first request middleware requires the verified Serve identity before dispatch, validates the forwarding authority and mutation origin, and exposes the verified actor to managed review and proposal handlers. Only configured publishers may submit a proposal. The Git worker has a separate socket, private Git state and the GitHub App key. It shares the registered editable files with web. The legacy workflow described above is for local development. See the [deployment runbook](docs/DEPLOYMENT.md) for host controls and the managed Git integration contract.

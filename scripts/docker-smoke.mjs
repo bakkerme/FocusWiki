@@ -1,155 +1,235 @@
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
-import { setTimeout } from 'node:timers/promises';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { generateKeyPairSync, randomUUID } from 'node:crypto';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-// Exercise the actual runtime image without touching the working repositories or
-// publishing ports. Only this run's disposable container and volume are removed.
 const image = process.argv[2] ?? 'focuswiki:latest';
-const name = `focuswiki-smoke-${randomUUID()}`;
-const volume = `${name}-repos`;
+const project = `focuswiki-smoke-${randomUUID()}`;
+const root = fs.mkdtempSync(path.join(os.tmpdir(), 'focuswiki-smoke-'));
+const origin = 'https://wiki.example.ts.net';
+const publisher = 'publisher@example.test';
+const composeFile = fileURLToPath(new URL('../compose.yaml', import.meta.url));
+const override = path.join(root, 'smoke.yaml');
+const enrollment = path.join(root, 'enrollment.json');
+const editable = path.join(root, 'repos/fictional');
+const env = {
+  ...process.env,
+  FOCUSWIKI_DEPLOY_DIR: root,
+  FOCUSWIKI_IMAGE: image,
+  FOCUSWIKI_PUBLIC_ORIGIN: origin,
+  FOCUSWIKI_PUBLISHERS: publisher,
+  FOCUSWIKI_GITHUB_APP_ID: '1',
+  FOCUSWIKI_GITHUB_INSTALLATION_ID: '1'
+};
 
 function docker(...args) {
-  return execFileSync('docker', args, {
-    encoding: 'utf8', timeout: 90_000, maxBuffer: 4 * 1024 * 1024,
-    stdio: ['ignore', 'pipe', 'pipe']
-  }).trim();
+  return execFileSync('docker', args, { env, encoding: 'utf8', timeout: 90_000, stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 }
 
-async function ready() {
-  const deadline = Date.now() + 60_000;
-  while (Date.now() < deadline) {
-    const state = JSON.parse(docker('inspect', name, '--format', '{{json .State}}'));
-    assert.equal(state.Running, true, `Container exited: ${docker('logs', name)}`);
-    if (state.Health?.Status === 'healthy') return;
-    if (state.Health?.Status === 'unhealthy') break;
-    await setTimeout(500);
-  }
-  throw new Error(`Container failed healthcheck: ${docker('logs', name)}`);
+function compose(...args) {
+  return docker('compose', '-p', project, '-f', composeFile, '-f', override, ...args);
 }
 
-async function start() {
-  docker('run', '-d', '--name', name, '--network', 'none',
-    '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges:true',
-    '--mount', `type=volume,source=${volume},target=/app/sample-repos`, image);
-  await ready();
+function inspect(service) {
+  return JSON.parse(docker('inspect', compose('ps', '-q', service)))[0];
 }
 
-function inContainer(code) {
-  return docker('exec', name, 'node', '--input-type=module', '-e', code);
+function asFixtureOwner(...args) {
+  return docker('run', '--rm', '--network', 'none', '--read-only', '--cap-drop', 'ALL',
+    '--cap-add', 'CHOWN', '--cap-add', 'DAC_OVERRIDE', '--cap-add', 'FOWNER',
+    '--security-opt', 'no-new-privileges:true', '--mount', `type=bind,source=${root},target=/fixture`,
+    '--entrypoint', '/bin/sh', image, '-ec', ...args);
 }
 
-// This code runs using only the production image's built-in Node runtime.
-const helpers = `
-  import assert from 'node:assert/strict';
-  import fs from 'node:fs';
-  import { createHash } from 'node:crypto';
-  import { execFileSync } from 'node:child_process';
-  const root = '/app/sample-repos/cindervault-rpg';
-  const docPath = 'docs/vault-breach-action.md';
-  const route = '/api/projects/cindervault-rpg';
-  async function api(path, method = 'GET', body, status = 200) {
-    const res = await fetch('http://127.0.0.1:8088' + path, {
-      method, headers: { 'Content-Type': 'application/json' },
-      body: body === undefined ? undefined : JSON.stringify(body),
-      signal: AbortSignal.timeout(5000)
-    });
-    const value = await res.json();
-    assert.equal(res.status, status, JSON.stringify(value));
-    return value;
-  }
-  async function check() {
-    assert.equal((await api('/healthz')).projectCount, 2);
-    const { projects } = await api('/api/projects');
-    assert.equal(projects.length, 2);
-    for (const project of projects) {
-      assert.equal(project.git.branch, 'main');
-      assert.ok(project.git.headSha);
-      assert.ok(project.docs.length >= 3);
-      assert.ok(project.embeds.length >= 1);
+function checkIsolation(service, expectedMounts) {
+  const { Config, HostConfig, Mounts } = inspect(service);
+  assert.equal(HostConfig.NetworkMode, 'none');
+  assert.equal(HostConfig.ReadonlyRootfs, true);
+  assert.equal(HostConfig.Privileged, false);
+  assert.equal(Config.User, service === 'web' ? '10002:0' : '0:0');
+  assert.ok(HostConfig.CapDrop.includes('ALL'));
+  assert.ok(HostConfig.SecurityOpt.some((value) => value.startsWith('no-new-privileges')));
+  assert.deepEqual(Object.keys(HostConfig.PortBindings ?? {}), []);
+  const bindMounts = Mounts.filter(({ Type }) => Type !== 'tmpfs');
+  assert.deepEqual(Object.fromEntries(bindMounts.map(({ Destination, RW }) => [Destination, RW])), expectedMounts);
+  const workerEnv = Config.Env.filter((value) => /^FOCUSWIKI_(GITHUB_APP|GITHUB_INSTALLATION|GIT_STATE)/.test(value));
+  assert.equal(workerEnv.length, service === 'git-worker' ? 4 : 0);
+}
+
+const webMounts = {
+  '/app/repos': true,
+  '/etc/focuswiki/enrollment.json': false,
+  '/run/focuswiki': false,
+  '/run/focuswiki-serve': true
+};
+
+function inWeb(code) {
+  return compose('exec', '-T', 'web', 'node', '--input-type=module', '-e', `
+    import assert from 'node:assert/strict';
+    import fs from 'node:fs';
+    import http from 'node:http';
+    import net from 'node:net';
+    const origin = ${JSON.stringify(origin)};
+    const publisher = ${JSON.stringify(publisher)};
+    const reader = 'editor@example.test';
+    const route = '/api/projects/fictional';
+    async function api(path, { method = 'GET', login = reader, body, browser = origin, status = 200 } = {}) {
+      const headers = { Host: 'localhost', 'X-Forwarded-Host': new URL(origin).host, 'X-Forwarded-Proto': 'https' };
+      if (login) headers['Tailscale-User-Login'] = login;
+      if (browser) headers.Origin = browser;
+      const data = body === undefined ? undefined : JSON.stringify(body);
+      if (data) Object.assign(headers, { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data) });
+      const value = await new Promise((resolve, reject) => {
+        const req = http.request({ socketPath: process.env.FOCUSWIKI_HTTP_SOCKET, path, method, headers }, (res) => {
+          let text = '';
+          res.setEncoding('utf8');
+          res.on('data', (chunk) => { text += chunk; });
+          res.on('end', () => resolve({ status: res.statusCode, text, type: res.headers['content-type'] }));
+        });
+        req.on('error', reject);
+        req.setTimeout(3000, () => req.destroy(new Error('Socket request timed out')));
+        req.end(data);
+      });
+      assert.equal(value.status, status, path + ': ' + value.text);
+      return value.type?.includes('application/json') ? JSON.parse(value.text) : value.text;
     }
-    const htmlRes = await fetch('http://127.0.0.1:8088/');
-    assert.equal(htmlRes.status, 200);
-    const html = await htmlRes.text();
-    const asset = html.match(/src="([^\"]+\\.js)"/);
-    assert.ok(asset, 'Production HTML must reference a compiled client');
-    assert.equal((await fetch('http://127.0.0.1:8088' + asset[1])).status, 200);
-    return api(route + '/doc?path=' + docPath);
-  }
-`;
+    ${code}`);
+}
 
+let fixtureOwnerChanged = false;
+let releaseReady = false;
 try {
-  // GitHub-hosted runners supply a Docker daemon on a disposable VM.
   if (process.env.GITHUB_ACTIONS !== 'true' || process.env.RUNNER_ENVIRONMENT !== 'github-hosted') {
     const security = JSON.parse(docker('info', '--format', '{{json .SecurityOptions}}'));
     assert.ok(security.includes('name=rootless'), 'Use the existing rootless daemon');
   }
-  docker('volume', 'create', volume);
-  await start();
-  console.log('PASS: fresh image seeds both Git repositories and becomes healthy');
-
-  const expected = inContainer(helpers + `
-    const doc = await check();
-    assert.equal(doc.comments.length, 2);
-    const markdown = doc.markdown + '\\nDocker persistence check: fictional test data.\\n';
-    await api(route + '/doc', 'PUT', {
-      path: docPath, markdown, baseRevision: doc.revision
-    });
-    await api(route + '/comments', 'POST', {
-      path: docPath, quote: 'Docker persistence check: fictional test data.',
-      body: 'Disposable Docker smoke test comment.', author: 'Smoke Test', role: 'bot'
-    }, 201);
-    await api(route + '/embeds', 'POST', {
-      src: 'embeds/docker-smoke/index.html',
-      source: '<!doctype html><p>Disposable fictional component</p>'
-    }, 201);
-    const persisted = await check();
-    assert.equal(persisted.markdown, markdown);
-    assert.equal(persisted.comments.length, 3);
-    assert.equal(persisted.comments.at(-1).anchorStatus, 'attached');
-    assert.equal(fs.readFileSync(root + '/' + docPath, 'utf8'), markdown);
-    console.log(JSON.stringify({
-      revision: persisted.revision,
-      hashes: ['docs/vault-breach-action.md', 'docs/vault-breach-action.comments.json',
-        'embeds/docker-smoke/index.html'].map(p =>
-          createHash('sha256').update(fs.readFileSync(root + '/' + p)).digest('hex')),
-      head: execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim()
-    }));
+  fs.mkdirSync(path.join(root, 'repos'), { mode: 0o750 });
+  fs.mkdirSync(editable, { mode: 0o770 });
+  for (const dir of ['git-socket', 'serve-socket', 'git-state']) fs.mkdirSync(path.join(root, dir), { mode: 0o700 });
+  fs.writeFileSync(path.join(editable, 'README.md'), '# Fictional smoke test\n', { mode: 0o660 });
+  fs.writeFileSync(enrollment, JSON.stringify({ projects: [{
+    id: 'fictional', name: 'Fictional', remote: 'https://github.com/example/fictional.git', branch: 'main'
+  }] }));
+  fs.writeFileSync(override, 'services:\n  git-worker:\n    network_mode: none\n');
+  // The isolated worker gets a disposable key and an empty enrollment.
+  const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
+  fs.writeFileSync(path.join(root, 'github-app.pem'), privateKey.export({ type: 'pkcs8', format: 'pem' }), { mode: 0o600 });
+  fixtureOwnerChanged = true;
+  asFixtureOwner(`
+    cd /fixture
+    chown -R 0:0 repos git-socket git-state enrollment.json github-app.pem
+    chmod 0750 repos git-socket
+    chmod 0770 repos/fictional
+    chmod 0660 repos/fictional/README.md
+    chmod 0640 enrollment.json
+    chown 10002:0 serve-socket
   `);
-  console.log('PASS: production client assets, Git status, docs, comments and component writes');
 
-  function verifyPersistence() {
-    const actual = inContainer(helpers + `
-      const doc = await check();
-      assert.equal(doc.comments.length, 3);
-      console.log(JSON.stringify({
-        revision: doc.revision,
-        hashes: ['docs/vault-breach-action.md', 'docs/vault-breach-action.comments.json',
-          'embeds/docker-smoke/index.html'].map(p =>
-            createHash('sha256').update(fs.readFileSync(root + '/' + p)).digest('hex')),
-        head: execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim()
-      }));
+  compose('up', '-d', '--no-build', '--pull', 'never', '--wait', '--wait-timeout', '60', '--no-deps', 'web');
+  checkIsolation('web', webMounts);
+  inWeb(`
+    assert.equal(fs.existsSync('/app/sample-repos'), false);
+    assert.equal(fs.existsSync('/app/repos/fictional/.git'), false);
+    assert.equal(fs.existsSync('/run/secrets/focuswiki-github-app.pem'), false);
+    await assert.rejects(new Promise((resolve, reject) => {
+      const socket = net.connect(8088, '127.0.0.1');
+      socket.once('connect', () => { socket.destroy(); resolve(); });
+      socket.once('error', reject);
+    }), { code: 'ECONNREFUSED' });
+    for (const url of ['/', '/api/projects', '/api/events', '/healthz', '/embed-sandbox/fictional/unknown']) {
+      assert.deepEqual(await api(url, { login: '', status: 401 }), { error: 'identity_required' });
+    }
+    assert.deepEqual(await api('/healthz'), { ok: true });
+    assert.equal((await api('/api/projects')).projects.length, 1);
+    const asset = (await api('/')).match(/src="([^"]+\\.js)"/);
+    assert.ok(asset, 'Production HTML must reference a compiled client');
+    await api(asset[1]);
+    assert.deepEqual(await api(route + '/git/propose', { method: 'POST', status: 403 }), { error: 'publisher_required' });
+    assert.deepEqual(await api(route + '/git/propose', { method: 'POST', login: publisher, browser: '', status: 403 }), { error: 'csrf_blocked' });
+    const doc = await api(route + '/doc?path=README.md');
+    const markdown = doc.markdown + '\\nDocker persistence check.\\n';
+    await api(route + '/doc', { method: 'PUT', body: { path: 'README.md', markdown, baseRevision: doc.revision } });
+    await api(route + '/comments', { method: 'POST', status: 201, body: {
+      path: 'README.md', quote: 'Docker persistence check.', body: 'Fictional comment.', author: 'Smoke Test', role: 'bot'
+    } });
+    await api(route + '/embeds', { method: 'POST', status: 201, body: {
+      src: 'embeds/smoke/index.html', source: '<!doctype html><p>Fictional component</p>'
+    } });
+  `);
+  console.log('PASS: web socket access, gated routes, minimal health, built client and writes without Git seeding');
+
+  compose('up', '-d', '--force-recreate', '--no-build', '--pull', 'never', '--wait', '--wait-timeout', '60', '--no-deps', 'web');
+  inWeb(`
+    const doc = await api(route + '/doc?path=README.md');
+    assert.match(doc.markdown, /Docker persistence check/);
+    assert.equal(doc.comments[0].messages[0].body, 'Fictional comment.');
+    assert.match(await api('/embed-sandbox/fictional/embeds/smoke/index.html'), /Fictional component/);
+    assert.equal(fs.existsSync('/app/repos/fictional/.git'), false);
+  `);
+  console.log('PASS: recreated web container preserves the document, comment and embed');
+
+  const workerCheck = spawnSync('docker', ['run', '--rm', '--network', 'none', '--entrypoint', '/usr/bin/test',
+    image, '-f', '/app/dist/server/server/gitRunner.js'], { env, encoding: 'utf8', timeout: 30_000 });
+  assert.ok(workerCheck.status === 0 || workerCheck.status === 1, workerCheck.stderr || String(workerCheck.error));
+  if (workerCheck.status === 0) {
+    compose('down');
+    asFixtureOwner(`printf '%s\n' '{"projects":[]}' > /fixture/enrollment.json`);
+    compose('up', '-d', '--no-build', '--pull', 'never', '--wait', '--wait-timeout', '60');
+    checkIsolation('web', webMounts);
+    checkIsolation('git-worker', {
+      '/app/repos': true,
+      '/etc/focuswiki/enrollment.json': false,
+      '/run/focuswiki': true,
+      '/var/lib/focuswiki-git': true,
+      '/run/secrets/focuswiki-github-app.pem': false
+    });
+    inWeb(`
+      assert.deepEqual((await api('/api/projects')).projects, []);
+      assert.throws(() => fs.readdirSync('/app/repos/.staging'), { code: 'EACCES' });
+      const socket = net.createConnection(process.env.FOCUSWIKI_GIT_SOCKET);
+      await new Promise((resolve, reject) => { socket.once('connect', resolve); socket.once('error', reject); });
+      socket.destroy();
     `);
-    assert.deepEqual(JSON.parse(actual), JSON.parse(expected));
+    console.log('PASS: both services start offline with an empty enrollment and the web can reach the worker socket');
+    releaseReady = compose('exec', '-T', 'git-worker', 'node', '--input-type=module', '-e', `
+      import fs from 'node:fs';
+      const file = '/app/dist/server/server/proposalService.js';
+      const service = fs.existsSync(file) ? await import(file) : null;
+      console.log(Boolean(service?.enforcesManagedBase === true &&
+        typeof service?.reviewProposal === 'function' && typeof service?.publishProposal === 'function' &&
+        typeof service?.getRepoToken === 'function'));
+    `) === 'true';
+    if (!releaseReady) console.log('Publication is pending the managed proposal service.');
+  } else {
+    const missing = spawnSync('docker', ['run', '--rm', '--network', 'none', image, 'git-worker'], {
+      env, encoding: 'utf8', timeout: 30_000
+    });
+    assert.equal(missing.status, 1);
+    assert.match(missing.stderr, /Git worker module is missing/);
+    console.log('PASS: worker startup fails closed until the companion Git worker module is present');
   }
-
-  docker('restart', name);
-  await ready();
-  verifyPersistence();
-  console.log('PASS: restart preserves document, comment, component and Git HEAD');
-
-  docker('rm', '-f', name);
-  await start();
-  verifyPersistence();
-  console.log('PASS: container recreation reuses persistent files without reseeding');
 } catch (error) {
-  try { console.error(docker('logs', name)); } catch { /* Container may not exist yet. */ }
+  try { console.error(compose('logs', '--no-color')); } catch { /* Compose may not have started. */ }
   console.error(error.stderr?.toString() || error.message);
   process.exitCode = 1;
 } finally {
-  try { docker('rm', '-f', name); } catch { /* Already removed or never created. */ }
-  try { docker('volume', 'rm', volume); } catch (error) {
-    console.error(`Could not remove test volume ${volume}: ${error.message}`);
-    process.exitCode = 1;
+  if (fs.existsSync(override)) {
+    try { compose('down', '--remove-orphans'); } catch (error) {
+      console.error(error.stderr?.toString() || error.message);
+      process.exitCode = 1;
+    }
   }
+  if (fixtureOwnerChanged) {
+    try { asFixtureOwner('rm -rf /fixture/repos /fixture/serve-socket /fixture/git-socket /fixture/git-state'); } catch (error) {
+      console.error(error.stderr?.toString() || error.message);
+      process.exitCode = 1;
+    }
+  }
+  fs.rmSync(root, { recursive: true, force: true });
+}
+if (!process.exitCode && process.env.GITHUB_OUTPUT) {
+  fs.appendFileSync(process.env.GITHUB_OUTPUT, `release-ready=${releaseReady}\n`);
 }

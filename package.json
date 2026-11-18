@@ -6,7 +6,7 @@
   "type": "module",
   "scripts": {
     "seed": "tsx scripts/seed-repos.ts",
-    "dev:server": "tsx watch server/index.ts",
+    "dev:server": "tsx watch server/index.ts --local-dev",
     "dev:client": "vite",
     "build:client": "vite build",
     "build:server": "tsc -p tsconfig.server.json",

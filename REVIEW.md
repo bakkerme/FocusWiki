@@ -1,5 +1,7 @@
 # Review Handoff & Five-Minute Walkthrough
 
+The deployment below records the legacy prototype. For the managed release and its current access checks, use the [private deployment runbook](docs/DEPLOYMENT.md).
+
 ## Internal LAN Readiness & Hardening Verification — 2026-11-17
 
 Summary of integrated hardening, Git clone lifecycle, authoring, and test verification:

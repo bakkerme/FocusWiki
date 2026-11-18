@@ -71,7 +71,7 @@ describe('Hub API & Repository Integration (Acceptance Scenarios 1–9)', () => 
 
   it('lists projects with Git branch/clean state, seeded docs, embeds, and cross-project search', async () => {
     const health = await request(hub.app).get('/healthz').expect(200);
-    expect(health.body).toMatchObject({ status: 'ok', projectCount: 2 });
+    expect(health.body).toEqual({ ok: true });
 
     const listRes = await request(hub.app).get('/api/projects').expect(200);
     expect(listRes.body.projects).toHaveLength(2);

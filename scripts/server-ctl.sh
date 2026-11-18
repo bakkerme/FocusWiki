@@ -31,8 +31,8 @@ case "${cmd}" in
     cd "${ROOT_DIR}"
     (
       set -m
-      PORT="${PORT:-8088}" FOCUSWIKI_BIND_HOST="${BIND_HOST:-${FOCUSWIKI_BIND_HOST:-127.0.0.1}}" NODE_ENV=production \
-        nohup node dist/server/server/index.js >"${LOG_FILE}" 2>&1 &
+      PORT="${PORT:-8088}" NODE_ENV=development \
+        nohup node dist/server/server/index.js --local-dev >"${LOG_FILE}" 2>&1 &
       echo $! >"${PID_FILE}"
     )
     sleep 1

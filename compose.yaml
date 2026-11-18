@@ -1,33 +1,95 @@
+x-runtime: &runtime
+  build:
+    context: .
+    dockerfile: Dockerfile
+  image: ${FOCUSWIKI_IMAGE:-focuswiki:latest}
+  restart: unless-stopped
+  init: true
+  read_only: true
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+
+x-socket-health: &socket-health
+  interval: 10s
+  timeout: 3s
+  retries: 5
+  start_period: 10s
+
 services:
-  focuswiki:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: focuswiki:latest
-    container_name: focuswiki
-    restart: unless-stopped
-    init: true
+  web:
+    <<: *runtime
+    command: [web]
+    user: '10002:0'
+    network_mode: none
+    depends_on:
+      git-worker:
+        condition: service_healthy
     environment:
-      NODE_ENV: production
-      PORT: "8088"
-      FOCUSWIKI_BIND_HOST: "0.0.0.0"
-      PROJECTS_CONFIG: "/app/config/projects.json"
-      FOCUSWIKI_REPOS_DIR: "/app/repos"
-      FOCUSWIKI_ALLOWED_IMPORT_ROOTS: "/app/repos,/app/sample-repos"
-    # Choose a private LAN address explicitly when access beyond loopback is needed.
-    ports:
-      - "${FOCUSWIKI_BIND_HOST:-127.0.0.1}:8088:8088"
+      FOCUSWIKI_PUBLIC_ORIGIN: "${FOCUSWIKI_PUBLIC_ORIGIN:?Set the HTTPS Tailscale Serve origin}"
+      FOCUSWIKI_PUBLISHERS: "${FOCUSWIKI_PUBLISHERS:-}"
+      FOCUSWIKI_HTTP_SOCKET: /run/focuswiki-serve/http.sock
+      FOCUSWIKI_GIT_SOCKET: /run/focuswiki/git.sock
+      FOCUSWIKI_ENROLLMENT_FILE: /etc/focuswiki/enrollment.json
+      FOCUSWIKI_REPOS_DIR: /app/repos
     volumes:
-      - ./sample-repos:/app/sample-repos
-      - ./repos:/app/repos
-      - ./config:/app/config
-    security_opt:
-      - no-new-privileges:true
-    cap_drop:
-      - ALL
+      - &repos
+        type: bind
+        source: ${FOCUSWIKI_DEPLOY_DIR:?Set the absolute deployment data directory}/repos
+        target: /app/repos
+        bind: { create_host_path: false }
+      - &enrollment
+        type: bind
+        source: ${FOCUSWIKI_DEPLOY_DIR}/enrollment.json
+        target: /etc/focuswiki/enrollment.json
+        read_only: true
+        bind: { create_host_path: false }
+      - &git-socket
+        type: bind
+        source: ${FOCUSWIKI_DEPLOY_DIR}/git-socket
+        target: /run/focuswiki
+        read_only: true
+        bind: { create_host_path: false }
+      - type: bind
+        source: ${FOCUSWIKI_DEPLOY_DIR}/serve-socket
+        target: /run/focuswiki-serve
+        bind: { create_host_path: false }
+    tmpfs:
+      - /tmp:uid=10002,gid=0,mode=0700,nosuid,nodev,noexec,size=64m
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8088/api/health"]
-      interval: 15s
-      timeout: 5s
-      retries: 3
-      start_period: 10s
+      <<: *socket-health
+      test: [CMD, node, /usr/local/lib/focuswiki/socket-health.mjs, /run/focuswiki-serve/http.sock]
+
+  git-worker:
+    <<: *runtime
+    command: [git-worker]
+    user: '0:0'
+    environment:
+      FOCUSWIKI_GIT_SOCKET: /run/focuswiki/git.sock
+      FOCUSWIKI_ENROLLMENT_FILE: /etc/focuswiki/enrollment.json
+      FOCUSWIKI_REPOS_DIR: /app/repos
+      FOCUSWIKI_GIT_STATE_DIR: /var/lib/focuswiki-git
+      FOCUSWIKI_GITHUB_APP_KEY_FILE: /run/secrets/focuswiki-github-app.pem
+      FOCUSWIKI_GITHUB_APP_ID: "${FOCUSWIKI_GITHUB_APP_ID:?Set the GitHub App ID}"
+      FOCUSWIKI_GITHUB_INSTALLATION_ID: "${FOCUSWIKI_GITHUB_INSTALLATION_ID:?Set the GitHub App installation ID}"
+    volumes:
+      - *repos
+      - *enrollment
+      - <<: *git-socket
+        read_only: false
+      - type: bind
+        source: ${FOCUSWIKI_DEPLOY_DIR}/git-state
+        target: /var/lib/focuswiki-git
+        bind: { create_host_path: false }
+      - type: bind
+        source: ${FOCUSWIKI_DEPLOY_DIR}/github-app.pem
+        target: /run/secrets/focuswiki-github-app.pem
+        read_only: true
+        bind: { create_host_path: false }
+    # The worker may need to execute a short-lived Git credential helper.
+    tmpfs:
+      - /tmp:mode=0700,nosuid,nodev,size=64m
+    healthcheck:
+      <<: *socket-health
+      test: [CMD, node, /usr/local/lib/focuswiki/socket-health.mjs, /run/focuswiki/git.sock]

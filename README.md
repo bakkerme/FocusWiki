@@ -4,23 +4,18 @@ FocusWiki (shown as **Focus** in the UI) is a private, local-first documentation
 
 > **Sample Content Notice:** Both seeded repositories (`cindervault-rpg` and `helios-lab`) contain strictly fictional, synthetic prototype data.
 
-## Quick Start (Local Node Service)
+## Local development
 
 ```bash
-cd /workspace/wiki-prototype
-umask 0007
-npm install
-npm run seed          # Initializes sample-repos/cindervault-rpg and sample-repos/helios-lab
-npm run build         # Builds Vite client (dist/client) and TypeScript server (dist/server)
-npm test              # Runs Vitest unit + API integration suite
-
-# Manage background private server (binds 127.0.0.1:8088 and 100.117.116.91:8088)
-./scripts/server-ctl.sh start
-./scripts/server-ctl.sh status
-./scripts/server-ctl.sh stop
+npm ci
+npm run seed
+npm run dev:server   # Loopback API on 127.0.0.1:8088
+npm run dev:client   # In another terminal, Vite on 127.0.0.1:5173
 ```
 
-## Repository Import, Branches/PRs & Remote Sync
+To try the compiled client, stop the development API, run `npm run build`, then use `./scripts/server-ctl.sh start` and open `http://127.0.0.1:8088`. Stop it with `./scripts/server-ctl.sh stop`. Local development uses the fictional sample repositories and does not authorize proposal publication. Use `npm run typecheck`, `npm run build`, and `npm test` to verify changes. The browser tests require Playwright Chromium.
+
+## Repository import and Git in local development
 
 You do not need to edit `config/projects.json` or restart the server to add repositories:
 
@@ -47,45 +42,13 @@ Clone imports now send an optional `shallow` boolean. The Git review defaults to
 
 All TipTap packages are pinned together to `2.27.3`, the latest published v2 release verified on 2026-11-17. There is **no published patched v2** for [GHSA-cp6q-959q-f8rh](https://github.com/advisories/GHSA-cp6q-959q-f8rh): npm identifies every release below `3.30.4` as affected. `npm audit --omit=dev` therefore reports **33 moderate vulnerabilities** (one core advisory and dependent packages), rather than zero. A coordinated migration to patched v3 or an upstream v2 backport is required; audit reporting has not been suppressed.
 
-## Rootless Docker Packaging & Deployment (`ubuntu` uid 1000)
+## Private deployment
 
-`Dockerfile` and `compose.yaml` package the production build with persistent bind mounts for `./sample-repos`, `./repos` (`FOCUSWIKI_REPOS_DIR=/app/repos`), and `./config` (writable so UI/API imports persist in `projects.json`), dropped Linux capabilities (`cap_drop: [ALL]`), `no-new-privileges`, a `/healthz` healthcheck, and `restart: unless-stopped`.
-
-Docker URLs are **http://100.117.116.91:8088/** (private Tailscale) and **http://127.0.0.1:8089/** (loopback). This host's rootless Docker fails when publishing both addresses with the same host port; distinct host ports avoid that conflict. The container still listens on port `8088`. Nothing is published on the LAN address or a wildcard host address.
-
-The image includes the compiled seed script for first startup. Existing repositories are retained. Git trusts mounted sample checkouts explicitly and applies per-repo `-c safe.directory=<path>` for registered repositories without enabling wildcard trust.
-
-When deploying under the `ubuntu` account that owns the rootless Docker daemon (`/run/user/1000/docker.sock`), stop the standalone host Node listener on port `8088` first, then start Compose:
-
-```bash
-# As ubuntu (uid 1000):
-export XDG_RUNTIME_DIR=/run/user/1000
-export DOCKER_HOST=unix:///run/user/1000/docker.sock
-cd /workspace/wiki-prototype
-
-# Verify rootless mode
-docker info --format '{{json .SecurityOptions}}'
-
-# Build and start container
-docker compose up -d --build --wait --wait-timeout 60
-docker compose ps
-curl -fsS http://127.0.0.1:8089/healthz
-curl -fsS http://127.0.0.1:8089/api/projects
-
-# Test the built image using disposable repositories, without publishing ports.
-# Verifies first-run seeding, client assets, API writes, restart and recreation.
-node scripts/docker-smoke.mjs
-
-# Restart / stop
-docker compose restart
-docker compose down
-```
-
-The smoke test requires the rootless daemon and removes only its own temporary container and named volume. It does not modify `sample-repos`. `docker compose down` retains the bind-mounted project files. The Compose service runs detached and restarts with the existing daemon; no separate host Node server is needed. See `REVIEW.md` for the latest Docker verification and browser-test limits.
+The production stack runs a web service and a Git worker under rootless Docker. Host Tailscale Serve terminates HTTPS and connects to a private Unix socket. The web service has no IP network and the GitHub App key is mounted only in the worker. Deploy a release that includes the companion worker and Git API changes. See the [deployment runbook](docs/DEPLOYMENT.md) for configuration, host and tailnet checks, and migration and rollback procedures.
 
 ## Docker CI/CD
 
-GitHub Actions tests and builds the Docker image and publishes successful `main` builds to Google Artifact Registry at `gcr.io`. See [Docker CI/CD setup](docs/DOCKER-CICD.md) for the registry and GitHub configuration.
+GitHub Actions tests and builds the Docker image. Successful `main` builds that pass the two-service smoke test are eligible for publication to Google Artifact Registry at `gcr.io`. See [Docker CI/CD setup](docs/DOCKER-CICD.md) for the registry and GitHub configuration.
 
 ## Embedding Project-Authored Components
 
@@ -186,6 +149,6 @@ See [`docs/SCREENSHOTS.md`](docs/SCREENSHOTS.md) for the unattended local Playwr
 
 ```bash
 npm run capture -- list
-npm run capture -- run --packet playwright-2026-11-15 --all --base-url http://100.117.116.91:8088
+npm run capture -- run --packet playwright-local --all --base-url http://127.0.0.1:8088
 npm run capture -- validate --packet playwright-2026-11-15
 ```
