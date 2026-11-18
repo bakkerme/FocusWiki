@@ -58,10 +58,7 @@ export class ProjectRegistry {
       ? path.resolve(options.managedReposDir)
       : path.join(this.baseDir, 'repos');
 
-    const rawRoots =
-      options.allowedImportRoots && options.allowedImportRoots.length > 0
-        ? options.allowedImportRoots
-        : [this.baseDir, this.managedReposDir];
+    const rawRoots = options.allowedImportRoots ?? [this.managedReposDir];
 
     this.allowedImportRoots = Array.from(
       new Set(
@@ -141,6 +138,9 @@ export class ProjectRegistry {
     }
     if (userPath.includes('\0')) {
       throw new PathBoundaryError('Invalid characters in directory path.', 400);
+    }
+    if (this.allowedImportRoots.length === 0) {
+      throw new PathBoundaryError('Local repository imports are disabled.');
     }
 
     const trimmed = userPath.trim();
