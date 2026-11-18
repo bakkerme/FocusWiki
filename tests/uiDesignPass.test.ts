@@ -6,6 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createHubApp, type HubAppInstance } from '../server/app';
+import { getGitWorkingDiff } from '../server/gitService';
 
 const PROJECT_ROOT = path.resolve(__dirname, '..');
 const CLIENT_DIST = path.join(PROJECT_ROOT, 'dist', 'client');
@@ -784,6 +785,9 @@ describe('Council UI Design & Responsive IA Pass — Interactive Browser Verific
     const context = await browser!.newContext({ viewport: { width: 1440, height: 900 } });
     context.setDefaultTimeout(15000);
     const page = await context.newPage();
+    await page.route('**/api/projects/helios-lab/git/diff', async (route) => {
+      await route.fulfill({ json: await getGitWorkingDiff(heliosRoot) });
+    });
 
     try {
       await page.goto(`${baseUrl}/?project=helios-lab&doc=docs%2Fbench-inventory.md`);
