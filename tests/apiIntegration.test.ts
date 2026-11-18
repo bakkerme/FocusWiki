@@ -170,6 +170,7 @@ describe('Hub API & Repository Integration (Acceptance Scenarios 1–9)', () => 
     // Verify sandboxed serving and strict CSP headers
     const sandboxRes = await request(hub.app)
       .get('/embed-sandbox/cindervault-rpg/embeds/loot-curve/index.html')
+      .redirects(1)
       .expect(200);
     expect(sandboxRes.text).toContain('Compute Loot');
     expect(sandboxRes.headers['content-security-policy']).toContain("default-src 'none'");
