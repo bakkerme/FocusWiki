@@ -20,20 +20,16 @@ npm test              # Runs Vitest unit + API integration suite
 ./scripts/server-ctl.sh stop
 ```
 
-## Repository Import, Branches/PRs & Remote Sync
+## Managed Git and Pull Requests
 
-You do not need to edit `config/projects.json` or restart the server to add repositories:
+Use **Enrollment** in the sidebar to see how to request repository access. The workspace operator configures the working copy, upstream, and Git credentials on the server. The sidebar lists the repositories available to you.
 
-- **In the UI:** Click **+ Add** next to the `Repository` selector in the sidebar to:
-  1. **Clone URL:** Inspect remote branches and PR refs (`refs/pull/*/head` / `refs/merge-requests/*/head`), pick a starting branch or PR `#`, and clone directly into `repos/` (or `FOCUSWIKI_REPOS_DIR`).
-  2. **Local folder:** Inspect and attach an existing local checkout or plain Markdown folder inside `FOCUSWIKI_ALLOWED_IMPORT_ROOTS`.
-  3. **New repo:** Initialize a fresh Git-backed wiki repo with an initial commit on `main`.
-  4. **Connected:** Unregister a repository from Focus without deleting files on disk.
-- **Branches, PRs & Pull:** Click the topbar branch pill (`main · clean` / `↓N`) to open **Repository Git**, where you can **Fetch** remote branches and PR heads, **Pull** fast-forward updates (`--ff-only`, blocked safely if local edits exist), or switch to a local branch, remote branch, or PR `#` under **Branches & PRs**.
-- **HTTP API:**
-  - `POST /api/projects/inspect-remote` / `POST /api/projects/inspect-local`
-  - `POST /api/projects/import` (`mode`: `"clone" | "local" | "init"`) & `DELETE /api/projects/:projectId`
-  - `GET /api/projects/:projectId/git/refs`, `POST /api/projects/:projectId/git/fetch`, `POST /api/projects/:projectId/git/pull`, `POST /api/projects/:projectId/git/checkout`
+1. Edit a document as usual. **Saved locally** means FocusWiki wrote your draft to the local working copy. Inline comments and component changes also live in project files. Saving and opening a review have no upstream effect.
+2. Open **Review working changes** from the topbar Git status. Inspect the rich or raw diff, select the files to include, and enter a proposal message. Each new review starts with no files selected.
+3. Choose **Propose changes** to publish the selected snapshot as a pull request. Open the returned link to check the pull request and its merge status on the Git host.
+4. If the review becomes stale, choose **New review**, inspect the updated diff, and select the files again. If publishing is interrupted, **Retry proposal** resubmits the same review, file selection, and message. Your local draft stays on disk.
+
+**Backend dependency.** Publishing requires the managed enrollment, Git service, and proposal backend. The browser reads `GET /api/projects/:projectId/git/diff` for the existing rich review payload plus an opaque `reviewId`. It sends `POST /api/projects/:projectId/git/propose` with JSON `{reviewId, message, paths}` and `X-FocusWiki-Intent: propose` on the same origin. The server validates the review and selected paths, and returns `{url, sha}` on success. A diff without a review ID is available for inspection only.
 
 ## Images, Links, and Visual Editing
 
@@ -41,15 +37,13 @@ In **Edit → Visual**, use **Image** for a repository path or HTTP(S) URL, alte
 
 The link button opens a keyboard-accessible form (**Apply**, **Remove Link**, **Cancel**, or Escape). Document links such as `../overview.md#authentication` resolve relative to the current document; `#heading` links scroll within it. Headings have deterministic GitHub-style anchors, including duplicate suffixes. Selecting a table cell reveals row, column, and table deletion controls. These controls appear only in Edit mode.
 
-Clone imports now send an optional `shallow` boolean. The Git review defaults to all changed files checked; selecting a subset sends `paths` with the commit request, and selecting all omits it. **Integration dependency:** this UI branch requires the sibling server implementation of the assets route, shallow cloning, and selected-path commits. The base server does not yet implement those contracts. Its review UI has no re-anchor request to wrap; all existing create/reply/resolve/reopen failures now produce a dismissible alert and retain drafts.
-
 ### TipTap dependency limitation
 
 All TipTap packages are pinned together to `2.27.3`, the latest published v2 release verified on 2026-11-17. There is **no published patched v2** for [GHSA-cp6q-959q-f8rh](https://github.com/advisories/GHSA-cp6q-959q-f8rh): npm identifies every release below `3.30.4` as affected. `npm audit --omit=dev` therefore reports **33 moderate vulnerabilities** (one core advisory and dependent packages), rather than zero. A coordinated migration to patched v3 or an upstream v2 backport is required; audit reporting has not been suppressed.
 
 ## Rootless Docker Packaging & Deployment (`ubuntu` uid 1000)
 
-`Dockerfile` and `compose.yaml` package the production build with persistent bind mounts for `./sample-repos`, `./repos` (`FOCUSWIKI_REPOS_DIR=/app/repos`), and `./config` (writable so UI/API imports persist in `projects.json`), dropped Linux capabilities (`cap_drop: [ALL]`), `no-new-privileges`, a `/healthz` healthcheck, and `restart: unless-stopped`.
+`Dockerfile` and `compose.yaml` package the production build with persistent bind mounts for `./sample-repos`, `./repos` (`FOCUSWIKI_REPOS_DIR=/app/repos`), and `./config` for server-side configuration, dropped Linux capabilities (`cap_drop: [ALL]`), `no-new-privileges`, a `/healthz` healthcheck, and `restart: unless-stopped`.
 
 Docker URLs are **http://100.117.116.91:8088/** (private Tailscale) and **http://127.0.0.1:8089/** (loopback). This host's rootless Docker fails when publishing both addresses with the same host port; distinct host ports avoid that conflict. The container still listens on port `8088`. Nothing is published on the LAN address or a wildcard host address.
 

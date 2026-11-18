@@ -5,6 +5,7 @@ import {
   ChevronsDownUp,
   ChevronsUpDown,
   FileText,
+  Info,
   Folder,
   FolderOpen,
   Plus,
@@ -55,7 +56,7 @@ interface Props {
   isOverlay: boolean;
   restoreFocusRef?: RefObject<HTMLElement | null>;
   settingsTriggerRef?: RefObject<HTMLButtonElement>;
-  importTriggerRef?: RefObject<HTMLButtonElement>;
+  enrollmentTriggerRef?: RefObject<HTMLButtonElement>;
   searchQuery: string;
   searchResults: SearchResultItem[];
   onChangeSearch: (q: string) => void;
@@ -64,7 +65,7 @@ interface Props {
   onCreateDoc: (relPath: string, title: string) => Promise<void>;
   onOpenEmbedModal: () => void;
   onOpenReadingSettings: () => void;
-  onOpenImportRepoModal: () => void;
+  onOpenEnrollment: () => void;
   onClose: () => void;
 }
 
@@ -77,7 +78,7 @@ export function SidebarNav(props: Props) {
     isOverlay,
     restoreFocusRef,
     settingsTriggerRef,
-    importTriggerRef,
+    enrollmentTriggerRef,
     searchQuery,
     searchResults,
     onChangeSearch,
@@ -86,7 +87,7 @@ export function SidebarNav(props: Props) {
     onCreateDoc,
     onOpenEmbedModal,
     onOpenReadingSettings,
-    onOpenImportRepoModal,
+    onOpenEnrollment,
     onClose
   } = props;
 
@@ -352,17 +353,17 @@ export function SidebarNav(props: Props) {
         <div className="project-select-header">
           <label htmlFor="projectSelect">Repository</label>
           <button
-            ref={importTriggerRef}
+            ref={enrollmentTriggerRef}
             type="button"
-            className="btn btn-compact btn-quiet project-add-btn"
+            className="btn btn-compact btn-quiet project-enrollment-btn"
             onClick={() => {
               if (isOverlay) onClose();
-              onOpenImportRepoModal();
+              onOpenEnrollment();
             }}
-            title="Import, clone, or manage repositories"
+            title="How repositories are enrolled"
           >
-            <Plus size={12} aria-hidden="true" />
-            <span>Add</span>
+            <Info size={12} aria-hidden="true" />
+            <span>Enrollment</span>
           </button>
         </div>
         <select
@@ -586,7 +587,7 @@ export function SidebarNav(props: Props) {
             className="sidebar-settings-btn"
             onClick={onOpenReadingSettings}
             aria-label="Settings"
-            title="Settings — reading, appearance, authoring, and Git credentials"
+            title="Settings for reading, appearance, and authoring"
           >
             <Settings size={15} className="sidebar-settings-icon" aria-hidden="true" />
             <span>Settings</span>
