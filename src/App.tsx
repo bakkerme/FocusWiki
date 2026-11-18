@@ -26,11 +26,11 @@ import {
 import { SidebarNav } from './components/SidebarNav';
 import { MarkdownSourceWorkspace } from './components/MarkdownSourceWorkspace';
 import { ReviewMargin } from './components/ReviewMargin';
+import { hasWorkingTreeStatus, workingTreeLabel, type ProjectGitStatusView } from './utils/gitStatus';
 import { GitDrawerModal } from './components/GitDrawerModal';
 import { ConflictModal } from './components/ConflictModal';
 import { InsertEmbedModal } from './components/InsertEmbedModal';
 import { SettingsModal, type SettingsSection } from './components/SettingsModal';
-import { ImportRepoModal } from './components/ImportRepoModal';
 import { useOverlayScrollLock } from './utils/overlayModal';
 import {
   DEFAULT_READING_PREFERENCES,
@@ -136,15 +136,14 @@ export function App() {
 
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [searchResults, setSearchResults] = useState<SearchResultItem[]>([]);
+  const [searchNotice, setSearchNotice] = useState('');
 
   const [embedReloadToken, setEmbedReloadToken] = useState<number>(0);
   const [gitModalOpen, setGitModalOpen] = useState<boolean>(false);
   const [embedModalOpen, setEmbedModalOpen] = useState<boolean>(false);
-  const [importModalOpen, setImportModalOpen] = useState<boolean>(false);
   const [initialLoaded, setInitialLoaded] = useState<boolean>(false);
   const [readingSettingsOpen, setReadingSettingsOpen] = useState<boolean>(false);
   const [settingsSection, setSettingsSection] = useState<SettingsSection>('reading');
-  const [settingsCredHost, setSettingsCredHost] = useState<string>('');
   const [readingPreferences, setReadingPreferences] = useState<ReadingPreferences>(
     loadReadingPreferences
   );
@@ -155,7 +154,7 @@ export function App() {
   const navTriggerRef = useRef<HTMLButtonElement | null>(null);
   const reviewTriggerRef = useRef<HTMLButtonElement | null>(null);
   const settingsTriggerRef = useRef<HTMLButtonElement | null>(null);
-  const importTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const enrollmentTriggerRef = useRef<HTMLButtonElement | null>(null);
 
   const baseRevisionRef = useRef<string>('');
   const lastSavedMdRef = useRef<string>('');
@@ -196,9 +195,8 @@ export function App() {
     readingSettingsOpen ||
     gitModalOpen ||
     embedModalOpen ||
-    importModalOpen ||
     Boolean(conflictData);
-  const lockDocumentScroll = isOverlayModalOpen || readingSettingsOpen;
+  const lockDocumentScroll = isOverlayModalOpen || readingSettingsOpen || gitModalOpen;
   const stageInert = isOverlayModalOpen || anyDialogOpen;
 
   useOverlayScrollLock(lockDocumentScroll);
@@ -245,10 +243,6 @@ export function App() {
     }));
   }
 
-  function handleResetWorkspaceDefaults() {
-    updateWorkspaceSettings(() => ({ ...DEFAULT_WORKSPACE_SETTINGS }));
-  }
-
   function handleChangeTextSize(textSize: TextSizePreset) {
     updateReadingPreferences((prev) => ({ ...prev, textSize }));
   }
@@ -261,12 +255,11 @@ export function App() {
     updateReadingPreferences(() => ({ ...DEFAULT_READING_PREFERENCES }));
   }
 
-  function handleOpenReadingSettings(section: SettingsSection = 'reading', credHost = '') {
+  function handleOpenReadingSettings(section: SettingsSection = 'reading') {
     if (isOverlayLayout) {
       setOverlayDrawer(null);
     }
     setSettingsSection(section);
-    setSettingsCredHost(credHost);
     setReadingSettingsOpen(true);
   }
 
@@ -320,10 +313,13 @@ export function App() {
     };
   }, []);
 
-  const activeProject = useMemo(
+  const activeProject = useMemo<(ProjectSummary & { workingTreeAvailable?: boolean }) | null>(
     () => projects.find((p) => p.id === activeProjectId) ?? null,
     [projects, activeProjectId]
   );
+
+  const gitStatus: ProjectGitStatusView | undefined = activeProject?.git;
+  const gitStatusKnown = gitStatus && hasWorkingTreeStatus(gitStatus);
 
   const openThreadCount = useMemo(
     () => threads.filter((t) => t.status === 'open').length,
@@ -331,11 +327,17 @@ export function App() {
   );
 
   const refreshProjects = useCallback(async (): Promise<ProjectSummary[]> => {
-    const res = await fetch('/api/projects');
-    if (!res.ok) throw new Error('Unable to load projects');
-    const data = (await res.json()) as { projects: ProjectSummary[] };
-    setProjects(data.projects);
-    return data.projects;
+    const projects: ProjectSummary[] = [];
+    let offset: number | undefined = 0;
+    while (offset !== undefined) {
+      const res = await fetch(offset ? `/api/projects?offset=${offset}` : '/api/projects');
+      if (!res.ok) throw new Error('Unable to load projects');
+      const page: { projects: ProjectSummary[]; nextOffset?: number } = await res.json();
+      projects.push(...page.projects);
+      offset = page.nextOffset;
+    }
+    setProjects(projects);
+    return projects;
   }, []);
 
   const syncUrlParams = useCallback((projectId: string, docPath: string, mode: WorkspaceMode) => {
@@ -366,7 +368,7 @@ export function App() {
       );
       if (!res.ok) {
         setStatusNotice(`Could not open ${docPath} (${res.status})`);
-        return;
+        return false;
       }
 
       const payload = (await res.json()) as DocumentPayload;
@@ -412,6 +414,7 @@ export function App() {
       if (isDifferentDoc && typeof window !== 'undefined' && !document.body.dataset.overlayLocked) {
         window.scrollTo(0, 0);
       }
+      return true;
     },
     [syncUrlParams]
   );
@@ -434,19 +437,19 @@ export function App() {
         const urlDoc = params.get('doc');
 
         const chosenProj = list.find((p) => p.id === urlProject) ?? list[0];
-        const chosenDoc =
-          urlDoc && chosenProj.docs.some((d) => d.path === urlDoc)
-            ? urlDoc
-            : chosenProj.docs.some((d) => d.path === chosenProj.defaultDoc)
-              ? chosenProj.defaultDoc
-              : chosenProj.docs[0]?.path || '';
-
-        if (chosenDoc) {
-          await loadDocument(chosenProj.id, chosenDoc);
-        } else {
-          setActiveProjectId(chosenProj.id);
-          setActiveDocPath('');
+        if (urlDoc && (chosenProj.docs.some((doc) => doc.path === urlDoc) ||
+          (chosenProj.id === urlProject && chosenProj.scanIncomplete))) {
+          if (await loadDocument(chosenProj.id, urlDoc)) return;
         }
+
+        const chosenDoc = chosenProj.docs.some((doc) => doc.path === chosenProj.defaultDoc)
+          ? chosenProj.defaultDoc
+          : chosenProj.docs[0]?.path;
+        if (chosenDoc && await loadDocument(chosenProj.id, chosenDoc)) return;
+        setActiveProjectId(chosenProj.id);
+        setActiveDocPath('');
+      } catch (err) {
+        if (!cancelled) setStatusNotice(err instanceof Error ? err.message : 'Unable to load projects');
       } finally {
         if (!cancelled) {
           setInitialLoaded(true);
@@ -588,6 +591,19 @@ export function App() {
 
   // Live SSE listener for external file / bot edits
   useEffect(() => {
+    let summaryTimer: number | undefined;
+    const queueSummaryRefresh = () => {
+      if (summaryTimer !== undefined) return;
+      summaryTimer = window.setTimeout(async () => {
+        try {
+          await refreshProjects();
+        } catch {
+          setStatusNotice('Project list could not refresh. Reload to try again.');
+        } finally {
+          summaryTimer = undefined;
+        }
+      }, 1_250);
+    };
     const es = new EventSource('/api/events');
     es.onmessage = (ev) => {
       try {
@@ -596,14 +612,18 @@ export function App() {
           projectId?: string;
           relPath?: string;
           kind?: string;
+          reason?: string;
         };
         if (msg.type === 'projects:updated') {
-          void refreshProjects();
+          if (msg.reason === 'watch-overflow' && msg.projectId === activeProjectIdRef.current) {
+            setStatusNotice('Some live updates were skipped. Reload to read the latest files.');
+          }
+          queueSummaryRefresh();
           return;
         }
         if (msg.type !== 'workspace:changed') return;
 
-        void refreshProjects();
+        queueSummaryRefresh();
 
         if (msg.projectId !== activeProjectIdRef.current) return;
 
@@ -677,6 +697,7 @@ export function App() {
       }
     };
     return () => {
+      window.clearTimeout(summaryTimer);
       es.close();
     };
   }, [refreshProjects]);
@@ -684,18 +705,26 @@ export function App() {
   // Cross-project search
   useEffect(() => {
     const q = searchQuery.trim();
-    if (!q) {
-      setSearchResults([]);
-      return;
-    }
+    setSearchResults([]);
+    setSearchNotice(q ? 'Searching…' : '');
+    if (!q) return;
+    const controller = new AbortController();
     const timer = window.setTimeout(async () => {
-      const res = await fetch(`/api/search?q=${encodeURIComponent(q)}`);
-      if (res.ok) {
-        const data = (await res.json()) as { results: SearchResultItem[] };
+      try {
+        const res = await fetch(`/api/search?q=${encodeURIComponent(q)}`, { signal: controller.signal });
+        const data = (await res.json()) as { results: SearchResultItem[]; scanIncomplete?: boolean; message?: string };
+        if (!res.ok) throw new Error(data.message ?? 'Search could not finish. Please try again.');
         setSearchResults(data.results);
+        setSearchNotice(data.scanIncomplete ? 'Search reached its limits. Results may be incomplete.' : '');
+      } catch (err) {
+        if (controller.signal.aborted) return;
+        setSearchNotice(err instanceof Error ? err.message : 'Search could not finish. Please try again.');
       }
     }, 150);
-    return () => window.clearTimeout(timer);
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+    };
   }, [searchQuery]);
 
   async function openProjectSummary(proj: ProjectSummary, preferredDoc?: string) {
@@ -723,12 +752,31 @@ export function App() {
   }
 
   async function handleOpenGitModal() {
+    const projectId = activeProjectIdRef.current;
+    const docPath = activeDocPathRef.current;
     if (saveTimerRef.current !== null) {
       window.clearTimeout(saveTimerRef.current);
       saveTimerRef.current = null;
-      await performSave(liveMdRef.current, false);
     }
-    setGitModalOpen(true);
+    await saveChainRef.current;
+    if (projectId !== activeProjectIdRef.current || docPath !== activeDocPathRef.current) return;
+
+    if (saveStateRef.current === 'conflict') {
+      if (lastConflictPayloadRef.current) {
+        setConflictData({ ...lastConflictPayloadRef.current });
+      }
+      return;
+    }
+    if (docPath && (liveMdRef.current !== lastSavedMdRef.current || saveStateRef.current === 'error')) {
+      const outcome = await performSave(liveMdRef.current, false, {
+        expectedEpoch: saveEpochRef.current
+      });
+      if (outcome !== 'saved' || liveMdRef.current !== lastSavedMdRef.current) return;
+    }
+    if (projectId === activeProjectIdRef.current && docPath === activeDocPathRef.current) {
+      setGitModalOpen(true);
+      void refreshProjects().catch(() => undefined);
+    }
   }
 
   async function handleSelectProject(nextProjectId: string) {
@@ -739,44 +787,6 @@ export function App() {
     const proj = projects.find((p) => p.id === nextProjectId);
     if (!proj) return;
     await openProjectSummary(proj);
-  }
-
-  async function handleRepoImported(imported: ProjectSummary) {
-    const list = await refreshProjects();
-    const fresh = list.find((p) => p.id === imported.id) ?? imported;
-    await openProjectSummary(fresh);
-    setStatusNotice(`Connected repository "${fresh.name}" on branch ${fresh.git.branch}.`);
-  }
-
-  async function handleRepoRemoved(removedId: string) {
-    const list = await refreshProjects();
-    if (activeProjectId === removedId) {
-      if (list.length > 0) {
-        await openProjectSummary(list[0]);
-      } else {
-        setActiveProjectId('');
-        setActiveDocPath('');
-        setInitialDocMarkdown('');
-        setLiveMarkdown('');
-        setThreads([]);
-      }
-    }
-    setStatusNotice(`Removed repository "${removedId}" from Focus (files kept on disk).`);
-  }
-
-  async function handleRepoUpdated(updated: ProjectSummary) {
-    await refreshProjects();
-    setStatusNotice(`Updated repository "${updated.name}" (default page: ${updated.defaultDoc}).`);
-  }
-
-  async function handleRepoSynced(notice: string) {
-    const list = await refreshProjects();
-    const current = list.find((p) => p.id === activeProjectIdRef.current);
-    if (current) {
-      await openProjectSummary(current, activeDocPathRef.current);
-      setEmbedReloadToken((n) => n + 1);
-    }
-    setStatusNotice(notice);
   }
 
   async function handleSelectDoc(projectId: string, docPath: string) {
@@ -1241,16 +1251,17 @@ export function App() {
             isOverlay={isOverlayLayout}
             restoreFocusRef={navTriggerRef}
             settingsTriggerRef={settingsTriggerRef}
-            importTriggerRef={importTriggerRef}
+            enrollmentTriggerRef={enrollmentTriggerRef}
             searchQuery={searchQuery}
             searchResults={searchResults}
+            searchNotice={searchNotice}
             onChangeSearch={setSearchQuery}
             onSelectProject={(id) => void handleSelectProject(id)}
             onSelectDoc={(projId, docPath) => void handleSelectDoc(projId, docPath)}
             onCreateDoc={handleCreateDoc}
             onOpenEmbedModal={() => setEmbedModalOpen(true)}
-            onOpenReadingSettings={() => handleOpenReadingSettings('reading')}
-            onOpenImportRepoModal={() => setImportModalOpen(true)}
+            onOpenReadingSettings={handleOpenReadingSettings}
+            onOpenEnrollment={() => handleOpenReadingSettings('repositories')}
             onClose={closeNavPanel}
           />
         )}
@@ -1278,7 +1289,7 @@ export function App() {
                 </button>
               )}
 
-              {activeProject && (
+              {activeProject && gitStatus && (
                 <>
                   {(isOverlayLayout || !effectiveNavVisible) && (
                     <span
@@ -1291,32 +1302,34 @@ export function App() {
 
                   <button
                     type="button"
-                    className={`git-status-btn ${activeProject.git.isClean ? 'is-clean' : 'dirty'}`}
+                    className={`git-status-btn${gitStatusKnown ? gitStatus.isClean ? ' is-clean' : ' dirty' : ''}`}
                     onClick={() => void handleOpenGitModal()}
-                    aria-label={`Repository ${activeProject.name} on branch ${activeProject.git.branch}, ${
-                      activeProject.git.isClean
-                        ? 'working tree clean'
-                        : `${activeProject.git.changedFiles.length} uncommitted ${
-                            activeProject.git.changedFiles.length === 1 ? 'file' : 'files'
-                          }`
-                    }. Open Git branches, PRs, pull, and change review.`}
-                    title={`Checkout: ${activeProject.rootPath} (${activeProject.git.branch}) — Branches, PRs, Pull & Diff`}
+                    aria-label={`Repository ${activeProject.name}${gitStatus.branch && gitStatus.branch !== 'uninitialized'
+                      ? ` on branch ${gitStatus.branch}`
+                      : ''}. ${workingTreeLabel(gitStatus)}. Review working changes.`}
+                    title="Review working changes"
                   >
                     <GitBranch size={12} aria-hidden="true" />
-                    <span className="git-branch-name">{activeProject.git.branch}</span>
-                    {!activeProject.git.isClean ? (
-                      <>
-                        <span className="git-dirty-count">
-                          {activeProject.git.changedFiles.length}
-                        </span>
-                        <span className="git-status-word">uncommitted</span>
-                      </>
-                    ) : (
-                      <span className="git-status-word">clean</span>
+                    {gitStatus.branch && gitStatus.branch !== 'uninitialized' && (
+                      <span className="git-branch-name">{gitStatus.branch}</span>
                     )}
-                    {(activeProject.git.behind ?? 0) > 0 && (
-                      <span className="git-behind-pill" title={`${activeProject.git.behind} commit(s) behind remote`}>
-                        ↓{activeProject.git.behind}
+                    {gitStatusKnown ? (
+                      gitStatus.isClean ? (
+                        <span className="git-status-word">clean</span>
+                      ) : (
+                        <>
+                          <span className="git-dirty-count">
+                            {gitStatus.changedFiles.length}{gitStatus.changesTruncated ? '+' : ''}
+                          </span>
+                          <span className="git-status-word">changed</span>
+                        </>
+                      )
+                    ) : (
+                      <span className="git-status-word">{workingTreeLabel(gitStatus)}</span>
+                    )}
+                    {gitStatusKnown && (gitStatus.behind ?? 0) > 0 && (
+                      <span className="git-behind-pill" title={`${gitStatus.behind} commit(s) behind last known upstream`}>
+                        ↓{gitStatus.behind}
                       </span>
                     )}
                   </button>
@@ -1328,9 +1341,9 @@ export function App() {
               {isEditing && saveState === 'saved' && (
                 <span
                   className="save-badge saved"
-                  title="Working file saved on disk (uncommitted until explicit Git commit)"
+                  title="Working file saved on disk"
                 >
-                  Saved
+                  Saved locally
                 </span>
               )}
               {(saveState === 'dirty' || saveState === 'saving') && (
@@ -1551,13 +1564,19 @@ export function App() {
             />
           ) : !initialLoaded ? (
             <div className="sheet-scroll">Loading workspace…</div>
+          ) : activeProject?.workingTreeAvailable === false ? (
+            <div className="sheet-scroll">
+              <div className="empty-workspace-card">
+                <h2>Working copy unavailable</h2>
+                <p>{activeProject.name} will show its documents once its working copy is ready.</p>
+              </div>
+            </div>
           ) : activeProject ? (
             <div className="sheet-scroll">
               <div className="empty-workspace-card">
                 <h2>No Markdown pages in {activeProject.name}</h2>
                 <p>
-                  This repository doesn’t have any <code>.md</code> documents yet on branch{' '}
-                  <code>{activeProject.git.branch}</code>.
+                  This working copy has no Markdown documents yet.
                 </p>
                 <div className="empty-workspace-actions">
                   <button
@@ -1570,9 +1589,9 @@ export function App() {
                   <button
                     type="button"
                     className="btn btn-compact"
-                    onClick={() => setGitModalOpen(true)}
+                    onClick={() => void handleOpenGitModal()}
                   >
-                    Branches &amp; Git
+                    Review working changes
                   </button>
                 </div>
               </div>
@@ -1581,14 +1600,14 @@ export function App() {
             <div className="sheet-scroll">
               <div className="empty-workspace-card">
                 <h2>No repositories connected</h2>
-                <p>Clone a Git repository or connect a local folder to start reading and editing.</p>
+                <p>Ask your workspace operator to enroll a repository so you can read and edit its documents.</p>
                 <div className="empty-workspace-actions">
                   <button
                     type="button"
                     className="btn btn-compact btn-primary"
-                    onClick={() => setImportModalOpen(true)}
+                    onClick={() => handleOpenReadingSettings('repositories')}
                   >
-                    Add repository
+                    Repository enrollment
                   </button>
                 </div>
               </div>
@@ -1656,52 +1675,26 @@ export function App() {
       {readingSettingsOpen && (
         <SettingsModal
           initialSection={settingsSection}
-          initialCredentialHost={settingsCredHost}
           readingPreferences={readingPreferences}
           workspaceSettings={workspaceSettings}
-          projects={projects}
-          activeProjectId={activeProjectId}
-          restoreFocusRef={isOverlayLayout ? navTriggerRef : settingsTriggerRef}
+          restoreFocusRef={
+            isOverlayLayout ? navTriggerRef : settingsSection === 'repositories' ? enrollmentTriggerRef : settingsTriggerRef
+          }
           onChangeTextSize={handleChangeTextSize}
           onChangePageWidth={handleChangePageWidth}
           onResetReadingDefaults={handleResetReadingPreferences}
           onUpdateWorkspaceSettings={updateWorkspaceSettings}
-          onResetWorkspaceDefaults={handleResetWorkspaceDefaults}
-          onSelectProject={handleSelectProject}
-          onRepoUpdated={handleRepoUpdated}
-          onRepoRemoved={handleRepoRemoved}
-          onOpenImportRepoModal={() => setImportModalOpen(true)}
           onClose={() => setReadingSettingsOpen(false)}
         />
       )}
 
       {gitModalOpen && activeProject && (
         <GitDrawerModal
+          key={activeProject.id}
           project={activeProject}
           activeDocPath={activeDocPath}
-          defaultAuthorName={workspaceSettings.commitAuthorName}
-          defaultAuthorEmail={workspaceSettings.commitAuthorEmail}
-          defaultTab={workspaceSettings.defaultGitTab}
-          autoFetchOnOpen={workspaceSettings.autoFetchOnGitOpen}
-          includePrRefsOnFetch={workspaceSettings.includePrRefsOnFetch}
-          onOpenCredentialsSettings={(host) => handleOpenReadingSettings('credentials', host ?? '')}
           onClose={() => setGitModalOpen(false)}
-          onCommitted={async () => {
-            await refreshProjects();
-          }}
-          onRepoSynced={handleRepoSynced}
-        />
-      )}
-
-      {importModalOpen && (
-        <ImportRepoModal
-          projects={projects}
-          activeProjectId={activeProjectId}
-          restoreFocusRef={isOverlayLayout ? navTriggerRef : importTriggerRef}
-          onImported={handleRepoImported}
-          onRemoved={handleRepoRemoved}
-          onOpenCredentialsSettings={(host) => handleOpenReadingSettings('credentials', host ?? '')}
-          onClose={() => setImportModalOpen(false)}
+          onStatusChanged={refreshProjects}
         />
       )}
 

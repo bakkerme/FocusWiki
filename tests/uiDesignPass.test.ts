@@ -754,8 +754,8 @@ describe('Council UI Design & Responsive IA Pass — Interactive Browser Verific
     }
   });
 
-  it('renders safe Rich Change Review (prose word diff, formatting-only table separation, comments, code, add/delete) and commits with zero OpenBot trailer', async () => {
-    // Isolate a clean project working tree in heliosRoot for rich change review + commit verification
+  it('renders safe Rich Change Review (prose word diff, formatting-only table separation, comments, code, add/delete) without executing project content', async () => {
+    // Use the local checkout to exercise the real rich comparison payload.
     const invPath = path.join(heliosRoot, 'docs', 'bench-inventory.md');
     const origInv = fs.readFileSync(invPath, 'utf8');
 
@@ -849,19 +849,8 @@ describe('Council UI Design & Responsive IA Pass — Interactive Browser Verific
       );
       expect(phoneOverflowX).toBeLessThanOrEqual(1);
 
-      // Commit all working-tree changes as human user -> verify git log has NO forced OpenBot trailer
-      await page.locator('.commit-message-input').fill('Update bench inventory and add calibration spec');
-      await page.locator('.commit-author-input').fill('Helena Vance');
-      await page.locator('.commit-submit-btn').click();
-      await page.waitForSelector('.change-review-banner:has-text("Committed")');
-
-      const logBody = execFileSync('git', ['log', '-1', '--format=%B'], {
-        cwd: heliosRoot,
-        encoding: 'utf8'
-      });
-      expect(logBody.trim()).toBe('Update bench inventory and add calibration spec');
-      expect(logBody).not.toContain('OpenBot');
-      expect(logBody).not.toContain('Co-authored-by');
+      // A legacy diff without a review ID is available for inspection only.
+      expect(await page.getByLabel('Proposal message').count()).toBe(0);
     } finally {
       await context.close();
     }

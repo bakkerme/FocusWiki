@@ -152,6 +152,7 @@ export type MarkdownReviewEntry =
     };
 
 export interface MarkdownFileReview {
+  limited?: 'source-only' | 'word-detail';
   substantiveCount: number;
   formattingOnlyCount: number;
   formattingOnlyTables: number;
@@ -221,45 +222,104 @@ export interface GitChangeReviewPayload {
   files: ChangeFileSummary[];
 }
 
+const MAX_MARKDOWN_SIDE_BYTES = 64 * 1024;
+const MAX_MATRIX_CELLS = 200_000;
+const MAX_MARKDOWN_MATRIX_CELLS = 450_000;
+
+class ReviewLimitError extends Error {}
+
+class ComparisonBudget {
+  wordDetailLimited = false;
+
+  constructor(private remaining = MAX_MARKDOWN_MATRIX_CELLS) {}
+
+  reserve(cells: number, limit: number): boolean {
+    if (cells > limit || cells > this.remaining) return false;
+    this.remaining -= cells;
+    return true;
+  }
+}
+
+/** A single bounded matrix implementation for block, row, word and line alignment. */
+function buildLcs(
+  before: string[], after: string[], budget: ComparisonBudget, limit = MAX_MATRIX_CELLS
+) {
+  const width = after.length + 1;
+  const cells = (before.length + 1) * width;
+  if (!budget.reserve(cells, limit)) return undefined;
+  // Intern once so long common prefixes do not multiply string comparison cost.
+  const ids = new Map<string, number>();
+  const intern = (value: string) => {
+    const id = ids.get(value) ?? ids.size + 1;
+    ids.set(value, id);
+    return id;
+  };
+  const a = before.map(intern);
+  const b = after.map(intern);
+  const dp = new Uint16Array(cells);
+  for (let i = a.length - 1; i >= 0; i--) {
+    for (let j = b.length - 1; j >= 0; j--) {
+      const index = i * width + j;
+      dp[index] = a[i] === b[j]
+        ? dp[index + width + 1] + 1
+        : Math.max(dp[index + width], dp[index + 1]);
+    }
+  }
+  return {
+    equal: (i: number, j: number) => a[i] === b[j],
+    preferRemoval: (i: number, j: number) => dp[(i + 1) * width + j] >= dp[i * width + j + 1]
+  };
+}
+
+function alignAnchors(before: string[], after: string[], budget: ComparisonBudget) {
+  const anchors: Array<{ bi: number; ai: number }> = [];
+  if (!before.length || !after.length) return anchors;
+  const lcs = buildLcs(before, after, budget);
+  if (!lcs) throw new ReviewLimitError();
+  let bi = 0;
+  let ai = 0;
+  while (bi < before.length && ai < after.length) {
+    if (lcs.equal(bi, ai)) {
+      anchors.push({ bi: bi++, ai: ai++ });
+    } else if (lcs.preferRemoval(bi, ai)) {
+      bi++;
+    } else {
+      ai++;
+    }
+  }
+  return anchors;
+}
+
 export function computeWordDiff(beforeText: string, afterText: string): DiffToken[] {
+  return compareWords(beforeText, afterText, new ComparisonBudget());
+}
+
+function compareWords(beforeText: string, afterText: string, budget: ComparisonBudget): DiffToken[] {
   if (beforeText === afterText) {
     return beforeText ? [{ op: 'equal', text: beforeText }] : [];
   }
+  if (!beforeText) return [{ op: 'add', text: afterText }];
+  if (!afterText) return [{ op: 'del', text: beforeText }];
+
   const aTokens = beforeText.match(/\S+|\s+/g) ?? [];
   const bTokens = afterText.match(/\S+|\s+/g) ?? [];
-
   const m = aTokens.length;
   const n = bTokens.length;
-  if (m === 0) return afterText ? [{ op: 'add', text: afterText }] : [];
-  if (n === 0) return beforeText ? [{ op: 'del', text: beforeText }] : [];
-
-  if (m * n > 200_000) {
-    return [
-      { op: 'del', text: beforeText },
-      { op: 'add', text: afterText }
-    ];
-  }
-
-  const dp: Uint16Array[] = Array.from({ length: m + 1 }, () => new Uint16Array(n + 1));
-  for (let i = m - 1; i >= 0; i--) {
-    for (let j = n - 1; j >= 0; j--) {
-      if (aTokens[i] === bTokens[j]) {
-        dp[i][j] = dp[i + 1][j + 1] + 1;
-      } else {
-        dp[i][j] = dp[i + 1][j] >= dp[i][j + 1] ? dp[i + 1][j] : dp[i][j + 1];
-      }
-    }
+  const lcs = buildLcs(aTokens, bTokens, budget);
+  if (!lcs) {
+    budget.wordDetailLimited = true;
+    return [{ op: 'del', text: beforeText }, { op: 'add', text: afterText }];
   }
 
   const raw: DiffToken[] = [];
   let i = 0;
   let j = 0;
   while (i < m && j < n) {
-    if (aTokens[i] === bTokens[j]) {
+    if (lcs.equal(i, j)) {
       raw.push({ op: 'equal', text: aTokens[i] });
       i++;
       j++;
-    } else if (dp[i + 1][j] >= dp[i][j + 1]) {
+    } else if (lcs.preferRemoval(i, j)) {
       raw.push({ op: 'del', text: aTokens[i] });
       i++;
     } else {
@@ -341,6 +401,10 @@ function blockPlainText(nodes: RootContent[]): string {
 }
 
 export function parseMarkdownReviewBlocks(markdown: string): InertReviewBlock[] {
+  return parseReviewBlocks(markdown, false);
+}
+
+function parseReviewBlocks(markdown: string, enforceLimits: boolean): InertReviewBlock[] {
   const normalized = markdown.replace(/\r\n/g, '\n');
   if (!normalized.trim()) return [];
 
@@ -349,6 +413,20 @@ export function parseMarkdownReviewBlocks(markdown: string): InertReviewBlock[] 
     .use(remarkGfm)
     .use(remarkFrontmatter, ['yaml', 'toml'])
     .parse(normalized);
+
+  if (enforceLimits) {
+    let nodes = 0;
+    let paddedTableCells = 0;
+    function check(node: import('mdast').Nodes, depth: number) {
+      if (++nodes > 4_000 || depth > 32) throw new ReviewLimitError();
+      if (node.type === 'table') {
+        paddedTableCells += (node.children[0]?.children.length ?? 0) * node.children.length;
+        if (paddedTableCells > 4_000) throw new ReviewLimitError();
+      }
+      if ('children' in node) for (const child of node.children) check(child, depth + 1);
+    }
+    check(tree, 0);
+  }
 
   const pmDoc = markdownToProseMirror(normalized);
   const pmBlocks = pmDoc.content ?? [];
@@ -482,9 +560,18 @@ export function parseMarkdownReviewBlocks(markdown: string): InertReviewBlock[] 
 
 function compareTables(
   before: Extract<InertReviewBlock, { kind: 'table' }>,
-  after: Extract<InertReviewBlock, { kind: 'table' }>
+  after: Extract<InertReviewBlock, { kind: 'table' }>,
+  budget: ComparisonBudget
 ): SubstantiveTableComparison {
   const colCount = Math.max(before.headers.length, after.headers.length);
+  const m = before.rows.length;
+  const n = after.rows.length;
+  if (colCount * (m + n + 1) > 4_000) throw new ReviewLimitError();
+  const anchors = alignAnchors(
+    before.rows.map((row) => JSON.stringify(row)),
+    after.rows.map((row) => JSON.stringify(row)),
+    budget
+  );
   const headers: SubstantiveTableComparison['headers'] = [];
   let anyHeaderContentChanged = false;
   let anyAlignChanged = false;
@@ -503,39 +590,8 @@ function compareTables(
       changed,
       alignBefore,
       alignAfter,
-      ...(bH !== aH ? { tokens: computeWordDiff(bH, aH) } : {})
+      ...(bH !== aH ? { tokens: compareWords(bH, aH, budget) } : {})
     });
-  }
-
-  const beforeRowKeys = before.rows.map((r) => JSON.stringify(r));
-  const afterRowKeys = after.rows.map((r) => JSON.stringify(r));
-  const m = before.rows.length;
-  const n = after.rows.length;
-
-  const dp: Uint16Array[] = Array.from({ length: m + 1 }, () => new Uint16Array(n + 1));
-  for (let i = m - 1; i >= 0; i--) {
-    for (let j = n - 1; j >= 0; j--) {
-      if (beforeRowKeys[i] === afterRowKeys[j]) {
-        dp[i][j] = dp[i + 1][j + 1] + 1;
-      } else {
-        dp[i][j] = dp[i + 1][j] >= dp[i][j + 1] ? dp[i + 1][j] : dp[i][j + 1];
-      }
-    }
-  }
-
-  const anchors: Array<{ bi: number; ai: number }> = [];
-  let i = 0;
-  let j = 0;
-  while (i < m && j < n) {
-    if (beforeRowKeys[i] === afterRowKeys[j]) {
-      anchors.push({ bi: i, ai: j });
-      i++;
-      j++;
-    } else if (dp[i + 1][j] >= dp[i][j + 1]) {
-      i++;
-    } else {
-      j++;
-    }
   }
 
   const rows: TableRowComparison[] = [];
@@ -562,7 +618,7 @@ function compareTables(
           before: bVal,
           after: aVal,
           changed,
-          ...(changed ? { tokens: computeWordDiff(bVal, aVal) } : {})
+          ...(changed ? { tokens: compareWords(bVal, aVal, budget) } : {})
         });
       }
       rows.push({ status: 'modified', cells });
@@ -619,7 +675,8 @@ function compareTables(
 
 function buildModifiedBlockEntry(
   before: InertReviewBlock,
-  after: InertReviewBlock
+  after: InertReviewBlock,
+  budget: ComparisonBudget
 ): Extract<MarkdownReviewEntry, { type: 'modified' }> {
   if (
     (before.kind === 'paragraph' && after.kind === 'paragraph') ||
@@ -630,7 +687,7 @@ function buildModifiedBlockEntry(
       type: 'modified',
       before,
       after,
-      wordDiff: computeWordDiff(before.text, after.text)
+      wordDiff: compareWords(before.text, after.text, budget)
     };
   }
 
@@ -639,7 +696,7 @@ function buildModifiedBlockEntry(
       type: 'modified',
       before,
       after,
-      tableDiff: compareTables(before, after)
+      tableDiff: compareTables(before, after, budget)
     };
   }
 
@@ -660,7 +717,7 @@ function buildModifiedBlockEntry(
           textBefore: bItem.text,
           textAfter: aItem.text,
           ...(!same && bItem.text !== aItem.text
-            ? { tokens: computeWordDiff(bItem.text, aItem.text) }
+            ? { tokens: compareWords(bItem.text, aItem.text, budget) }
             : {})
         });
       } else if (bItem) {
@@ -686,12 +743,9 @@ function buildModifiedBlockEntry(
   }
 
   if (before.kind === 'code' && after.kind === 'code') {
-    return {
-      type: 'modified',
-      before,
-      after,
-      codeHunks: buildCodeFileReview(before.code, after.code, before.language ?? 'text').hunks
-    };
+    const code = compareCode(before.code, after.code, before.language ?? 'text', budget);
+    if (code.hunksTruncated) throw new ReviewLimitError();
+    return { type: 'modified', before, after, codeHunks: code.hunks };
   }
 
   return {
@@ -705,8 +759,22 @@ export function buildMarkdownFileReview(
   beforeMd: string | null,
   afterMd: string | null
 ): MarkdownFileReview {
-  const beforeBlocks = beforeMd ? parseMarkdownReviewBlocks(beforeMd) : [];
-  const afterBlocks = afterMd ? parseMarkdownReviewBlocks(afterMd) : [];
+  try {
+    for (const source of [beforeMd, afterMd]) {
+      if (source && (source.length > MAX_MARKDOWN_SIDE_BYTES ||
+        new TextEncoder().encode(source).length > MAX_MARKDOWN_SIDE_BYTES ||
+        (source.match(/\n/g)?.length ?? 0) > 1_600)) throw new ReviewLimitError();
+    }
+    return compareMarkdown(beforeMd, afterMd, new ComparisonBudget());
+  } catch (err) {
+    if (!(err instanceof ReviewLimitError || err instanceof RangeError)) throw err;
+    return { limited: 'source-only', substantiveCount: 0, formattingOnlyCount: 0, formattingOnlyTables: 0, entries: [] };
+  }
+}
+
+function compareMarkdown(beforeMd: string | null, afterMd: string | null, budget: ComparisonBudget): MarkdownFileReview {
+  const beforeBlocks = beforeMd ? parseReviewBlocks(beforeMd, true) : [];
+  const afterBlocks = afterMd ? parseReviewBlocks(afterMd, true) : [];
 
   if (beforeMd === null) {
     return {
@@ -728,32 +796,11 @@ export function buildMarkdownFileReview(
 
   const m = beforeBlocks.length;
   const n = afterBlocks.length;
-  const dp: Uint16Array[] = Array.from({ length: m + 1 }, () => new Uint16Array(n + 1));
-
-  for (let i = m - 1; i >= 0; i--) {
-    for (let j = n - 1; j >= 0; j--) {
-      if (beforeBlocks[i].semanticKey === afterBlocks[j].semanticKey) {
-        dp[i][j] = dp[i + 1][j + 1] + 1;
-      } else {
-        dp[i][j] = dp[i + 1][j] >= dp[i][j + 1] ? dp[i + 1][j] : dp[i][j + 1];
-      }
-    }
-  }
-
-  const anchors: Array<{ bi: number; ai: number }> = [];
-  let bi = 0;
-  let ai = 0;
-  while (bi < m && ai < n) {
-    if (beforeBlocks[bi].semanticKey === afterBlocks[ai].semanticKey) {
-      anchors.push({ bi, ai });
-      bi++;
-      ai++;
-    } else if (dp[bi + 1][ai] >= dp[bi][ai + 1]) {
-      bi++;
-    } else {
-      ai++;
-    }
-  }
+  const anchors = alignAnchors(
+    beforeBlocks.map((block) => block.semanticKey),
+    afterBlocks.map((block) => block.semanticKey),
+    budget
+  );
 
   type RawStep =
     | { kind: 'unchanged'; block: InertReviewBlock }
@@ -782,7 +829,7 @@ export function buildMarkdownFileReview(
         substantiveCount++;
         rawSteps.push({
           kind: 'change',
-          entry: buildModifiedBlockEntry(rem, add)
+          entry: buildModifiedBlockEntry(rem, add, budget)
         });
         rIdx++;
         aIdx++;
@@ -907,6 +954,7 @@ export function buildMarkdownFileReview(
   }
 
   return {
+    ...(budget.wordDetailLimited ? { limited: 'word-detail' as const } : {}),
     substantiveCount,
     formattingOnlyCount,
     formattingOnlyTables,
@@ -1033,6 +1081,10 @@ export function buildCodeFileReview(
   afterText: string | null,
   languageHint = 'text'
 ): CodeFileReview {
+  return compareCode(beforeText, afterText, languageHint, new ComparisonBudget());
+}
+
+function compareCode(beforeText: string | null, afterText: string | null, languageHint: string, budget: ComparisonBudget): CodeFileReview {
   const aLines = beforeText !== null ? beforeText.replace(/\r\n/g, '\n').split('\n') : [];
   const bLines = afterText !== null ? afterText.replace(/\r\n/g, '\n').split('\n') : [];
 
@@ -1045,25 +1097,16 @@ export function buildCodeFileReview(
   let ops: CodeDiffLine[] = [];
   let hunksTruncated = false;
 
-  if (m * n <= 450_000) {
-    const dp: Uint16Array[] = Array.from({ length: m + 1 }, () => new Uint16Array(n + 1));
-    for (let i = m - 1; i >= 0; i--) {
-      for (let j = n - 1; j >= 0; j--) {
-        if (aLines[i] === bLines[j]) {
-          dp[i][j] = dp[i + 1][j + 1] + 1;
-        } else {
-          dp[i][j] = dp[i + 1][j] >= dp[i][j + 1] ? dp[i + 1][j] : dp[i][j + 1];
-        }
-      }
-    }
+  const lcs = m && n && m + n <= 3_000 ? buildLcs(aLines, bLines, budget, 450_000) : undefined;
+  if (m + n <= 3_000 && (lcs || !m || !n)) {
     let i = 0;
     let j = 0;
     while (i < m && j < n) {
-      if (aLines[i] === bLines[j]) {
+      if (lcs!.equal(i, j)) {
         ops.push({ kind: 'context', oldLine: i + 1, newLine: j + 1, text: aLines[i] });
         i++;
         j++;
-      } else if (dp[i + 1][j] >= dp[i][j + 1]) {
+      } else if (lcs!.preferRemoval(i, j)) {
         ops.push({ kind: 'del', oldLine: i + 1, newLine: null, text: aLines[i] });
         i++;
       } else {
@@ -1159,7 +1202,7 @@ export function deriveHumanLabelForChangedPath(
 ): string {
   if (filePath.endsWith('.md')) {
     const source = afterText ?? beforeText ?? '';
-    return extractDocumentTitle(source, filePath);
+    return extractDocumentTitle(source.slice(0, 8 * 1024), filePath).slice(0, 256);
   }
   if (filePath.endsWith('.comments.json')) {
     const docRel = filePath.replace(/\.comments\.json$/, '.md');

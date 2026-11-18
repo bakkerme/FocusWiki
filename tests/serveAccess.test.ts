@@ -94,7 +94,10 @@ describe('Tailscale Serve access', () => {
     expect(await send(socketPath, '/asset.js', { headers })).toMatchObject({ status: 200 });
     expect(await send(socketPath, '/api/projects', { headers })).toMatchObject({ status: 200 });
     expect(await send(socketPath, '/healthz', { headers })).toMatchObject({ status: 200, body: '{"ok":true}' });
-    const embed = await send(socketPath, '/embed-sandbox/fictional/embeds/clock/index.html', { headers });
+    const navigation = await send(socketPath, '/embed-sandbox/fictional/embeds/clock/index.html', { headers });
+    expect(navigation.status).toBe(302);
+    expect(navigation.headers.location).toMatch(/^\/embed-sandbox\/fictional\/_assets\//);
+    const embed = await send(socketPath, navigation.headers.location!, { headers });
     expect(embed.status).toBe(200);
     expect(embed.headers['content-security-policy']).toContain('sandbox allow-scripts');
     expect(embed.headers['content-security-policy']).toContain(`${origin}/embed-sandbox/fictional/`);

@@ -25,6 +25,7 @@ export interface GitRepoStatus {
   headSubject: string;
   isClean: boolean;
   changedFiles: GitChangedFile[];
+  statusIncomplete?: boolean;
   remoteName?: string | null;
   remoteUrl?: string | null;
   ahead?: number;
@@ -69,6 +70,7 @@ export interface RepoInspectionResult {
   suggestedDefaultDoc: string;
   docCount: number;
   embedCount: number;
+  scanIncomplete?: boolean;
   isGitRepo: boolean;
   branch?: string;
   remoteUrl?: string | null;
@@ -93,13 +95,8 @@ export interface GitCredentialSummary {
 }
 
 export interface ServerEnvironmentInfo {
-  managedReposDir: string;
-  allowedImportRoots: string[];
-  configPath: string | null;
-  credentialsPath: string | null;
-  encryptionMode: 'env-key' | 'file-key' | 'memory-only';
-  sshClientAvailable: boolean;
   projectCount: number;
+  managedProjectCount: number;
 }
 
 export interface DocTreeEntry {
@@ -116,10 +113,21 @@ export interface EmbedAssetEntry {
   files: string[];
 }
 
+export type ProjectGitStatus = (
+  | (GitRepoStatus & { state: 'ready'; checkedAt: string; changesTruncated: boolean })
+  | (Omit<GitRepoStatus, 'isClean'> & { state: 'unmanaged' | 'pending' | 'unavailable'; isClean: null })
+) & {
+  fetchState?: 'pending' | 'current' | 'unavailable';
+  fetchedAt?: string;
+};
+
 export interface ProjectSummary extends ProjectConfig {
-  git: GitRepoStatus;
+  git: ProjectGitStatus;
+  workingTreeAvailable: boolean;
   docs: DocTreeEntry[];
   embeds: EmbedAssetEntry[];
+  scanIncomplete?: boolean;
+  watchIncomplete?: boolean;
 }
 
 export interface EmbedDescriptor {
@@ -199,6 +207,7 @@ export interface DocumentPayload {
   docJson: ProseMirrorNode;
   comments: ResolvedCommentThread[];
   conflicts: string[];
+  conflictsIncomplete?: boolean;
 }
 
 export interface ConflictErrorPayload {

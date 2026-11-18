@@ -87,13 +87,14 @@ function inWeb(code) {
           let text = '';
           res.setEncoding('utf8');
           res.on('data', (chunk) => { text += chunk; });
-          res.on('end', () => resolve({ status: res.statusCode, text, type: res.headers['content-type'] }));
+          res.on('end', () => resolve({ status: res.statusCode, text, location: res.headers.location, type: res.headers['content-type'] }));
         });
         req.on('error', reject);
         req.setTimeout(3000, () => req.destroy(new Error('Socket request timed out')));
         req.end(data);
       });
       assert.equal(value.status, status, path + ': ' + value.text);
+      if (status === 302) return value.location;
       return value.type?.includes('application/json') ? JSON.parse(value.text) : value.text;
     }
     ${code}`);
@@ -166,7 +167,9 @@ try {
     const doc = await api(route + '/doc?path=README.md');
     assert.match(doc.markdown, /Docker persistence check/);
     assert.equal(doc.comments[0].messages[0].body, 'Fictional comment.');
-    assert.match(await api('/embed-sandbox/fictional/embeds/smoke/index.html'), /Fictional component/);
+    const scoped = await api('/embed-sandbox/fictional/embeds/smoke/index.html', { status: 302 });
+    assert.ok(scoped.startsWith('/embed-sandbox/fictional/_assets/'));
+    assert.match(await api(scoped), /Fictional component/);
     assert.equal(fs.existsSync('/app/repos/fictional/.git'), false);
   `);
   console.log('PASS: recreated web container preserves the document, comment and embed');

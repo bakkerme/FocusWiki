@@ -1,17 +1,14 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import express, { type Express, type NextFunction, type Request, type Response } from 'express';
+import express, { type Express, type NextFunction, type Request, type RequestHandler, type Response } from 'express';
 import type {
   CommentAnchor,
   ConflictErrorPayload,
   DocTreeEntry,
   DocumentPayload,
-  EmbedAssetEntry,
   ProjectConfig,
   ProjectSummary,
-  RepoInspectionResult,
-  SearchResultItem,
   ServerEnvironmentInfo
 } from '../shared/types.js';
 import {
@@ -27,26 +24,10 @@ import {
   PathBoundaryError,
   resolveInternalMetadataDir,
   resolveSafeEmbedAssetPath,
-  resolveSafeProjectPath
+  resolveSafeProjectFilePath
 } from './pathGuard.js';
-import {
-  GitAuthError,
-  GitOperationError,
-  WorkingTreeDirtyError,
-  WorkingTreeSnapshotMismatchError,
-  checkoutGitTarget,
-  cloneRepository,
-  commitWorkingTree,
-  fetchGitRemote,
-  getGitRefs,
-  getGitRepoStatus,
-  getGitWorkingDiff,
-  initNewWikiRepository,
-  inspectRemoteRepository,
-  isSshClientAvailable,
-  pullGitRemote
-} from './gitService.js';
-import { CredentialStore, extractHttpsHost } from './credentialStore.js';
+import { GitSocketClient } from './gitSocketClient.js';
+import { GitRpcError, parseProposalInput, validProposalActor, type GitStatuses } from './gitProtocol.js';
 import {
   CommentNotFoundError,
   addCommentReply,
@@ -54,13 +35,9 @@ import {
   readCommentSidecar,
   updateCommentStatus
 } from './commentStore.js';
-import {
-  ProjectRegistry,
-  deriveDisplayNameFromSlug,
-  deriveSlugFromRemoteUrl,
-  slugifyProjectId
-} from './projectRegistry.js';
+import { ProjectRegistry, hasWorkingTree, unavailableGitStatus } from './projectRegistry.js';
 import { ProjectWatcherHub, type WatcherHubOptions } from './watcher.js';
+import { BROWSE_LIMITS, SEARCH_LIMITS, ScanBudget, listConflictCopies, scanRepository, searchRepositories } from './repositoryScan.js';
 import { withKeyLock, writeFileAtomicSync } from './fileLock.js';
 import { createHttpSecurity, createExpensiveRequestLimiter, validateHost, type RateLimitOptions, type ServeAccessOptions } from './httpSecurity.js';
 
@@ -87,139 +64,19 @@ const MIME_BY_EXT: Record<string, string> = {
   '.txt': 'text/plain; charset=utf-8'
 };
 
-const IGNORED_AGENT_DOC_NAMES = new Set(['AGENTS.md', 'CLAUDE.md', 'GEMINI.md']);
-
-function scanMarkdownDocs(project: ProjectConfig): DocTreeEntry[] {
-  const entries: DocTreeEntry[] = [];
-  const root = project.rootPath;
-  if (!fs.existsSync(root)) return entries;
-
-  function walk(dirAbs: string): void {
-    const items = fs.readdirSync(dirAbs, { withFileTypes: true });
-    for (const item of items) {
-      if (
-        item.name.startsWith('.') ||
-        item.name === 'node_modules' ||
-        item.name === 'embeds'
-      ) {
-        continue;
-      }
-      const full = path.join(dirAbs, item.name);
-      if (item.isDirectory()) {
-        walk(full);
-      } else if (
-        item.isFile() &&
-        item.name.endsWith('.md') &&
-        !IGNORED_AGENT_DOC_NAMES.has(item.name)
-      ) {
-        const relPath = path.relative(root, full).split(path.sep).join('/');
-        const raw = fs.readFileSync(full, 'utf8');
-        const stat = fs.statSync(full);
-        const sidecar = readCommentSidecar(root, relPath);
-        const openComments = sidecar.threads.filter((t) => t.status === 'open').length;
-        entries.push({
-          path: relPath,
-          title: extractDocumentTitle(raw, relPath),
-          updatedAt: stat.mtime.toISOString(),
-          openComments
-        });
-      }
-    }
-  }
-
-  walk(root);
-
-  entries.sort((a, b) => {
-    if (a.path === project.defaultDoc) return -1;
-    if (b.path === project.defaultDoc) return 1;
-    return a.path.localeCompare(b.path, undefined, { numeric: true, sensitivity: 'base' });
-  });
-
-  return entries;
-}
-
-function scanProjectEmbeds(projectRoot: string): EmbedAssetEntry[] {
-  const embedsRoot = path.join(projectRoot, 'embeds');
-  const results: EmbedAssetEntry[] = [];
-  if (!fs.existsSync(embedsRoot) || !fs.statSync(embedsRoot).isDirectory()) {
-    return results;
-  }
-
-  const subdirs = fs.readdirSync(embedsRoot, { withFileTypes: true });
-  for (const dirent of subdirs) {
-    if (dirent.isDirectory()) {
-      const compDir = path.join(embedsRoot, dirent.name);
-      const files = fs
-        .readdirSync(compDir)
-        .filter((f) => fs.statSync(path.join(compDir, f)).isFile())
-        .sort();
-      const htmlEntry = files.includes('index.html')
-        ? 'index.html'
-        : files.find((f) => f.endsWith('.html'));
-      if (htmlEntry) {
-        results.push({
-          src: `embeds/${dirent.name}/${htmlEntry}`,
-          name: dirent.name,
-          directory: `embeds/${dirent.name}`,
-          files
-        });
-      }
-    } else if (dirent.isFile() && dirent.name.endsWith('.html')) {
-      results.push({
-        src: `embeds/${dirent.name}`,
-        name: dirent.name.replace(/\.html$/i, ''),
-        directory: 'embeds',
-        files: [dirent.name]
-      });
-    }
-  }
-
-  results.sort((a, b) => a.src.localeCompare(b.src));
-  return results;
-}
-
-function listConflictCopiesForDoc(projectRoot: string, docRelPath: string): string[] {
-  const safePrefix = docRelPath.replace(/[^a-zA-Z0-9._-]/g, '__');
-  const results: string[] = [];
-  for (const hiddenDir of ['.focuswiki', '.cairn']) {
-    const conflictDir = path.join(projectRoot, hiddenDir, 'conflicts');
-    if (!fs.existsSync(conflictDir)) continue;
-    const files = fs
-      .readdirSync(conflictDir)
-      .filter((f) => f.startsWith(`${safePrefix}.`) && f.endsWith('.md'))
-      .map((f) => `${hiddenDir}/conflicts/${f}`);
-    results.push(...files);
-  }
-  return results.sort().reverse();
-}
-
-function pickSuggestedDefaultDoc(docs: DocTreeEntry[]): string {
-  if (docs.length === 0) return 'README.md';
-  const preferred = ['docs/index.md', 'docs/README.md', 'README.md', 'readme.md'];
-  for (const candidate of preferred) {
-    const match = docs.find((d) => d.path === candidate);
-    if (match) return match.path;
-  }
-  const docsMatch = docs.find((d) => d.path.startsWith('docs/'));
-  return docsMatch?.path ?? docs[0].path;
-}
 
 export interface HubAppInstance {
   app: Express;
   watcherHub: ProjectWatcherHub;
   registry: ProjectRegistry;
-  credentialStore: CredentialStore;
   close: () => Promise<void>;
 }
 
 export interface HubAppOptions {
   projects?: ProjectConfig[];
   registry?: ProjectRegistry;
-  configPath?: string;
-  credentialsPath?: string;
-  credentialStore?: CredentialStore;
-  managedReposDir?: string;
-  allowedImportRoots?: string[];
+  gitSocketPath?: string;
+  proposalAuth?: RequestHandler;
   clientDistDir?: string;
   enableWatcher?: boolean;
   allowedHosts?: string[];
@@ -230,24 +87,12 @@ export interface HubAppOptions {
 
 export function createHubApp(options: HubAppOptions): HubAppInstance {
   const app = express();
-  const registry =
-    options.registry ??
-    new ProjectRegistry({
-      projects: options.projects ?? [],
-      configPath: options.configPath,
-      managedReposDir: options.managedReposDir,
-      allowedImportRoots: options.allowedImportRoots
-    });
-  const resolvedCredsPath =
-    options.credentialsPath ??
-    (options.configPath
-      ? path.join(path.dirname(options.configPath), '.git-credentials.enc.json')
-      : undefined);
-  const credentialStore =
-    options.credentialStore ??
-    new CredentialStore({
-      credentialsPath: resolvedCredsPath
-    });
+  const embedAssetKey = crypto.randomBytes(32);
+  const registry = options.registry ?? new ProjectRegistry(options.projects ?? []);
+  const gitClient = new GitSocketClient(options.gitSocketPath);
+  const proposalAuth: RequestHandler = options.proposalAuth ?? ((_req, _res, next) => {
+    next(new GitRpcError('proposal_unavailable'));
+  });
   const watcherEnabled = options.enableWatcher !== false;
 
   const watcherHub = new ProjectWatcherHub(options.sse);
@@ -265,53 +110,60 @@ export function createHubApp(options: HubAppOptions): HubAppInstance {
     if (!project) {
       throw new PathBoundaryError(`Unregistered project "${projectId}".`, 404);
     }
-    if (!fs.existsSync(project.rootPath)) {
+    if (!hasWorkingTree(project.rootPath)) {
       throw new PathBoundaryError(`Working copy missing for "${projectId}".`, 404);
     }
     return project;
   }
 
-  async function buildProjectSummary(project: ProjectConfig): Promise<ProjectSummary> {
-    const git = await getGitRepoStatus(project.rootPath);
-    const docs = scanMarkdownDocs(project);
-    const embeds = scanProjectEmbeds(project.rootPath);
+  let activeBrowseRequests = 0;
+  const boundedBrowse = (work: (req: Request, res: Response, signal: AbortSignal, next: NextFunction) => Promise<void>) =>
+    async (req: Request, res: Response, next: NextFunction) => {
+      if (activeBrowseRequests >= 4) {
+        res.setHeader('Retry-After', '1');
+        res.status(503).json({ error: 'browse_busy', message: 'Workspace is busy. Please retry shortly.' });
+        return;
+      }
+      const controller = new AbortController();
+      const abort = () => controller.abort();
+      res.once('close', abort);
+      activeBrowseRequests++;
+      try {
+        await work(req, res, controller.signal, next);
+      } catch (err) {
+        if (!controller.signal.aborted) next(err);
+      } finally {
+        activeBrowseRequests--;
+        res.off('close', abort);
+      }
+    };
+
+  async function buildProjectSummary(project: ProjectConfig, statuses: GitStatuses, budget: ScanBudget): Promise<ProjectSummary> {
+    const enrollment = registry.managed(project.id);
+    const hasFiles = hasWorkingTree(project.rootPath);
+    const status = Object.hasOwn(statuses, project.id) ? statuses[project.id] : undefined;
+    const git = enrollment && status?.branch === enrollment.branch && status.remoteUrl === enrollment.remote &&
+      (status.state !== 'ready' || hasFiles) ? status : unavailableGitStatus(enrollment);
     return {
       ...project,
       git,
-      docs,
-      embeds
+      workingTreeAvailable: hasFiles,
+      ...(hasFiles ? await scanRepository(project, budget) : { docs: [], embeds: [] }),
+      ...(watcherEnabled && watcherHub.isWatchIncomplete(project.id) ? { watchIncomplete: true } : {})
     };
   }
 
-  async function inspectLocalDirectory(dirPath: string): Promise<RepoInspectionResult> {
-    const { realRoot } = registry.validateLocalImportDirectory(dirPath);
-    const dirSlug = slugifyProjectId(path.basename(realRoot));
-    const existing = registry.findByRootPath(realRoot);
-    const git = await getGitRepoStatus(realRoot);
-    const isGitRepo = fs.existsSync(path.join(realRoot, '.git'));
-    const tempProject: ProjectConfig = {
-      id: dirSlug,
-      name: deriveDisplayNameFromSlug(dirSlug),
-      description: '',
-      rootPath: realRoot,
-      defaultDoc: 'README.md'
-    };
-    const docs = scanMarkdownDocs(tempProject);
-    const embeds = scanProjectEmbeds(realRoot);
-
-    return {
-      valid: true,
-      path: realRoot,
-      suggestedId: existing ? existing.id : registry.ensureUniqueId(dirSlug),
-      suggestedName: deriveDisplayNameFromSlug(path.basename(realRoot)),
-      suggestedDefaultDoc: pickSuggestedDefaultDoc(docs),
-      docCount: docs.length,
-      embedCount: embeds.length,
-      isGitRepo,
-      branch: isGitRepo ? git.branch : undefined,
-      remoteUrl: git.remoteUrl ?? null,
-      alreadyRegisteredId: existing?.id ?? null
-    };
+  // Disconnecting the HTTP client withdraws queued work on the private socket.
+  async function untilDisconnect<T>(res: Response, operation: (signal: AbortSignal) => Promise<T>): Promise<T> {
+    const controller = new AbortController();
+    const disconnect = () => controller.abort();
+    res.once('close', disconnect);
+    if (res.destroyed) disconnect();
+    try {
+      return await operation(controller.signal);
+    } finally {
+      res.off('close', disconnect);
+    }
   }
 
   app.get(['/api/health', '/healthz'], (_req, res) => { res.json({ ok: true }); });
@@ -330,465 +182,74 @@ export function createHubApp(options: HubAppOptions): HubAppInstance {
     res.write(`data: ${JSON.stringify({ type: 'connected', at: new Date().toISOString() })}\n\n`);
   });
 
-  // Import configuration hints for UI
-  app.get('/api/projects/import-config', (_req, res) => {
-    res.json({
-      managedReposDir: registry.managedReposDir,
-      allowedImportRoots: registry.allowedImportRoots,
-      canPersistConfig: true
+  function retired(_req: Request, res: Response): void {
+    res.status(410).json({
+      error: 'git_workflow_retired',
+      message: 'This workflow has been retired. Projects are managed through operator enrollment.'
     });
+  }
+
+  app.all([
+    '/api/projects/import-config',
+    '/api/projects/import',
+    '/api/projects/inspect-local',
+    '/api/projects/inspect-remote',
+    '/api/settings/credentials',
+    '/api/settings/credentials/*',
+    '/api/projects/:projectId/git/refs',
+    '/api/projects/:projectId/git/fetch',
+    '/api/projects/:projectId/git/pull',
+    '/api/projects/:projectId/git/checkout',
+    '/api/projects/:projectId/git/commit',
+    '/api/projects/:projectId/git/push',
+    '/api/projects/:projectId/git/sync'
+  ], retired);
+  app.patch('/api/projects/:projectId', retired);
+  app.delete('/api/projects/:projectId', retired);
+
+  app.get('/api/settings/environment', (_req, res) => {
+    const projects = registry.list();
+    const info: ServerEnvironmentInfo = {
+      projectCount: projects.length,
+      managedProjectCount: projects.filter((project) => registry.managed(project.id)).length
+    };
+    res.json(info);
   });
 
-  // Settings: encrypted Git HTTPS credentials (never returns plaintext tokens)
-  app.get('/api/settings/credentials', (_req, res) => {
-    res.json({
-      credentials: credentialStore.list(),
-      encryptionMode: credentialStore.getEncryptionMode()
-    });
-  });
-
-  app.put('/api/settings/credentials', (req, res, next) => {
-    try {
-      const host = String(req.body?.host ?? '').trim();
-      const username =
-        typeof req.body?.username === 'string' && req.body.username.trim()
-          ? req.body.username.trim()
-          : undefined;
-      const token = String(req.body?.token ?? '');
-      const saved = credentialStore.upsert({ host, username, token });
-      res.json({
-        credential: saved,
-        credentials: credentialStore.list()
-      });
-    } catch (err) {
-      next(err);
+  app.get('/api/projects', boundedBrowse(async (req, res, signal) => {
+    const offset = Number(req.query.offset ?? 0);
+    if (!Number.isSafeInteger(offset) || offset < 0) {
+      res.status(400).json({ error: 'invalid_offset', message: 'Offset must be a nonnegative integer.' });
+      return;
     }
-  });
-
-  app.delete('/api/settings/credentials/:id', (req, res, next) => {
-    try {
-      const id = decodeURIComponent(req.params.id);
-      if (id.startsWith('env:')) {
-        res.status(400).json({
-          error: 'env_credential_readonly',
-          message: 'Environment variable credentials are read-only and must be changed in server env.'
-        });
-        return;
-      }
-      const removed = credentialStore.remove(id);
-      if (!removed) {
-        res.status(404).json({ error: 'not_found', message: 'Credential not found.' });
-        return;
-      }
-      res.json({
-        removedId: id,
-        credentials: credentialStore.list()
-      });
-    } catch (err) {
-      next(err);
+    const projects = registry.list();
+    const page = projects.slice(offset, offset + 24);
+    const budget = new ScanBudget(BROWSE_LIMITS, signal);
+    const gitSignal = AbortSignal.any([signal, AbortSignal.timeout(2_500)]);
+    const statuses = page.some(project => registry.managed(project.id)) ? await gitClient.statuses(gitSignal).catch(() => ({})) : {};
+    const summaries: ProjectSummary[] = [];
+    for (const project of page) {
+      signal.throwIfAborted();
+      summaries.push(await buildProjectSummary(project, statuses, budget.child()));
     }
-  });
+    const nextOffset = offset + page.length;
+    res.json({ projects: summaries, ...(nextOffset < projects.length ? { nextOffset } : {}) });
+  }));
 
-  app.post('/api/settings/credentials/test', async (req, res, next) => {
-    try {
-      const url = String(req.body?.url ?? '').trim();
-      const token =
-        typeof req.body?.token === 'string' && req.body.token.trim()
-          ? req.body.token.trim()
-          : undefined;
-      const username =
-        typeof req.body?.username === 'string' && req.body.username.trim()
-          ? req.body.username.trim()
-          : undefined;
-      const result = await inspectRemoteRepository(url, {
-        credentialStore,
-        overrideCredential: token ? { username, token } : undefined,
-        allowedFileRoots: registry.allowedImportRoots
-      });
-      res.json({
-        ok: true,
-        url: result.url,
-        defaultBranch: result.defaultBranch,
-        branchCount: result.branches.length,
-        prCount: result.pullRequests.length
-      });
-    } catch (err) {
-      next(err);
-    }
-  });
-
-  app.get('/api/settings/environment', async (_req, res, next) => {
-    try {
-      const info: ServerEnvironmentInfo = {
-        managedReposDir: registry.managedReposDir,
-        allowedImportRoots: registry.allowedImportRoots,
-        configPath: options.configPath ?? null,
-        credentialsPath: credentialStore.credentialsPath,
-        encryptionMode: credentialStore.getEncryptionMode(),
-        sshClientAvailable: await isSshClientAvailable(),
-        projectCount: registry.list().length
-      };
-      res.json(info);
-    } catch (err) {
-      next(err);
-    }
-  });
-
-  // List registered projects + git status + doc tree + discovered embeds
-  app.get('/api/projects', async (_req, res, next) => {
-    try {
-      const summaries: ProjectSummary[] = [];
-      for (const project of registry.list()) {
-        summaries.push(await buildProjectSummary(project));
-      }
-      res.json({ projects: summaries });
-    } catch (err) {
-      next(err);
-    }
-  });
-
-  // Inspect a local directory before attaching it as a wiki repository
-  app.post('/api/projects/inspect-local', async (req, res, next) => {
-    try {
-      const dirPath = String(req.body?.path ?? '').trim();
-      const result = await inspectLocalDirectory(dirPath);
-      res.json(result);
-    } catch (err) {
-      next(err);
-    }
-  });
-
-  // Inspect a remote Git URL (branches & PR/MR refs) before cloning
-  app.post('/api/projects/inspect-remote', async (req, res, next) => {
-    try {
-      const url = String(req.body?.url ?? '').trim();
-      const token =
-        typeof req.body?.token === 'string' && req.body.token.trim()
-          ? req.body.token.trim()
-          : undefined;
-      const username =
-        typeof req.body?.username === 'string' && req.body.username.trim()
-          ? req.body.username.trim()
-          : undefined;
-      const saveToken = Boolean(req.body?.saveToken);
-      const result = await inspectRemoteRepository(url, {
-        credentialStore,
-        overrideCredential: token ? { username, token } : undefined,
-        allowedFileRoots: registry.allowedImportRoots
-      });
-      const httpsHost = extractHttpsHost(url);
-      if (saveToken && token && httpsHost) {
-        credentialStore.upsert({ host: httpsHost, username, token });
-      }
-      res.json(result);
-    } catch (err) {
-      next(err);
-    }
-  });
-
-  // Import a repository via clone, local folder link, or fresh initialization
-  app.post('/api/projects/import', async (req, res, next) => {
-    try {
-      const mode = String(req.body?.mode ?? '').trim();
-      const requestedName = String(req.body?.name ?? '').trim();
-      const requestedId = String(req.body?.id ?? '').trim();
-      const requestedDefaultDoc = String(req.body?.defaultDoc ?? '').trim();
-      const description = String(req.body?.description ?? '').trim();
-
-      if (mode === 'local') {
-        const dirPath = String(req.body?.path ?? '').trim();
-        const inspected = await inspectLocalDirectory(dirPath);
-        if (inspected.alreadyRegisteredId) {
-          res.status(409).json({
-            error: 'already_registered',
-            message: `Directory is already registered under "${inspected.alreadyRegisteredId}".`
-          });
-          return;
-        }
-        const id = requestedId ? slugifyProjectId(requestedId) : inspected.suggestedId;
-        const name = requestedName || inspected.suggestedName;
-        const defaultDoc = requestedDefaultDoc || inspected.suggestedDefaultDoc;
-        const added = registry.add({
-          id,
-          name,
-          description: description || (inspected.remoteUrl ? `Remote: ${inspected.remoteUrl}` : ''),
-          rootPath: inspected.path,
-          defaultDoc,
-          source: {
-            originType: 'local-link',
-            ...(inspected.remoteUrl ? { remoteUrl: inspected.remoteUrl } : {}),
-            importedAt: new Date().toISOString()
-          }
-        });
-        if (watcherEnabled) watcherHub.addProject(added);
-        watcherHub.broadcast({
-          type: 'projects:updated',
-          projectId: added.id,
-          reason: 'imported',
-          at: new Date().toISOString()
-        });
-        const summary = await buildProjectSummary(added);
-        res.status(201).json({ project: summary });
-        return;
-      }
-
-      if (mode === 'clone') {
-        const shallow = Boolean(req.body?.shallow);
-        const url = String(req.body?.url ?? '').trim();
-        const branch =
-          typeof req.body?.branch === 'string' && req.body.branch.trim()
-            ? req.body.branch.trim()
-            : undefined;
-        const prNumber =
-          typeof req.body?.prNumber === 'number' && Number.isInteger(req.body.prNumber) && req.body.prNumber > 0
-            ? req.body.prNumber
-            : undefined;
-        const token =
-          typeof req.body?.token === 'string' && req.body.token.trim()
-            ? req.body.token.trim()
-            : undefined;
-        const username =
-          typeof req.body?.username === 'string' && req.body.username.trim()
-            ? req.body.username.trim()
-            : undefined;
-        const saveToken = Boolean(req.body?.saveToken);
-
-        const baseSlug = requestedId
-          ? slugifyProjectId(requestedId)
-          : deriveSlugFromRemoteUrl(url);
-        const id = registry.ensureUniqueId(baseSlug);
-        const name = requestedName || deriveDisplayNameFromSlug(baseSlug);
-        const destDir = registry.resolveManagedCloneTarget(id);
-
-        const gitStatus = await cloneRepository({
-          url,
-          destDir,
-          branch,
-          prNumber,
-          shallow,
-          credentialStore,
-          overrideCredential: token ? { username, token } : undefined,
-          allowedFileRoots: registry.allowedImportRoots
-        });
-
-        const httpsHost = extractHttpsHost(url);
-        if (saveToken && token && httpsHost) {
-          credentialStore.upsert({ host: httpsHost, username, token });
-        }
-
-        const scannedDocs = scanMarkdownDocs({
-          id,
-          name,
-          description,
-          rootPath: destDir,
-          defaultDoc: requestedDefaultDoc || 'README.md'
-        });
-        const defaultDoc = requestedDefaultDoc || pickSuggestedDefaultDoc(scannedDocs);
-
-        try {
-          const added = registry.add({
-            id,
-            name,
-            description: description || (gitStatus.remoteUrl ? `Cloned from ${gitStatus.remoteUrl}` : ''),
-            rootPath: destDir,
-            defaultDoc,
-            source: {
-              originType: 'managed-clone',
-              ...(gitStatus.remoteUrl ? { remoteUrl: gitStatus.remoteUrl } : {}),
-              importedAt: new Date().toISOString()
-            }
-          });
-          if (watcherEnabled) watcherHub.addProject(added);
-          watcherHub.broadcast({
-            type: 'projects:updated',
-            projectId: added.id,
-            reason: 'imported',
-            at: new Date().toISOString()
-          });
-          const summary = await buildProjectSummary(added);
-          res.status(201).json({ project: summary });
-        } catch (err) {
-          if (fs.existsSync(destDir)) {
-            fs.rmSync(destDir, { recursive: true, force: true });
-          }
-          throw err;
-        }
-        return;
-      }
-
-      if (mode === 'init') {
-        const name = requestedName || 'New Documentation Repo';
-        const baseSlug = requestedId ? slugifyProjectId(requestedId) : slugifyProjectId(name);
-        const id = registry.ensureUniqueId(baseSlug);
-        const defaultDoc = requestedDefaultDoc || 'README.md';
-        const destDir = registry.resolveManagedCloneTarget(id);
-
-        await initNewWikiRepository({
-          destDir,
-          title: name,
-          defaultDoc
-        });
-
-        try {
-          const added = registry.add({
-            id,
-            name,
-            description,
-            rootPath: destDir,
-            defaultDoc,
-            source: {
-              originType: 'initialized',
-              importedAt: new Date().toISOString()
-            }
-          });
-          if (watcherEnabled) watcherHub.addProject(added);
-          watcherHub.broadcast({
-            type: 'projects:updated',
-            projectId: added.id,
-            reason: 'imported',
-            at: new Date().toISOString()
-          });
-          const summary = await buildProjectSummary(added);
-          res.status(201).json({ project: summary });
-        } catch (err) {
-          if (fs.existsSync(destDir)) {
-            fs.rmSync(destDir, { recursive: true, force: true });
-          }
-          throw err;
-        }
-        return;
-      }
-
-      res.status(400).json({
-        error: 'invalid_import_mode',
-        message: 'Import mode must be "clone", "local", or "init".'
-      });
-    } catch (err) {
-      next(err);
-    }
-  });
-
-  // Update repository metadata (display name, default page, description)
-  app.patch('/api/projects/:projectId', async (req, res, next) => {
-    try {
-      const existing = getProjectOrThrow(req.params.projectId);
-      const name = typeof req.body?.name === 'string' ? req.body.name.trim() : undefined;
-      const description =
-        typeof req.body?.description === 'string' ? req.body.description.trim() : undefined;
-      let defaultDoc: string | undefined;
-      if (typeof req.body?.defaultDoc === 'string') {
-        const { normalizedRelPath } = resolveSafeProjectPath(
-          existing.rootPath,
-          req.body.defaultDoc.trim()
-        );
-        if (!normalizedRelPath.endsWith('.md')) {
-          throw new PathBoundaryError('Default page must be a Markdown (.md) file.', 400);
-        }
-        defaultDoc = normalizedRelPath;
-      }
-
-      const updated = registry.update(existing.id, {
-        ...(name !== undefined ? { name } : {}),
-        ...(description !== undefined ? { description } : {}),
-        ...(defaultDoc !== undefined ? { defaultDoc } : {})
-      });
-      if (!updated) {
-        res.status(404).json({ error: 'not_found', message: `Project "${req.params.projectId}" not found.` });
-        return;
-      }
-      watcherHub.broadcast({
-        type: 'projects:updated',
-        projectId: updated.id,
-        reason: 'updated',
-        at: new Date().toISOString()
-      });
-      const summary = await buildProjectSummary(updated);
-      res.json({ project: summary });
-    } catch (err) {
-      next(err);
-    }
-  });
-
-  // Unregister a repository from FocusWiki (leaves repository files untouched on disk)
-  app.delete('/api/projects/:projectId', async (req, res, next) => {
-    try {
-      const removed = registry.remove(req.params.projectId);
-      if (!removed) {
-        res.status(404).json({ error: 'not_found', message: `Unregistered project "${req.params.projectId}".` });
-        return;
-      }
-      await watcherHub.removeProject(removed.id);
-      watcherHub.broadcast({
-        type: 'projects:updated',
-        projectId: removed.id,
-        reason: 'removed',
-        at: new Date().toISOString()
-      });
-      res.json({ removedId: removed.id });
-    } catch (err) {
-      next(err);
-    }
-  });
 
   // Full-text search across all registered projects
-  app.get('/api/search', (req, res, next) => {
-    try {
-      const q = String(req.query.q ?? '').trim();
-      if (!q) {
-        res.json({ results: [] });
-        return;
-      }
-      const needle = q.toLowerCase();
-      const results: SearchResultItem[] = [];
-
-      let scanned = 0;
-      let visited = 0;
-      let remainingBytes = 32 * 1024 * 1024;
-      const maxDocBytes = 2 * 1024 * 1024;
-      const atLimit = () => scanned >= 1000 || visited >= 20000 || remainingBytes <= 0 || results.length >= 60;
-      function searchDirectory(project: ProjectConfig, dir: string, depth = 0): void {
-        if (atLimit() || depth > 32) return;
-        const handle = fs.opendirSync(dir);
-        try {
-          let entry;
-          while (!atLimit() && (entry = handle.readSync())) {
-            visited++;
-            if (entry.name.startsWith('.') || ['node_modules', 'embeds'].includes(entry.name)) continue;
-            const full = path.join(dir, entry.name);
-            if (entry.isDirectory()) {
-              searchDirectory(project, full, depth + 1);
-              continue;
-            }
-            if (!entry.isFile() || !entry.name.endsWith('.md') || IGNORED_AGENT_DOC_NAMES.has(entry.name)) continue;
-            scanned++;
-            const size = fs.statSync(full).size;
-            if (size > maxDocBytes || size > remainingBytes) continue;
-            remainingBytes -= size;
-            const docPath = path.relative(project.rootPath, full).split(path.sep).join('/');
-            const raw = fs.readFileSync(full, 'utf8');
-            const title = extractDocumentTitle(raw, docPath);
-            const lines = raw.split(/\r?\n/);
-            for (let idx = 0; idx < lines.length && results.length < 60; idx++) {
-              if (lines[idx].toLowerCase().includes(needle)) {
-                results.push({ projectId: project.id, projectName: project.name, path: docPath,
-                  title, line: idx + 1, snippet: lines[idx].trim().slice(0, 180) });
-              }
-            }
-          }
-        } finally {
-          handle.closeSync();
-        }
-      }
-      for (const project of registry.list()) {
-        if (atLimit()) break;
-        if (fs.existsSync(project.rootPath)) searchDirectory(project, project.rootPath);
-      }
-
-      res.json({ results });
-    } catch (err) {
-      next(err);
+  app.get('/api/search', boundedBrowse(async (req, res, signal) => {
+    const query = String(req.query.q ?? '').trim();
+    if (!query) {
+      res.json({ results: [] });
+      return;
     }
-  });
+    if (query.length > 256) {
+      res.status(400).json({ error: 'query_too_long', message: 'Search queries are limited to 256 characters.' });
+      return;
+    }
+    res.json(await searchRepositories(registry.list(), query.toLowerCase(), new ScanBudget(SEARCH_LIMITS, signal)));
+  }));
 
   // Repository-local images only; executable documents belong in the embed sandbox.
   app.get('/api/projects/:projectId/assets/*', (req, res, next) => {
@@ -800,7 +261,7 @@ export function createHubApp(options: HubAppOptions): HubAppInstance {
       if (segments.some((segment) => ['..', '.git', '.focuswiki', '.cairn'].includes(segment.toLowerCase())) || /\.comments\.json(?:$|\/)/i.test(assetPath)) {
         throw new PathBoundaryError('Protected asset path.', 403);
       }
-      const { absolutePath, normalizedRelPath } = resolveSafeProjectPath(project.rootPath, assetPath);
+      const { absolutePath, normalizedRelPath } = resolveSafeProjectFilePath(project.rootPath, assetPath);
       if (normalizedRelPath.split('/').some((seg) => seg.startsWith('.'))) {
         throw new PathBoundaryError('Hidden dotfiles may not be served as assets.', 403);
       }
@@ -812,28 +273,22 @@ export function createHubApp(options: HubAppOptions): HubAppInstance {
         res.status(404).json({ error: 'not_found', message: 'Asset not found.' });
         return;
       }
-      // Also reject aliases into protected metadata directories inside the repository.
-      const realRoot = fs.realpathSync(project.rootPath);
-      const realRelative = path.relative(realRoot, fs.realpathSync(absolutePath));
-      if (realRelative.split(path.sep).some((part) => !part || part.startsWith('.') || ['.git', '.focuswiki', '.cairn'].includes(part.toLowerCase())) || /\.comments\.json$/i.test(realRelative)) {
-        throw new PathBoundaryError('Protected asset target.', 403);
-      }
       res.setHeader('Content-Type', MIME_BY_EXT[ext]);
       res.setHeader('Cache-Control', 'private, max-age=60');
       res.setHeader('X-Content-Type-Options', 'nosniff');
       if (ext === '.svg') res.setHeader('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; sandbox");
-      res.sendFile(realRelative.split(path.sep).join('/'), { root: realRoot, dotfiles: 'deny' }, (err) => { if (err) next(err); });
+      res.sendFile(normalizedRelPath, { root: project.rootPath, dotfiles: 'deny' });
     } catch (err) {
       next(err);
     }
   });
 
   // Read Markdown document + AST + resolved comments
-  app.get('/api/projects/:projectId/doc', (req, res, next) => {
+  app.get('/api/projects/:projectId/doc', async (req, res, next) => {
     try {
       const project = getProjectOrThrow(req.params.projectId);
       const docParam = String(req.query.path ?? project.defaultDoc);
-      const { absolutePath, normalizedRelPath } = resolveSafeProjectPath(
+      const { absolutePath, normalizedRelPath } = resolveSafeProjectFilePath(
         project.rootPath,
         docParam
       );
@@ -850,7 +305,6 @@ export function createHubApp(options: HubAppOptions): HubAppInstance {
       const docJson = markdownToProseMirror(markdown);
       const sidecar = readCommentSidecar(project.rootPath, normalizedRelPath);
       const comments = resolveThreadsAgainstDoc(sidecar.threads, docJson);
-      const conflicts = listConflictCopiesForDoc(project.rootPath, normalizedRelPath);
 
       const payload: DocumentPayload = {
         projectId: project.id,
@@ -860,7 +314,7 @@ export function createHubApp(options: HubAppOptions): HubAppInstance {
         mtimeMs: stat.mtimeMs,
         docJson,
         comments,
-        conflicts
+        ...await listConflictCopies(project.rootPath, normalizedRelPath)
       };
       res.json(payload);
     } catch (err) {
@@ -875,7 +329,7 @@ export function createHubApp(options: HubAppOptions): HubAppInstance {
       const rawPath = String(req.body?.path ?? '').trim();
       const title = String(req.body?.title ?? 'Untitled Document').trim();
       const withExt = rawPath.endsWith('.md') ? rawPath : `${rawPath}.md`;
-      const { absolutePath, normalizedRelPath } = resolveSafeProjectPath(project.rootPath, withExt);
+      const { absolutePath, normalizedRelPath } = resolveSafeProjectFilePath(project.rootPath, withExt);
       if (fs.existsSync(absolutePath)) {
         res.status(409).json({ error: 'already_exists', message: `Document "${normalizedRelPath}" already exists.` });
         return;
@@ -886,7 +340,7 @@ export function createHubApp(options: HubAppOptions): HubAppInstance {
           : `# ${title}\n\nStart writing here.\n`;
 
       fs.mkdirSync(path.dirname(absolutePath), { recursive: true, mode: 0o770 });
-      fs.writeFileSync(absolutePath, initialMd, { encoding: 'utf8', mode: 0o660 });
+      fs.writeFileSync(absolutePath, initialMd, { encoding: 'utf8', mode: 0o660, flag: 'wx' });
 
       res.status(201).json({
         path: normalizedRelPath,
@@ -911,8 +365,9 @@ export function createHubApp(options: HubAppOptions): HubAppInstance {
         return;
       }
 
-      const { absolutePath, normalizedRelPath } = resolveSafeProjectPath(project.rootPath, rawPath);
-      await withKeyLock(fs.existsSync(absolutePath) ? fs.realpathSync(absolutePath) : absolutePath, async () => {
+      const lockPath = resolveSafeProjectFilePath(project.rootPath, rawPath).absolutePath;
+      await withKeyLock(lockPath, async () => {
+        const { absolutePath, normalizedRelPath } = resolveSafeProjectFilePath(project.rootPath, rawPath);
         if (!normalizedRelPath.endsWith('.md')) {
           throw new PathBoundaryError('Only Markdown (.md) files can be written via document save.', 400);
         }
@@ -960,7 +415,7 @@ export function createHubApp(options: HubAppOptions): HubAppInstance {
           savedAt: new Date().toISOString(),
           docJson,
           comments,
-          conflicts: listConflictCopiesForDoc(project.rootPath, normalizedRelPath)
+          ...await listConflictCopies(project.rootPath, normalizedRelPath)
         });
       });
     } catch (err) {
@@ -973,7 +428,7 @@ export function createHubApp(options: HubAppOptions): HubAppInstance {
     try {
       const project = getProjectOrThrow(req.params.projectId);
       const docParam = String(req.query.path ?? project.defaultDoc);
-      const { absolutePath, normalizedRelPath } = resolveSafeProjectPath(project.rootPath, docParam);
+      const { absolutePath, normalizedRelPath } = resolveSafeProjectFilePath(project.rootPath, docParam);
       if (!fs.existsSync(absolutePath)) {
         res.status(404).json({ error: 'not_found', message: 'Document not found.' });
         return;
@@ -995,8 +450,9 @@ export function createHubApp(options: HubAppOptions): HubAppInstance {
     try {
       const project = getProjectOrThrow(req.params.projectId);
       const docParam = String(req.body?.path ?? '');
-      const { absolutePath, normalizedRelPath } = resolveSafeProjectPath(project.rootPath, docParam);
-      await withKeyLock(fs.existsSync(absolutePath) ? fs.realpathSync(absolutePath) : absolutePath, async () => {
+      const lockPath = resolveSafeProjectFilePath(project.rootPath, docParam).absolutePath;
+      await withKeyLock(lockPath, async () => {
+        const { absolutePath, normalizedRelPath } = resolveSafeProjectFilePath(project.rootPath, docParam);
         if (!fs.existsSync(absolutePath)) {
           res.status(404).json({ error: 'not_found', message: 'Document not found.' });
           return;
@@ -1064,8 +520,9 @@ export function createHubApp(options: HubAppOptions): HubAppInstance {
     try {
       const project = getProjectOrThrow(req.params.projectId);
       const docParam = String(req.body?.path ?? '');
-      const { absolutePath, normalizedRelPath } = resolveSafeProjectPath(project.rootPath, docParam);
-      await withKeyLock(fs.existsSync(absolutePath) ? fs.realpathSync(absolutePath) : absolutePath, async () => {
+      const lockPath = resolveSafeProjectFilePath(project.rootPath, docParam).absolutePath;
+      await withKeyLock(lockPath, async () => {
+        const { absolutePath, normalizedRelPath } = resolveSafeProjectFilePath(project.rootPath, docParam);
         const bodyText = String(req.body?.body ?? '').trim();
         if (!bodyText) {
           res.status(400).json({ error: 'invalid_body', message: 'Reply body is required.' });
@@ -1090,8 +547,9 @@ export function createHubApp(options: HubAppOptions): HubAppInstance {
     try {
       const project = getProjectOrThrow(req.params.projectId);
       const docParam = String(req.body?.path ?? '');
-      const { absolutePath, normalizedRelPath } = resolveSafeProjectPath(project.rootPath, docParam);
-      await withKeyLock(fs.existsSync(absolutePath) ? fs.realpathSync(absolutePath) : absolutePath, async () => {
+      const lockPath = resolveSafeProjectFilePath(project.rootPath, docParam).absolutePath;
+      await withKeyLock(lockPath, async () => {
+        const { absolutePath, normalizedRelPath } = resolveSafeProjectFilePath(project.rootPath, docParam);
         const status = req.body?.status === 'resolved' ? 'resolved' : req.body?.status === 'open' ? 'open' : null;
         if (!status) {
           res.status(400).json({ error: 'invalid_status', message: 'Status must be "open" or "resolved".' });
@@ -1141,9 +599,6 @@ export function createHubApp(options: HubAppOptions): HubAppInstance {
       const project = getProjectOrThrow(req.params.projectId);
       const srcParam = String(req.body?.src ?? '').trim();
       const source = typeof req.body?.source === 'string' ? req.body.source : '';
-      if (!srcParam.startsWith('embeds/')) {
-        throw new PathBoundaryError('Embed components must reside under "embeds/".', 400);
-      }
       if (!source.trim()) {
         res.status(400).json({ error: 'invalid_source', message: 'Component HTML/JS source is required.' });
         return;
@@ -1153,7 +608,7 @@ export function createHubApp(options: HubAppOptions): HubAppInstance {
         srcParam
       );
       fs.mkdirSync(path.dirname(absolutePath), { recursive: true, mode: 0o770 });
-      fs.writeFileSync(absolutePath, source, { encoding: 'utf8', mode: 0o660 });
+      writeFileAtomicSync(absolutePath, source);
       res.status(201).json({
         src: normalizedRelPath
       });
@@ -1162,155 +617,46 @@ export function createHubApp(options: HubAppOptions): HubAppInstance {
     }
   });
 
-  // Git diff & status inspection
-  app.get('/api/projects/:projectId/git/diff', async (req, res, next) => {
-    try {
-      const project = getProjectOrThrow(req.params.projectId);
-      const result = await getGitWorkingDiff(project.rootPath);
-      res.json(result);
-    } catch (err) {
-      next(err);
-    }
+  function requireManagedProject(req: Request, _res: Response, next: NextFunction): void {
+    if (!registry.managed(req.params.projectId)) return next(new GitRpcError('unknown_git_project'));
+    next();
+  }
+
+  function requireProposalActor(_req: Request, res: Response, next: NextFunction): void {
+    if (!validProposalActor(res.locals.proposalActor)) return next(new GitRpcError('proposal_auth_required'));
+    next();
+  }
+
+  app.head('/api/projects/:projectId/git/diff', (_req, res) => {
+    res.setHeader('Allow', 'GET');
+    res.sendStatus(405);
   });
 
-  // Deliberate local Git commit (never pushes; preserves user message & identity without forced attribution)
-  app.post('/api/projects/:projectId/git/commit', async (req, res, next) => {
+  app.get('/api/projects/:projectId/git/diff', requireManagedProject, proposalAuth, requireProposalActor, async (req, res, next) => {
     try {
-      const project = getProjectOrThrow(req.params.projectId);
-      const message = String(req.body?.message ?? '').trim();
-      const authorName =
-        typeof req.body?.authorName === 'string' && req.body.authorName.trim()
-          ? req.body.authorName.trim()
-          : undefined;
-      const authorEmail =
-        typeof req.body?.authorEmail === 'string' && req.body.authorEmail.trim()
-          ? req.body.authorEmail.trim()
-          : undefined;
-      const expectedSnapshotDigest =
-        typeof req.body?.expectedSnapshotDigest === 'string'
-          ? req.body.expectedSnapshotDigest.trim()
-          : undefined;
-
-      if (!message) {
-        res.status(400).json({ error: 'invalid_message', message: 'Commit message is required.' });
-        return;
+      const project = registry.managed(req.params.projectId)!;
+      const review = await untilDisconnect(res, (signal) => gitClient.review(project, res.locals.proposalActor, signal));
+      if (!res.destroyed) {
+        res.setHeader('Cache-Control', 'no-store');
+        res.json(review);
       }
-
-      const paths = Array.isArray(req.body?.paths)
-        ? req.body.paths.filter((p: unknown): p is string => typeof p === 'string')
-        : undefined;
-
-      const committed = await commitWorkingTree(
-        project.rootPath,
-        message,
-        authorName,
-        authorEmail,
-        expectedSnapshotDigest,
-        paths
-      );
-      res.json(committed);
     } catch (err) {
-      if (err instanceof WorkingTreeSnapshotMismatchError) {
-        try {
-          const project = getProjectOrThrow(req.params.projectId);
-          const latestReview = await getGitWorkingDiff(project.rootPath);
-          res.status(409).json({
-            error: 'working_tree_changed',
-            message: err.message,
-            latestReview
-          });
-          return;
-        } catch (innerErr) {
-          next(innerErr);
-          return;
-        }
+      if (!res.destroyed) next(err);
+    }
+  });
+
+  app.post('/api/projects/:projectId/git/propose', requireManagedProject, proposalAuth, requireProposalActor, async (req, res, next) => {
+    try {
+      const project = registry.managed(req.params.projectId)!;
+      const input = parseProposalInput(req.body);
+      const actor: string = res.locals.proposalActor;
+      const result = await untilDisconnect(res, (signal) => gitClient.propose(project, actor, input, signal));
+      if (!res.destroyed) {
+        res.setHeader('Cache-Control', 'no-store');
+        res.json(result);
       }
-      next(err);
-    }
-  });
-
-  // List local/remote branches and PR refs for a project
-  app.get('/api/projects/:projectId/git/refs', async (req, res, next) => {
-    try {
-      const project = getProjectOrThrow(req.params.projectId);
-      const refs = await getGitRefs(project.rootPath);
-      res.json(refs);
     } catch (err) {
-      next(err);
-    }
-  });
-
-  // Fetch remote branches and PR/MR refs (non-destructive)
-  app.post('/api/projects/:projectId/git/fetch', async (req, res, next) => {
-    try {
-      const project = getProjectOrThrow(req.params.projectId);
-      const includePrRefs =
-        typeof req.body?.includePrRefs === 'boolean' ? req.body.includePrRefs : true;
-      const refs = await fetchGitRemote(project.rootPath, credentialStore, {
-        includePrRefs,
-        allowedFileRoots: registry.allowedImportRoots
-      });
-      watcherHub.broadcast({
-        type: 'projects:updated',
-        projectId: project.id,
-        reason: 'synced',
-        at: new Date().toISOString()
-      });
-      res.json(refs);
-    } catch (err) {
-      next(err);
-    }
-  });
-
-  // Fast-forward pull current branch from upstream remote (requires clean working tree)
-  app.post('/api/projects/:projectId/git/pull', async (req, res, next) => {
-    try {
-      const project = getProjectOrThrow(req.params.projectId);
-      const result = await pullGitRemote(project.rootPath, credentialStore, {
-        allowedFileRoots: registry.allowedImportRoots
-      });
-      watcherHub.broadcast({
-        type: 'projects:updated',
-        projectId: project.id,
-        reason: 'synced',
-        at: new Date().toISOString()
-      });
-      res.json(result);
-    } catch (err) {
-      next(err);
-    }
-  });
-
-  // Switch local branch, track remote branch, or check out a PR ref (requires clean working tree)
-  app.post('/api/projects/:projectId/git/checkout', async (req, res, next) => {
-    try {
-      const project = getProjectOrThrow(req.params.projectId);
-      const kindRaw = String(req.body?.kind ?? 'local').trim();
-      const kind =
-        kindRaw === 'remote' || kindRaw === 'pr' || kindRaw === 'local' ? kindRaw : null;
-      if (!kind) {
-        res.status(400).json({ error: 'invalid_target', message: 'Checkout kind must be "local", "remote", or "pr".' });
-        return;
-      }
-      const ref = String(req.body?.ref ?? '').trim();
-      const prNumber =
-        typeof req.body?.prNumber === 'number' ? req.body.prNumber : undefined;
-
-      const result = await checkoutGitTarget(
-        project.rootPath,
-        { kind, ref, prNumber },
-        credentialStore,
-        { allowedFileRoots: registry.allowedImportRoots }
-      );
-      watcherHub.broadcast({
-        type: 'projects:updated',
-        projectId: project.id,
-        reason: 'checkout',
-        at: new Date().toISOString()
-      });
-      res.json(result);
-    } catch (err) {
-      next(err);
+      if (!res.destroyed) next(err);
     }
   });
 
@@ -1319,10 +665,19 @@ export function createHubApp(options: HubAppOptions): HubAppInstance {
     try {
       const project = getProjectOrThrow(req.params.projectId);
       const wildcard = (req.params as Record<string, string>)[0] ?? '';
-      const { absolutePath, normalizedRelPath } = resolveSafeEmbedAssetPath(
-        project.rootPath,
-        wildcard
-      );
+      const assetToken = crypto.createHmac('sha256', embedAssetKey)
+        .update(project.id).update('\0').update(project.rootPath).digest('hex');
+      const assetPathPrefix = `/embed-sandbox/${encodeURIComponent(project.id)}/_assets/${assetToken}/`;
+      const scoped = wildcard.startsWith('_assets/');
+      let relPath = wildcard;
+      if (scoped) {
+        const match = /^_assets\/([a-f0-9]{64})\/(.*)$/s.exec(wildcard);
+        if (!match || !crypto.timingSafeEqual(Buffer.from(match[1], 'hex'), Buffer.from(assetToken, 'hex'))) {
+          throw new PathBoundaryError('Invalid embed asset URL.');
+        }
+        relPath = match[2];
+      }
+      const { absolutePath, normalizedRelPath } = resolveSafeEmbedAssetPath(project.rootPath, relPath);
 
       if (!fs.existsSync(absolutePath) || !fs.statSync(absolutePath).isFile()) {
         res.status(404).type('text/plain').send('Embed asset not found.');
@@ -1337,33 +692,42 @@ export function createHubApp(options: HubAppOptions): HubAppInstance {
         throw new PathBoundaryError('Invalid request authority.', 400);
       }
       const browserOrigin: string = res.locals.browserOrigin ?? `${proto}://${host}`;
-      const allowedProjectAssetPrefix = `${browserOrigin}/embed-sandbox/${encodeURIComponent(project.id)}/`;
-
-      // Strict defense-in-depth CSP:
-      // Paired with <iframe sandbox="allow-scripts"> (opaque null origin, NO allow-same-origin),
-      // components can run their own inline/sibling scripts & styles, cannot fetch external or hub APIs,
-      // and cannot read parent DOM or storage.
+      const allowedProjectAssetPrefix = scoped ? ` ${browserOrigin}${assetPathPrefix}embeds/` : '';
       const csp = [
-        'sandbox allow-scripts',
+        "sandbox allow-scripts",
         "default-src 'none'",
-        `script-src 'unsafe-inline' ${allowedProjectAssetPrefix}`,
-        `style-src 'unsafe-inline' ${allowedProjectAssetPrefix}`,
-        `img-src data: blob: ${allowedProjectAssetPrefix}`,
-        `font-src data: ${allowedProjectAssetPrefix}`,
+        `script-src 'unsafe-inline'${allowedProjectAssetPrefix}`,
+        `style-src 'unsafe-inline'${allowedProjectAssetPrefix}`,
+        `img-src data: blob:${allowedProjectAssetPrefix}`,
+        `font-src data:${allowedProjectAssetPrefix}`,
         "connect-src 'none'",
         "form-action 'none'",
         "base-uri 'none'",
         "frame-ancestors 'self'"
       ].join('; ');
 
-      res.setHeader('Content-Security-Policy', csp);
-      res.setHeader('Access-Control-Allow-Origin', '*');
       res.setHeader('X-Content-Type-Options', 'nosniff');
       res.setHeader('Referrer-Policy', 'no-referrer');
       res.setHeader('Cache-Control', 'no-store');
+      if (!scoped) {
+        res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
+        if (ext === '.html') {
+          // Navigation can use this redirect. A cross-origin fetch cannot read it or its Location.
+          const encodedPath = normalizedRelPath.split('/').map(encodeURIComponent).join('/');
+          const queryStart = req.originalUrl.indexOf('?');
+          const query = queryStart === -1 ? '' : req.originalUrl.slice(queryStart);
+          res.location(assetPathPrefix + encodedPath + query).status(302).end();
+          return;
+        }
+      } else if (ext !== '.html') {
+        // Opaque iframe modules and fonts need CORS. The project-scoped URL authorizes it.
+        res.vary('Origin');
+        if (req.get('origin') === 'null') res.setHeader('Access-Control-Allow-Origin', 'null');
+      }
+      res.setHeader('Content-Security-Policy', csp);
       res.setHeader('Content-Type', contentType);
 
-      res.sendFile(absolutePath);
+      res.sendFile(normalizedRelPath, { root: project.rootPath, dotfiles: 'deny' });
     } catch (err) {
       next(err);
     }
@@ -1391,26 +755,8 @@ export function createHubApp(options: HubAppOptions): HubAppInstance {
       });
       return;
     }
-    if (err instanceof WorkingTreeDirtyError) {
-      res.status(err.statusCode).json({
-        error: 'working_tree_dirty',
-        message: err.message
-      });
-      return;
-    }
-    if (err instanceof GitAuthError) {
-      res.status(err.statusCode).json({
-        error: 'auth_required',
-        host: err.host,
-        message: err.message
-      });
-      return;
-    }
-    if (err instanceof GitOperationError) {
-      res.status(err.statusCode).json({
-        error: 'git_operation_error',
-        message: err.message
-      });
+    if (err instanceof GitRpcError) {
+      res.status(err.status).json({ error: err.code, message: err.message });
       return;
     }
     if (err instanceof CommentNotFoundError) {
@@ -1423,8 +769,7 @@ export function createHubApp(options: HubAppOptions): HubAppInstance {
       res.status(status).json({ error: 'invalid_request', message: 'Invalid request.' });
       return;
     }
-    const detail = err instanceof Error ? err.stack ?? err.message : String(err);
-    console.error('[focuswiki] Unexpected request error:', credentialStore.scrubText(detail));
+    console.error('[focuswiki] Unexpected request error.');
     res.status(500).json({ error: 'server_error', message: 'Unexpected server error.' });
   });
 
@@ -1432,7 +777,6 @@ export function createHubApp(options: HubAppOptions): HubAppInstance {
     app,
     watcherHub,
     registry,
-    credentialStore,
     close: async () => {
       await watcherHub.close();
     }

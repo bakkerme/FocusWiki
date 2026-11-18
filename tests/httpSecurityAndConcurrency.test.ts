@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import request from 'supertest';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createHubApp, type HubAppInstance } from '../server/app.js';
@@ -103,12 +104,126 @@ describe('LAN HTTP security, safe assets, and concurrent writes', () => {
       .set('Origin', 'https://docs.example.com').send({ path: 'proxy.md' }).expect(201);
   });
 
-  it('uses an explicit validated sandbox asset prefix for the opaque iframe origin', async () => {
-    const response = await request(hub.app).get('/embed-sandbox/fixture/embeds/index.html')
-      .set('Host', 'wiki.local:8088').set('X-Forwarded-Proto', 'https; script-src evil').expect(200);
-    expect(response.headers['content-security-policy']).toContain('http://wiki.local:8088/embed-sandbox/fixture/');
+  it('preserves the iframe query and uses a validated, project-scoped sandbox asset prefix', async () => {
+    const entry = await request(hub.app).get('/embed-sandbox/fixture/embeds/index.html?rev=1&instance=orbit')
+      .set('Host', 'wiki.local:8088').expect(302);
+    const location = entry.headers.location;
+    expect(location).toMatch(/^\/embed-sandbox\/fixture\/_assets\/[a-f0-9]{64}\/embeds\/index\.html\?rev=1&instance=orbit$/);
+    expect(entry.headers['access-control-allow-origin']).toBeUndefined();
+    const response = await request(hub.app).get(location)
+      .set('Host', 'wiki.local:8088').set('X-Forwarded-Proto', 'https; script-src evil')
+      .set('Origin', 'null').expect(200);
+    const prefix = location.replace(/index\.html.*/, '');
+    expect(response.headers['content-security-policy']).toContain(`http://wiki.local:8088${prefix}`);
+    expect(response.headers['content-security-policy']).toContain('sandbox allow-scripts;');
     expect(response.headers['content-security-policy']).toContain("connect-src 'none'");
     expect(response.headers['x-frame-options']).toBeUndefined();
+    expect(response.headers['access-control-allow-origin']).toBeUndefined();
+    expect(response.headers['referrer-policy']).toBe('no-referrer');
+  });
+
+  it('grants opaque-origin asset CORS only with a valid URL for that project', async () => {
+    const otherRepo = path.join(root, 'other-repo');
+    fs.cpSync(repo, otherRepo, { recursive: true });
+    const otherProject = {
+      id: 'other', name: 'Other Observatory', description: '', rootPath: otherRepo, defaultDoc: 'README.md'
+    };
+    const projects = hub.registry.list();
+    await hub.close();
+    hub = makeHub({ projects: [...projects, otherProject] });
+    fs.writeFileSync(path.join(repo, 'embeds/data.mjs'), 'export const cometCount = 2;');
+    fs.writeFileSync(path.join(otherRepo, 'embeds/data.mjs'), 'export const cometCount = 3;');
+
+    const stableUrl = '/embed-sandbox/fixture/embeds/data.mjs';
+    for (const origin of ['null', 'https://elsewhere.example']) {
+      const stable = await request(hub.app).get(stableUrl).set('Origin', origin).expect(200);
+      expect(stable.headers['access-control-allow-origin']).toBeUndefined();
+      expect(stable.headers['cross-origin-resource-policy']).toBe('same-origin');
+    }
+    const entry = await request(hub.app).get('/embed-sandbox/fixture/embeds/index.html').expect(302);
+    const moduleUrl = entry.headers.location.replace(/index\.html$/, 'data.mjs');
+    const module = await request(hub.app).get(moduleUrl).set('Origin', 'null').expect(200);
+    expect(module.headers['access-control-allow-origin']).toBe('null');
+    expect(module.headers['access-control-allow-credentials']).toBeUndefined();
+    expect(module.headers.vary).toContain('Origin');
+    expect(module.text).toBe('export const cometCount = 2;');
+    const otherOrigin = await request(hub.app).get(moduleUrl).set('Origin', 'https://elsewhere.example').expect(200);
+    expect(otherOrigin.headers['access-control-allow-origin']).toBeUndefined();
+    await request(hub.app).get(moduleUrl.replace('/fixture/', '/other/')).set('Origin', 'null').expect(403);
+    await hub.close();
+    hub = makeHub({ projects: [{ ...otherProject, id: 'fixture' }] });
+    await request(hub.app).get(moduleUrl).set('Origin', 'null').expect(403);
+  });
+
+  it.each(['fixture.js', 'embeds/../fixture.js', 'embeds-extra/fixture.js', 'embeds/view.comments.json'])(
+    'rejects reads, writes and serving outside the embed path policy: %s',
+    async (src) => {
+      const oldSource = 'export const sample = 1;';
+      fs.writeFileSync(path.join(repo, 'fixture.js'), oldSource);
+      await request(hub.app).get('/api/projects/fixture/embed-source').query({ src }).expect(403);
+      await request(hub.app).post('/api/projects/fixture/embeds').send({ src, source: 'export const sample = 2;' }).expect(403);
+      await request(hub.app).get(`/embed-sandbox/fixture/${encodeURIComponent(src)}`).expect(403);
+      expect(fs.readFileSync(path.join(repo, 'fixture.js'), 'utf8')).toBe(oldSource);
+    }
+  );
+
+  it('writes, inspects, serves and discovers real embed assets', async () => {
+    const source = '<!doctype html><p>Fictional orbit</p>';
+    const src = 'embeds/orbit model/index.html';
+    await request(hub.app).post('/api/projects/fixture/embeds').send({ src, source }).expect(201, { src });
+    await request(hub.app).get('/api/projects/fixture/embed-source').query({ src }).expect(200, { src, source });
+    const result = await request(hub.app).get('/embed-sandbox/fixture/embeds/orbit%20model/index.html').redirects(1).expect(200);
+    expect(result.text).toBe(source);
+    const projects = await request(hub.app).get('/api/projects').expect(200);
+    expect(projects.body.projects[0].embeds).toContainEqual({
+      src, name: 'orbit model', directory: 'embeds/orbit model', files: ['index.html']
+    });
+  });
+
+  it('omits redirected embed roots in enrolled projects', async () => {
+    const external = path.join(root, 'unregistered');
+    fs.mkdirSync(external);
+    fs.writeFileSync(path.join(external, 'index.html'), '<p>Fictional moon</p>');
+    fs.rmSync(path.join(repo, 'embeds'), { recursive: true });
+    fs.symlinkSync(external, path.join(repo, 'embeds'));
+    const list = await request(hub.app).get('/api/projects').expect(200);
+    expect(list.body.projects[0].embeds).toEqual([]);
+    await request(hub.app).get('/embed-sandbox/fixture/embeds/index.html').expect(403);
+    await request(hub.app).post('/api/projects/fixture/embeds').send({ src: 'embeds/new.html', source: 'Unused' }).expect(403);
+    expect(fs.readdirSync(external)).toEqual(['index.html']);
+  });
+
+  it('skips symlinked embed entries and rejects internal, external and missing-target aliases', async () => {
+    const component = path.join(repo, 'embeds/orbit');
+    const elsewhere = path.join(root, 'unregistered');
+    fs.mkdirSync(component);
+    fs.mkdirSync(elsewhere);
+    fs.writeFileSync(path.join(component, 'index.html'), '<p>Fictional orbit</p>');
+    fs.writeFileSync(path.join(elsewhere, 'label.txt'), 'Fictional label');
+    fs.symlinkSync('index.html', path.join(component, 'local.html'));
+    fs.symlinkSync(path.join(elsewhere, 'label.txt'), path.join(component, 'external.txt'));
+    fs.symlinkSync('missing.txt', path.join(component, 'dangling.txt'));
+    fs.symlinkSync(elsewhere, path.join(repo, 'embeds/redirected'));
+
+    const projects = await request(hub.app).get('/api/projects').expect(200);
+    expect(projects.body.projects[0].embeds).toContainEqual({
+      src: 'embeds/orbit/index.html', name: 'orbit', directory: 'embeds/orbit', files: ['index.html']
+    });
+    for (const src of ['embeds/orbit/local.html', 'embeds/orbit/external.txt', 'embeds/orbit/dangling.txt', 'embeds/redirected/label.txt']) {
+      await request(hub.app).get('/api/projects/fixture/embed-source').query({ src }).expect(403);
+      await request(hub.app).get(`/embed-sandbox/fixture/${src}`).expect(403);
+      await request(hub.app).post('/api/projects/fixture/embeds').send({ src, source: 'Unused fixture' }).expect(403);
+    }
+    expect(fs.readFileSync(path.join(component, 'index.html'), 'utf8')).toBe('<p>Fictional orbit</p>');
+    expect(fs.readFileSync(path.join(elsewhere, 'label.txt'), 'utf8')).toBe('Fictional label');
+    expect(fs.existsSync(path.join(component, 'missing.txt'))).toBe(false);
+  });
+
+  it('refuses legacy local and file remote imports', async () => {
+    await request(hub.app).post('/api/projects/inspect-local').send({ path: repo }).expect(410);
+    await request(hub.app).post('/api/projects/import').send({ mode: 'local', path: repo }).expect(410);
+    await request(hub.app).post('/api/projects/inspect-remote').send({ url: pathToFileURL(repo).href }).expect(410);
+    await request(hub.app).get(docUrl).expect(200);
   });
 
   it('adds a compatible SPA CSP and baseline security headers to HTML', async () => {
@@ -127,9 +242,9 @@ describe('LAN HTTP security, safe assets, and concurrent writes', () => {
   it('bounds expensive API calls per peer and returns Retry-After without throttling health reads', async () => {
     await hub.close();
     hub = makeHub({ rateLimit: { maxRequests: 2, windowMs: 60000 } });
-    await request(hub.app).post('/api/projects/import').send({ mode: 'invalid' }).expect(400);
-    await request(hub.app).post('/api/projects/missing/git/fetch').send({}).expect(404);
-    const response = await request(hub.app).post('/api/projects/missing/git/pull')
+    await request(hub.app).get('/api/projects/missing/git/diff').expect(404);
+    await request(hub.app).post('/api/projects/missing/git/propose').send({}).expect(404);
+    const response = await request(hub.app).post('/api/projects/missing/git/propose')
       .set('X-Forwarded-For', '203.0.113.90').send({}).expect(429);
     expect(Number(response.headers['retry-after'])).toBeGreaterThan(0);
     await request(hub.app).get('/api/health').expect(200);
@@ -187,6 +302,26 @@ describe('LAN HTTP security, safe assets, and concurrent writes', () => {
     expect(fs.readdirSync(outside)).toEqual([]);
   });
 
+  it.each(['.focuswiki', '.focuswiki/conflicts', '.cairn', '.cairn/conflicts'])(
+    'skips redirected conflict metadata at %s and lists real conflict files',
+    async (relativeDir) => {
+      const outside = path.join(root, 'unregistered');
+      const conflictDir = relativeDir.endsWith('/conflicts') ? outside : path.join(outside, 'conflicts');
+      fs.mkdirSync(conflictDir, { recursive: true });
+      fs.writeFileSync(path.join(conflictDir, 'README.md.not-in-project.md'), '# Fictional draft');
+      const redirected = path.join(repo, relativeDir);
+      fs.mkdirSync(path.dirname(redirected), { recursive: true });
+      fs.symlinkSync(outside, redirected);
+      const otherMetadata = relativeDir.startsWith('.focuswiki') ? '.cairn' : '.focuswiki';
+      const realConflictDir = path.join(repo, otherMetadata, 'conflicts');
+      fs.mkdirSync(realConflictDir, { recursive: true });
+      fs.writeFileSync(path.join(realConflictDir, 'README.md.saved.md'), '# Saved draft');
+      fs.symlinkSync(path.join(conflictDir, 'README.md.not-in-project.md'), path.join(realConflictDir, 'README.md.alias.md'));
+      const doc = await request(hub.app).get(docUrl).expect(200);
+      expect(doc.body.conflicts).toEqual([`${otherMetadata}/conflicts/README.md.saved.md`]);
+    }
+  );
+
   it('serves image assets with short private caching and isolates SVG scripting', async () => {
     const png = await request(hub.app).get('/api/projects/fixture/assets/images/comet.png').expect(200);
     expect(png.headers['content-type']).toMatch(/^image\/png/);
@@ -209,6 +344,19 @@ describe('LAN HTTP security, safe assets, and concurrent writes', () => {
     fs.symlinkSync(path.join(repo, '.git/private.png'), path.join(repo, 'images/alias.png'));
     await request(hub.app).get('/api/projects/fixture/assets/images/escape.png').expect(403);
     await request(hub.app).get('/api/projects/fixture/assets/images/alias.png').expect(403);
+    fs.symlinkSync('comet.png', path.join(repo, 'images/local.png'));
+    await request(hub.app).get('/api/projects/fixture/assets/images/local.png').expect(403);
+  });
+
+  it('rejects redirected Markdown and comment sidecars', async () => {
+    fs.symlinkSync('README.md', path.join(repo, 'redirected.md'));
+    await request(hub.app).get('/api/projects/fixture/doc?path=redirected.md').expect(403);
+    await request(hub.app).put('/api/projects/fixture/doc')
+      .send({ path: 'redirected.md', markdown: '# Second fixture', forceOverwrite: true }).expect(403);
+    fs.symlinkSync('notes.comments.json', path.join(repo, 'README.comments.json'));
+    await request(hub.app).post(commentsUrl)
+      .send({ path: 'README.md', quote: 'amber comet', body: 'Fictional comment' }).expect(403);
+    expect(fs.existsSync(path.join(repo, 'notes.comments.json'))).toBe(false);
   });
 
   it('skips oversized search documents and caps matches across the whole request', async () => {
@@ -220,12 +368,12 @@ describe('LAN HTTP security, safe assets, and concurrent writes', () => {
     expect(matches.body.results).toHaveLength(60);
   });
 
-  it('returns safe JSON and logs unexpected internal errors with stack traces', async () => {
+  it('returns safe JSON and avoids logging private request failure details', async () => {
     const log = vi.spyOn(console, 'error').mockImplementation(() => {});
     vi.spyOn(hub.registry, 'list').mockImplementation(() => { throw new Error('private internal detail'); });
     const response = await request(hub.app).get('/api/projects').expect(500);
     expect(response.body).toEqual({ error: 'server_error', message: 'Unexpected server error.' });
-    expect(log).toHaveBeenCalledWith(expect.any(String), expect.stringContaining('Error: private internal detail\n'));
+    expect(log).toHaveBeenCalledWith('[focuswiki] Unexpected request error.');
   });
 
   it('queues async same-key operations, permits independent keys, and recovers after rejection', async () => {

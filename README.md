@@ -15,28 +15,28 @@ npm run dev:client   # In another terminal, Vite on 127.0.0.1:5173
 
 To try the compiled client, stop the development API, run `npm run build`, then use `./scripts/server-ctl.sh start` and open `http://127.0.0.1:8088`. Stop it with `./scripts/server-ctl.sh stop`. Local development uses the fictional sample repositories and does not authorize proposal publication. Use `npm run typecheck`, `npm run build`, and `npm test` to verify changes. The browser tests require Playwright Chromium.
 
-## Repository import and Git in local development
+## Managed repositories
 
-You do not need to edit `config/projects.json` or restart the server to add repositories:
+Use operator enrollment to connect a GitHub repository and a single base branch. Focus reads and edits shared working files while a separate Git worker fetches upstream changes and handles reviewed proposals. See [managed Git setup and migration](docs/MANAGED-GIT.md) for the process configuration, API and steps to preserve work from existing checkouts.
 
-- **In the UI:** Click **+ Add** next to the `Repository` selector in the sidebar to:
-  1. **Clone URL:** Inspect remote branches and PR refs (`refs/pull/*/head` / `refs/merge-requests/*/head`), pick a starting branch or PR `#`, and clone directly into `repos/` (or `FOCUSWIKI_REPOS_DIR`).
-  2. **Local folder:** Inspect and attach an existing local checkout or plain Markdown folder inside `FOCUSWIKI_ALLOWED_IMPORT_ROOTS`.
-  3. **New repo:** Initialize a fresh Git-backed wiki repo with an initial commit on `main`.
-  4. **Connected:** Unregister a repository from Focus without deleting files on disk.
-- **Branches, PRs & Pull:** Click the topbar branch pill (`main · clean` / `↓N`) to open **Repository Git**, where you can **Fetch** remote branches and PR heads, **Pull** fast-forward updates (`--ff-only`, blocked safely if local edits exist), or switch to a local branch, remote branch, or PR `#` under **Branches & PRs**.
-- **HTTP API:**
-  - `POST /api/projects/inspect-remote` / `POST /api/projects/inspect-local`
-  - `POST /api/projects/import` (`mode`: `"clone" | "local" | "init"`) & `DELETE /api/projects/:projectId`
-  - `GET /api/projects/:projectId/git/refs`, `POST /api/projects/:projectId/git/fetch`, `POST /api/projects/:projectId/git/pull`, `POST /api/projects/:projectId/git/checkout`
+## Managed Git and Pull Requests
+
+Use **Enrollment** in the sidebar to see how to request repository access. The workspace operator configures the working copy, upstream, and Git credentials on the server. The sidebar lists the repositories available to you.
+
+1. Edit a document as usual. **Saved locally** means FocusWiki wrote your draft to the local working copy. Inline comments and component changes also live in project files. Saving and opening a review have no upstream effect.
+2. Open **Review working changes** from the topbar Git status. Inspect the rich or raw diff, select the files to include, and enter a proposal message. Each new review starts with no files selected.
+3. Choose **Propose changes** to publish the selected snapshot as a pull request. Open the returned link to check the pull request and its merge status on the Git host.
+4. If the review becomes stale, choose **New review**, inspect the updated diff, and select the files again. If publishing is interrupted, **Retry proposal** resubmits the same review, file selection, and message. Your local draft stays on disk.
+
+**Backend dependency.** Publishing requires the managed enrollment, Git service, and proposal backend. The browser reads `GET /api/projects/:projectId/git/diff` for the existing rich review payload plus an opaque `reviewId`. It sends `POST /api/projects/:projectId/git/propose` with JSON `{reviewId, message, paths}` and `X-FocusWiki-Intent: propose` on the same origin. The server validates the review and selected paths, and returns `{url, sha}` on success. A diff without a review ID is available for inspection only.
+
+Set `
 
 ## Images, Links, and Visual Editing
 
 In **Edit → Visual**, use **Image** for a repository path or HTTP(S) URL, alternative text, and an optional title. Inline and standalone Markdown images remain editable and retain their original `src`, `alt`, and `title` when saved. Repository image URLs resolve against the current document directory and render through `/api/projects/:projectId/assets/:path`; they are never rewritten into API URLs in Markdown. Remote images load directly from their host with no referrer.
 
 The link button opens a keyboard-accessible form (**Apply**, **Remove Link**, **Cancel**, or Escape). Document links such as `../overview.md#authentication` resolve relative to the current document; `#heading` links scroll within it. Headings have deterministic GitHub-style anchors, including duplicate suffixes. Selecting a table cell reveals row, column, and table deletion controls. These controls appear only in Edit mode.
-
-Clone imports now send an optional `shallow` boolean. The Git review defaults to all changed files checked; selecting a subset sends `paths` with the commit request, and selecting all omits it. **Integration dependency:** this UI branch requires the sibling server implementation of the assets route, shallow cloning, and selected-path commits. The base server does not yet implement those contracts. Its review UI has no re-anchor request to wrap; all existing create/reply/resolve/reopen failures now produce a dismissible alert and retain drafts.
 
 ### TipTap dependency limitation
 
@@ -62,6 +62,8 @@ height: 300
 props: {"depth":3,"luckBonus":1}
 ```
 ````
+
+Use relative URLs for component scripts (including modules), stylesheets, images, and fonts. Keep them inside the same project's `embeds/` directory, using regular files and directories. The sandbox applies in the iframe and when the embed URL is opened directly.
 
 ### Adding a Fourth Component (Bot or CLI Workflow — Zero Hub Code Changes)
 
@@ -137,7 +139,7 @@ node .agents/skills/focuswiki-docs/scripts/validate-wiki.mjs .
 | `react`, `react-dom` | Workspace UI rendering | MIT |
 | `@tiptap/*`, `prosemirror-*` | Rich visual Markdown editor, tables, task lists, decorations | MIT |
 | `unified`, `remark-parse`, `remark-gfm`, `remark-frontmatter`, `remark-stringify` | Lossless Markdown AST parsing and serialization | MIT |
-| `express`, `chokidar` | Local HTTP API, sandboxed asset serving, and live file watching | MIT |
+| `express` | Local HTTP API and sandboxed asset serving | MIT |
 | `lucide-react` | Minimal UI iconography | ISC |
 | `@fontsource/jetbrains-mono` | Self-hosted WOFF2 monospace code & source font | OFL-1.1 |
 | `typescript`, `vite`, `vitest`, `supertest`, `tsx` | Build, typecheck, and automated test toolchain | Apache-2.0 / MIT |

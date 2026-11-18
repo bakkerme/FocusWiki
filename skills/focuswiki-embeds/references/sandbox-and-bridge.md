@@ -2,20 +2,23 @@
 
 ## 1. Exact Runtime Isolation (`server/app.ts` + `EmbedBlockExtension.tsx`)
 
-FocusWiki serves embed files from `/embed-sandbox/:projectId/<src>?rev=<token>&instance=<instanceId>` inside:
+FocusWiki opens `/embed-sandbox/:projectId/<src>?rev=<token>&instance=<instanceId>` inside:
 
 ```html
 <iframe sandbox="allow-scripts" src="/embed-sandbox/..."></iframe>
 ```
 
+The HTML response redirects to a server-issued, project-scoped asset URL. Use relative paths for modules and other assets so they resolve from that URL. Only the scoped asset endpoint grants CORS to opaque origins, and its URLs change after a server restart.
+
 ### Enforced HTTP Response Headers
 ```http
 Content-Security-Policy:
+  sandbox allow-scripts;
   default-src 'none';
-  script-src 'unsafe-inline' <origin>/embed-sandbox/<projectId>/;
-  style-src 'unsafe-inline' <origin>/embed-sandbox/<projectId>/;
-  img-src data: blob: <origin>/embed-sandbox/<projectId>/;
-  font-src data: <origin>/embed-sandbox/<projectId>/;
+  script-src 'unsafe-inline' <scoped-embeds-prefix>;
+  style-src 'unsafe-inline' <scoped-embeds-prefix>;
+  img-src data: blob: <scoped-embeds-prefix>;
+  font-src data: <scoped-embeds-prefix>;
   connect-src 'none';
   form-action 'none';
   base-uri 'none';
@@ -23,9 +26,9 @@ Content-Security-Policy:
 ```
 
 ### Practical Implications
-- **Allowed:** Inline `<script>` and `<style>`, relative sibling files (`./logic.js`, `./styles.css`, `./chart.svg`, `../shared/icons.svg` as long as they stay inside `<repo>/` and use an allowed extension), `data:` / `blob:` images, `<canvas>`, inline `<svg>`, `ResizeObserver`, `requestAnimationFrame`.
+- **Allowed:** Inline `<script>` and `<style>`, relative sibling files (`./logic.js`, `./logic.mjs`, `./styles.css`, `./chart.svg`, `../shared/icons.svg` when they stay inside `<repo>/embeds/` and use an allowed extension), `data:` / `blob:` images, `<canvas>`, inline `<svg>`, `ResizeObserver`, `requestAnimationFrame`.
 - **Blocked by CSP (`connect-src 'none'`):** `fetch()`, `XMLHttpRequest`, `WebSocket`, `EventSource`, external scripts/fonts/stylesheets/images, and cross-project `/embed-sandbox/<other-project>/` assets. *(Note: if your widget needs static JSON data, import it via a sibling `.js`/`.mjs` module rather than calling `fetch('./data.json')`, because `connect-src 'none'` blocks `fetch()` even to same-directory URLs.)*
-- **Blocked by `Origin: null` (`sandbox="allow-scripts"` without `allow-same-origin`):** `window.localStorage`, `window.sessionStorage`, `window.indexedDB`, `document.cookie`, `BroadcastChannel`, `navigator.serviceWorker`, and reading `window.parent.document`.
+- **Blocked by the opaque origin:** `window.localStorage`, `window.sessionStorage`, `window.indexedDB`, `document.cookie`, `BroadcastChannel`, `navigator.serviceWorker`, and reading the host document from the iframe. The embed response applies the same opaque-origin restriction to direct navigation.
 
 ## 2. `postMessage` Protocol Payloads
 
@@ -64,7 +67,7 @@ When editing over HTTP instead of direct disk access:
     "source": "<!DOCTYPE html>..."
   }
   ```
-  *(`src` must start with `embeds/` and end with an allowlisted extension.)*
+  *(`src` must resolve below the project's `embeds/` directory to a regular file with an allowlisted extension. Symlinked files and directories are rejected.)*
 
 - **Read existing embed source:**
   `GET /api/projects/:projectId/embed-source?src=embeds/loot-curve/index.html`

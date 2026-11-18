@@ -7,7 +7,7 @@ import type {
   CommentThread
 } from '../shared/types.js';
 import { writeFileAtomicSync } from './fileLock.js';
-import { resolveSafeProjectPath } from './pathGuard.js';
+import { resolveSafeProjectFilePath } from './pathGuard.js';
 
 export class CommentNotFoundError extends Error {
   public readonly statusCode = 404;
@@ -27,7 +27,7 @@ export function getCommentSidecarRelPath(docRelPath: string): string {
 
 export function readCommentSidecar(projectRoot: string, docRelPath: string): CommentSidecarFile {
   const sidecarRel = getCommentSidecarRelPath(docRelPath);
-  const { absolutePath } = resolveSafeProjectPath(projectRoot, sidecarRel);
+  const { absolutePath } = resolveSafeProjectFilePath(projectRoot, sidecarRel);
   if (!fs.existsSync(absolutePath)) {
     return {
       version: 1,
@@ -58,7 +58,7 @@ export function writeCommentSidecar(
   sidecar: CommentSidecarFile
 ): void {
   const sidecarRel = getCommentSidecarRelPath(docRelPath);
-  const { absolutePath } = resolveSafeProjectPath(projectRoot, sidecarRel);
+  const { absolutePath } = resolveSafeProjectFilePath(projectRoot, sidecarRel);
   fs.mkdirSync(path.dirname(absolutePath), { recursive: true, mode: 0o770 });
   writeFileAtomicSync(absolutePath, `${JSON.stringify(sidecar, null, 2)}\n`, 0o660);
 }
