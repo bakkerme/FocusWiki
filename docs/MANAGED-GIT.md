@@ -27,7 +27,7 @@ The example is fictional. A project ID selects a directory under `FOCUSWIKI_REPO
 | `FOCUSWIKI_GIT_SOCKET` | `/run/focuswiki/git.sock` by default | Same socket path, mode `0660` |
 | `FOCUSWIKI_GIT_STATE_DIR` | | Persistent worker-owned directory, mode `0700` |
 
-After `npm run build`, the web entrypoint is `node dist/server/server/index.js` and the worker entrypoint is `node dist/server/server/gitRunner.js`. The Dockerfile has `web` and `git-runner` targets. The default Compose file runs the fictional file-only demo. The private deployment companion provides managed Compose configuration and trusted request authorization.
+Compose runs the production web and Git worker entrypoints as separate services. See the [deployment runbook](DEPLOYMENT.md) for socket permissions, mount ownership, GitHub App setup, and verification.
 
 Run the services under distinct accounts. Share a group for working files and the socket. Create the working-files root and socket directory owned by the worker and traversable by the shared group, for example mode `0750`. Give the web account write access inside provisioned project directories. Mount the socket directory read-only in the web container. Keep the enrollment file outside the three directories, the Git state exclusively in the worker, and GitHub App credentials in a separate worker-only read-only mount. Run a single worker per state and working-files root. After an unclean shutdown, remove a stale socket only after confirming that its worker is stopped.
 
