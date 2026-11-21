@@ -272,19 +272,7 @@ async function openBaoRequest<T>(
       settled = true;
       fn();
     };
-    const req = https.request({
-      hostname: bareHost,
-      port,
-      path: `${config.basePath}/v1/${apiPath}`,
-      method,
-      headers,
-      timeout: timeoutMs,
-      agent: false,
-      rejectUnauthorized: true,
-      ca: config.ca,
-      servername: isIP(bareHost) ? undefined : bareHost,
-      ...(tlsSocket ? { createConnection: () => tlsSocket } : {})
-    }, (res) => {
+    const handleResponse = (res: http.IncomingMessage) => {
       const chunks: Buffer[] = [];
       let total = 0;
       res.on('data', (chunk: Buffer) => {
@@ -318,7 +306,31 @@ async function openBaoRequest<T>(
           finish(() => reject(new OpenBaoBootstrapError(`OpenBao returned non-JSON payload (HTTP ${status}).`, retryable)));
         }
       });
-    });
+    };
+    // When using a pre-verified CONNECT TLS socket, omit `agent` so Node honors
+    // `createConnection` directly instead of constructing a default Agent and doing local DNS.
+    const req = tlsSocket
+      ? http.request({
+          hostname: bareHost,
+          port,
+          path: `${config.basePath}/v1/${apiPath}`,
+          method,
+          headers: { ...headers, Host: config.addr.host },
+          timeout: timeoutMs,
+          createConnection: () => tlsSocket
+        }, handleResponse)
+      : https.request({
+          hostname: bareHost,
+          port,
+          path: `${config.basePath}/v1/${apiPath}`,
+          method,
+          headers,
+          timeout: timeoutMs,
+          agent: false,
+          rejectUnauthorized: true,
+          ca: config.ca,
+          servername: isIP(bareHost) ? undefined : bareHost
+        }, handleResponse);
     req.on('timeout', () => {
       req.destroy();
       finish(() => reject(new OpenBaoBootstrapError('OpenBao request timed out.', true)));
@@ -327,7 +339,8 @@ async function openBaoRequest<T>(
       tlsSocket?.destroy();
       const code = err?.code ?? '';
       const retryable = ['ECONNREFUSED', 'ECONNRESET', 'EPIPE', 'ETIMEDOUT', 'EAI_AGAIN', 'ENOTFOUND', 'EHOSTUNREACH', 'ENETUNREACH'].includes(code);
-      finish(() => reject(new OpenBaoBootstrapError('Could not complete HTTPS request to OpenBao.', retryable)));
+      const suffix = /^[A-Z0-9_]{1,40}$/.test(code) ? ` (${code})` : '';
+      finish(() => reject(new OpenBaoBootstrapError(`Could not complete HTTPS request to OpenBao${suffix}.`, retryable)));
     });
     req.end(payload);
   });
