@@ -46,7 +46,7 @@ The production stack runs a web service and a Git worker under rootless Docker. 
 
 ## Docker CI/CD
 
-GitHub Actions tests and builds the Docker image. Successful `main` builds that pass the two-service smoke test are eligible for publication to Google Artifact Registry at `gcr.io`. See [Docker CI/CD setup](docs/DOCKER-CICD.md) for the registry and GitHub configuration.
+GitHub Actions tests and builds the Docker image. Successful `main` builds that pass the two-service smoke test are eligible for publication to GitHub Container Registry (`ghcr.io`). See [Docker CI/CD setup](docs/DOCKER-CICD.md) for the registry and GitHub configuration.
 
 ## Embedding Project-Authored Components
 

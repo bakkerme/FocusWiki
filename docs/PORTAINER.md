@@ -47,12 +47,12 @@ Store your GitHub App private key in a dedicated KV v2 path and grant FocusWiki 
 
    Record the `role_id` and `secret_id` for the Portainer stack environment variables.
 
-## 2. Refresh GCR pull credentials in Portainer
+## 2. Configure GHCR pull credentials in Portainer
 
-FocusWiki CI builds and publishes images to `gcr.io/<GCP_PROJECT_ID>/focuswiki:<COMMIT_SHA>` (see [DOCKER-CICD.md](DOCKER-CICD.md)).
+FocusWiki CI builds and publishes images to `ghcr.io/bakkerme/focuswiki:<COMMIT_SHA>` (see [DOCKER-CICD.md](DOCKER-CICD.md)).
 
-- In Portainer (**Registries**), ensure your `gcr.io` registry entry has a valid Artifact Registry Reader credential (for example, a dedicated read-only GCP service account JSON key with `roles/artifactregistry.reader`, using username `_json_key` and the JSON key as the password, or a fresh token if using short-lived auth).
-- Pin `FOCUSWIKI_IMAGE` to the published tag or digest from the GitHub Actions **Docker CI/CD** summary (for example `gcr.io/YOUR_PROJECT/focuswiki@sha256:...`).
+- If the GHCR package is **private**, add a Custom registry in Portainer (**Registries**) with registry URL `ghcr.io`, your GitHub username, and a read-only GitHub Personal Access Token (`read:packages`) as the password. If the package is **public**, no registry credentials are required.
+- Pin `FOCUSWIKI_IMAGE` to the published digest from the GitHub Actions **Docker CI/CD** summary (for example `ghcr.io/bakkerme/focuswiki@sha256:...`).
 
 ## 3. Prepare a disposable test repository and `enrollment.json`
 
@@ -85,7 +85,7 @@ In Portainer, create a new stack using [compose.portainer.yaml](../compose.porta
 
 | Variable | Required | Example / Default | Notes |
 | --- | --- | --- | --- |
-| `FOCUSWIKI_IMAGE` | Yes | `gcr.io/YOUR_PROJECT/focuswiki@sha256:...` | Pinned image from CI. |
+| `FOCUSWIKI_IMAGE` | Yes | `ghcr.io/bakkerme/focuswiki@sha256:...` | Pinned image from CI. |
 | `FOCUSWIKI_ENROLLMENT_HOST_PATH` | Yes | `/volume1/docker/focuswiki/enrollment.json` | Absolute NAS path to `enrollment.json` (must already exist). |
 | `FOCUSWIKI_PUBLIC_ORIGIN` | Yes | `https://focuswiki.tailnet.ts.net` | Exact Tailscale Serve HTTPS origin (no trailing slash). Must match `FOCUSWIKI_TS_HOSTNAME` + your tailnet domain. |
 | `FOCUSWIKI_PUBLISHERS` | Recommended | `alice@example.test` | Comma-separated canonical Tailscale logins allowed to open PRs. Leave empty to run read/edit-only without PR publication. |
