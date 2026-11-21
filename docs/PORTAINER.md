@@ -102,6 +102,7 @@ In Portainer, create a new stack using [compose.portainer.yaml](../compose.porta
 | `TS_AUTHKEY` | First deploy | `tskey-auth-...` | Tailscale auth key for initial node registration. State persists in the `tailscale-state` volume; clear or remove a one-time key after first join. Make sure HTTPS certificates are enabled in your Tailscale admin DNS settings and Funnel is disabled for this node. |
 | `FOCUSWIKI_TS_OUTBOUND_HTTP_PROXY_LISTEN` | No | *(empty)* | Set to `:1055` **only** if Docker bridge containers on your NAS cannot route directly to `FOCUSWIKI_OPENBAO_ADDR` over Tailscale. |
 | `FOCUSWIKI_OPENBAO_PROXY` | No | *(empty)* | Set to `http://tailscale:1055` alongside `FOCUSWIKI_TS_OUTBOUND_HTTP_PROXY_LISTEN=:1055` to tunnel OpenBao HTTPS through the stack's `tailscale` sidecar. |
+| `FOCUSWIKI_LOG_LEVEL` | No | `info` | Log verbosity for `git-worker` and `web` (`debug`, `info`, `warn`, `error`, `silent`). Secrets and tokens are redacted from log lines. |
 
 ### Reaching OpenBao over Tailscale from `git-worker`
 
