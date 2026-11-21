@@ -5,8 +5,11 @@ import type { GitChangedFile, ProjectGitStatus } from '../shared/types.js';
 import { validCheckoutFile, validProjectFile, type EnrolledProject } from './enrollment.js';
 import { GitRpcError, isGitSha, type ProposalContext, type ProposalService } from './gitProtocol.js';
 import { hasWorkingTree, unavailableGitStatus } from './projectRegistry.js';
+import { createLogger, sanitizeLogText } from './logger.js';
 
+const log = createLogger('focuswiki-git');
 const MAX_GIT_OUTPUT = 8 * 1024 * 1024;
+const MAX_GIT_STDERR = 4 * 1024;
 const MAX_CHANGED_FILES = 100;
 const FETCH_RETRY_MS = 60_000;
 const STATUS_INTERVAL_MS = 5_000;
@@ -48,11 +51,14 @@ function runGit(cwd: string, args: string[], signal: AbortSignal, token?: string
   }
   return new Promise((resolve, reject) => {
     const child = spawn(GIT_PATH, [...gitConfig.flatMap((value) => ['-c', value]), ...args], {
-      cwd, env, stdio: ['ignore', 'pipe', 'ignore'], detached: true
+      cwd, env, stdio: ['ignore', 'pipe', 'pipe'], detached: true
     });
     const chunks: Buffer[] = [];
+    const errChunks: Buffer[] = [];
     let bytes = 0;
+    let errBytes = 0;
     let failed = false;
+    let spawnError: string | undefined;
     const kill = () => {
       failed = true;
       if (!child.pid) return;
@@ -65,12 +71,29 @@ function runGit(cwd: string, args: string[], signal: AbortSignal, token?: string
       if (bytes > MAX_GIT_OUTPUT) kill();
       else chunks.push(chunk);
     });
-    child.on('error', () => { failed = true; });
+    child.stderr?.on('data', (chunk: Buffer) => {
+      if (errBytes >= MAX_GIT_STDERR) return;
+      const slice = errBytes + chunk.length > MAX_GIT_STDERR ? chunk.subarray(0, MAX_GIT_STDERR - errBytes) : chunk;
+      errChunks.push(slice);
+      errBytes += slice.length;
+    });
+    child.on('error', (err) => {
+      failed = true;
+      spawnError = err.message;
+    });
     child.on('close', (code) => {
       deadline.removeEventListener('abort', kill);
-      if (deadline.aborted) reject(new GitRpcError('git_timeout'));
-      else if (failed || code !== 0) reject(new GitRpcError('git_operation_failed'));
-      else resolve(Buffer.concat(chunks, bytes).toString('utf8'));
+      const stderrText = errBytes ? sanitizeLogText(Buffer.concat(errChunks, errBytes).toString('utf8'), 240) : '';
+      if (deadline.aborted) {
+        reject(new GitRpcError('git_timeout', `git ${args[0] ?? 'command'} timed out`));
+      } else if (failed || code !== 0) {
+        const detail = spawnError
+          ? `git ${args[0] ?? 'command'} spawn failed: ${sanitizeLogText(spawnError, 200)}`
+          : `git exit ${code ?? 'signal'}${stderrText ? `: ${stderrText}` : ''}`;
+        reject(new GitRpcError('git_operation_failed', detail));
+      } else {
+        resolve(Buffer.concat(chunks, bytes).toString('utf8'));
+      }
     });
   });
 }
@@ -100,6 +123,8 @@ export class ManagedRepository {
   private nextFetch = 0;
   private fetchedAt?: string;
   private fetchState: ProjectGitStatus['fetchState'] = 'pending';
+  private lastErrorKey?: string;
+  private wasReady = false;
   private readonly context: ProposalContext;
   private readonly metadataDir: string;
   private readonly workingStage: string;
@@ -137,17 +162,25 @@ export class ManagedRepository {
     const fetchDue = Date.now() >= this.nextFetch;
     if (fetchDue) this.nextFetch = Date.now() + FETCH_RETRY_MS;
 
+    let phase = 'refresh';
     try {
       if (!exists(this.metadataDir)) {
         // An existing tree may contain uncommitted work or legacy Git metadata. Never adopt it.
-        if (exists(this.context.workTree)) throw new GitRpcError('git_not_ready');
+        if (exists(this.context.workTree)) {
+          throw new GitRpcError('git_not_ready', `Refusing to adopt existing directory at ${this.context.workTree}`);
+        }
         if (!this.proposal || !fetchDue) {
+          if (!this.proposal) {
+            this.logError('config', 'Proposal service is unavailable; cannot fetch repository.');
+          }
           this.fetchState = this.proposal ? this.fetchState : 'unavailable';
           this.recordUnavailable(this.fetchState === 'unavailable' ? 'unavailable' : 'pending');
           return;
         }
+        phase = 'init';
         await this.initialize(signal);
       }
+      phase = 'binding';
       this.checkBinding();
 
       if (!exists(this.installedFile) && !fetchDue) {
@@ -155,13 +188,16 @@ export class ManagedRepository {
         return;
       }
       if (exists(this.installedFile)) {
+        phase = 'install';
         this.finishInstall(signal);
+        phase = 'inspect';
         await this.inspect(signal);
       }
 
       if (fetchDue) {
+        let fetchPhase = 'token';
         try {
-          if (!this.proposal) throw new GitRpcError('git_unavailable');
+          if (!this.proposal) throw new GitRpcError('git_unavailable', 'Proposal service is unavailable.');
           // The token provider validates an existing worktree. Before provisioning,
           // give it the empty private stage and keep the enrolled path unpublished.
           const workTree = exists(this.installedFile) ? this.context.workTree : this.workingStage;
@@ -171,24 +207,34 @@ export class ManagedRepository {
           }
           const token = await this.proposal.getRepoToken({ ...this.context, workTree, branch: 'focuswiki/bootstrap' }, 'read');
           signal.throwIfAborted();
+          fetchPhase = 'fetch';
           await this.git([
             'fetch', '--no-tags', '--no-recurse-submodules', '--no-write-fetch-head', '--no-auto-maintenance',
             '--', this.context.remote, `+${this.localRef}:${this.remoteRef}`
           ], signal, token);
           this.fetchedAt = new Date().toISOString();
           this.fetchState = 'current';
-        } catch {
+          log.debug('Fetched remote branch', { project: this.project.id, branch: this.context.branch });
+        } catch (err) {
           this.fetchState = 'unavailable';
+          this.logError(fetchPhase, describeError(err));
         }
 
         if (this.fetchState === 'current' && !exists(this.installedFile)) {
+          phase = 'checkout';
           await this.prepareCheckout(signal);
+          phase = 'install';
           this.finishInstall(signal);
         }
-        if (exists(this.installedFile)) await this.inspect(signal);
-        else this.recordUnavailable(this.fetchState === 'unavailable' ? 'unavailable' : 'pending');
+        if (exists(this.installedFile)) {
+          phase = 'inspect';
+          await this.inspect(signal);
+        } else {
+          this.recordUnavailable(this.fetchState === 'unavailable' ? 'unavailable' : 'pending');
+        }
       }
-    } catch {
+    } catch (err) {
+      this.logError(phase, describeError(err));
       this.recordUnavailable('unavailable');
     }
   }
@@ -254,14 +300,18 @@ export class ManagedRepository {
   }
 
   private async prepareCheckout(signal: AbortSignal): Promise<void> {
-    if (exists(this.context.workTree)) throw new GitRpcError('git_not_ready');
+    if (exists(this.context.workTree)) {
+      throw new GitRpcError('git_not_ready', `Worktree already exists at ${this.context.workTree}`);
+    }
     const head = (await this.git(['rev-parse', '--verify', this.remoteRef + '^{commit}'], signal)).trim();
-    if (!isGitSha(head)) throw new GitRpcError('git_not_ready');
+    if (!isGitSha(head)) throw new GitRpcError('git_not_ready', `Remote ref ${this.remoteRef} did not resolve to a commit.`);
     const tree = await this.git(['ls-tree', '-r', '-z', head], signal);
     for (const entry of tree.split('\0').filter(Boolean)) {
       const tab = entry.indexOf('\t');
-      if (!/^100(?:644|755) blob /.test(entry) || tab < 0 || !validCheckoutFile(entry.slice(tab + 1))) {
-        throw new GitRpcError('git_not_ready');
+      const entryPath = tab >= 0 ? entry.slice(tab + 1) : '';
+      if (!/^100(?:644|755) blob /.test(entry) || tab < 0 || !validCheckoutFile(entryPath)) {
+        const mode = entry.split(' ', 2)[0] || 'unknown';
+        throw new GitRpcError('git_not_ready', `Rejected tree entry (mode=${mode}, path=${entryPath || '<invalid>'})`);
       }
     }
 
@@ -312,13 +362,45 @@ export class ManagedRepository {
       ahead,
       behind
     };
+    if (!this.wasReady || (this.fetchState === 'current' && this.lastErrorKey)) {
+      log.info('Managed repository ready', {
+        project: this.project.id,
+        branch: this.context.branch,
+        head: headSha.slice(0, 12),
+        fetchState: this.fetchState
+      });
+    }
+    this.wasReady = true;
+    if (this.fetchState === 'current') this.lastErrorKey = undefined;
+  }
+
+  private logError(phase: string, reason: string): void {
+    const key = `${phase}:${reason}`;
+    if (this.lastErrorKey === key) return;
+    this.lastErrorKey = key;
+    log.warn('Managed repository sync failed', {
+      project: this.project.id,
+      branch: this.context.branch,
+      remote: this.context.remote,
+      phase,
+      reason
+    });
   }
 
   private recordUnavailable(state: 'pending' | 'unavailable'): void {
+    if (state === 'unavailable') this.wasReady = false;
     this.status = {
       ...unavailableGitStatus(this.project, state),
       fetchState: this.fetchState,
       fetchedAt: this.fetchedAt
     };
   }
+}
+
+function describeError(err: unknown): string {
+  if (err instanceof GitRpcError) {
+    return err.detail ? `${err.code}: ${err.detail}` : `${err.code}: ${err.message}`;
+  }
+  if (err instanceof Error) return sanitizeLogText(err.message || err.name, 260);
+  return 'Unknown error';
 }

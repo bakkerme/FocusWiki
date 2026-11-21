@@ -69,9 +69,12 @@ export type GitFailureCode = keyof typeof failures;
 
 export class GitRpcError extends Error {
   readonly status: number;
-  constructor(readonly code: GitFailureCode) {
+  /** Internal diagnostic reason for server logs only; never returned to clients. */
+  readonly detail?: string;
+  constructor(readonly code: GitFailureCode, detail?: string) {
     super(failures[code][1]);
     this.status = failures[code][0];
+    this.detail = detail;
   }
 }
 

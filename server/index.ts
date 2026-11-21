@@ -7,7 +7,10 @@ import { proposalAuth } from './proposalAuth.js';
 import type { ProjectConfig } from '../shared/types.js';
 import { createHubApp } from './app.js';
 import { loadEnrollment } from './enrollment.js';
+import { createLogger } from './logger.js';
 import { ProjectRegistry } from './projectRegistry.js';
+
+const log = createLogger('focuswiki');
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT_DIR = path.resolve(__dirname, __dirname.includes(`${path.sep}dist${path.sep}`) ? '../../..' : '..');
@@ -124,6 +127,11 @@ async function main(): Promise<void> {
         }
       }
       console.log(`[focuswiki] Listening on ${socketPath ?? `http://127.0.0.1:${port} (local development)`}`);
+      log.info('Web server ready', {
+        mode: enrollmentFile ? 'managed' : 'static',
+        projects: registry.list().length,
+        gitSocket: process.env.FOCUSWIKI_GIT_SOCKET || undefined
+      });
       resolve();
     };
     if (socketPath) server.listen(socketPath, onListen);
