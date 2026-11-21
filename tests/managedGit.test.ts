@@ -316,6 +316,50 @@ describe('managed Git service', () => {
     hub = app('allow');
     await request(hub.app).get('/api/projects/amber/doc').expect(404);
   });
+
+  it('checks out repositories containing tracked .env templates while keeping them blocked from web and proposals', async () => {
+    const base = upstream();
+    fs.writeFileSync(path.join(fixture.source, '.env.example'), 'APP_ENV=example\n');
+    git(fixture.source, ['add', '.env.example']);
+    git(fixture.source, ['commit', '-m', 'Add .env.example template']);
+    const head = git(fixture.source, ['rev-parse', 'HEAD']);
+    expect(head).not.toBe(base);
+
+    const service = companion(head);
+    const client = await start(service);
+    await vi.waitFor(async () => {
+      expect((await client.statuses()).amber).toMatchObject({
+        state: 'ready', headSha: head, isClean: true, fetchState: 'current'
+      });
+    }, { timeout: 10_000 });
+    expect(fs.readFileSync(path.join(workTree, '.env.example'), 'utf8')).toBe('APP_ENV=example\n');
+
+    hub = app('allow');
+    await request(hub.app).get('/api/projects/amber/doc').expect(200);
+    await request(hub.app).get('/api/projects/amber/doc?path=.env.example').expect(403);
+    const review = await request(hub.app).get('/api/projects/amber/git/diff').expect(200);
+    await request(hub.app).post('/api/projects/amber/git/propose')
+      .send({ reviewId: review.body.reviewId, message: 'Attempt env proposal', paths: ['.env.example'] })
+      .expect(400);
+    expect(service.publishProposal).not.toHaveBeenCalled();
+  });
+
+  it('still refuses initial checkout when the repository tree contains symlinks or forbidden directories', async () => {
+    upstream();
+    fs.symlinkSync('README.md', path.join(fixture.source, 'link.md'));
+    git(fixture.source, ['add', 'link.md']);
+    git(fixture.source, ['commit', '-m', 'Add symlink entry']);
+    const head = git(fixture.source, ['rev-parse', 'HEAD']);
+
+    const service = companion(head);
+    const client = await start(service);
+    await vi.waitFor(async () => {
+      expect((await client.statuses()).amber).toMatchObject({
+        state: 'unavailable', fetchState: 'current'
+      });
+    }, { timeout: 10_000 });
+    expect(fs.existsSync(workTree)).toBe(false);
+  });
 });
 
 it('bounds the queue, withdraws canceled work, and serializes jobs on the same checkout', async () => {

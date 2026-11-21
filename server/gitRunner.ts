@@ -9,8 +9,10 @@ import {
   parseGitRequest, proposalBranch, unwrapReviewId, type GitRequest, type GitResult, type ProposalService, type PublishedProposal
 } from './gitProtocol.js';
 import { GitQueue } from './gitQueue.js';
+import { createLogger, sanitizeLogText } from './logger.js';
 import { ManagedRepository, workerDirectory } from './managedGit.js';
 
+const log = createLogger('focuswiki-git');
 const MAX_CONNECTIONS = 32;
 const REQUEST_READ_TIMEOUT = 2_000;
 
@@ -20,8 +22,12 @@ async function loadProposalService(): Promise<ProposalService | undefined> {
     const mod = await import(new URL('./proposalService.js', import.meta.url).href);
     if (typeof mod.reviewProposal === 'function' && typeof mod.publishProposal === 'function' &&
         typeof mod.getRepoToken === 'function') return mod;
-  } catch {
+    log.warn('Proposal service module loaded without required exports');
+  } catch (err) {
     // Dependency failures must not fall back to legacy Git or credential handling.
+    log.warn('Failed to load proposal service module', {
+      reason: err instanceof Error ? err.message : 'Unknown error'
+    });
   }
 }
 
@@ -135,9 +141,19 @@ export async function startGitRunner(options: {
           { ...ctx, branch: proposalBranch(request.actor, nonce) },
           { ...request.input, reviewId: innerId }
         );
-        return validatePublished(result, ctx.remote);
+        const published = validatePublished(result, ctx.remote);
+        log.info('Published Git proposal', {
+          project: request.projectId,
+          url: published.url,
+          sha: published.sha.slice(0, 12)
+        });
+        return published;
       } catch (err) {
-        throw proposalFailure(err);
+        const mapped = proposalFailure(err);
+        const detail = err instanceof GitRpcError ? err.detail
+          : err instanceof Error ? sanitizeLogText(err.message, 240)
+          : undefined;
+        throw detail && !mapped.detail ? new GitRpcError(mapped.code, detail) : mapped;
       }
     });
   }
@@ -181,18 +197,35 @@ export async function startGitRunner(options: {
       try {
         request = parseGitRequest(Buffer.concat(chunks, size));
       } catch {
+        log.warn('Rejected invalid Git worker socket request');
         return send({ ok: false, error: 'invalid_git_request' });
       }
       chunks.length = 0;
       const limit = request.verb === 'propose' ? 85_000 : 25_000;
       const deadline = AbortSignal.timeout(limit);
       const signal = AbortSignal.any([disconnect.signal, deadline]);
-      const expired = () => send({ ok: false, error: 'git_timeout' });
+      const expired = () => {
+        log.warn('Git worker RPC timed out', {
+          verb: request.verb,
+          project: request.verb === 'statuses' ? undefined : request.projectId,
+          timeoutMs: limit
+        });
+        send({ ok: false, error: 'git_timeout' });
+      };
       deadline.addEventListener('abort', expired, { once: true });
       void dispatch(request, signal).then((result) => {
         if (!signal.aborted) send({ ok: true, result });
       }).catch((error: unknown) => {
-        if (!signal.aborted) send({ ok: false, error: proposalFailure(error).code });
+        if (!signal.aborted) {
+          const mapped = proposalFailure(error);
+          log.warn('Git worker RPC failed', {
+            verb: request.verb,
+            project: request.verb === 'statuses' ? undefined : request.projectId,
+            code: mapped.code,
+            reason: mapped.detail ?? (error instanceof Error && !(error instanceof GitRpcError) ? error.message : undefined)
+          });
+          send({ ok: false, error: mapped.code });
+        }
       }).finally(() => deadline.removeEventListener('abort', expired));
     });
   });
@@ -211,6 +244,11 @@ export async function startGitRunner(options: {
   }
 
   const entries = [...projects];
+  log.info('Loaded enrolled projects', {
+    count: enrolled.length,
+    projects: enrolled.map((p) => `${p.id}@${p.branch}`).join(',') || 'none',
+    proposalService: Boolean(proposal)
+  });
   let cursor = 0;
   const refresh = () => {
     for (let checked = 0; checked < entries.length; checked++) {
