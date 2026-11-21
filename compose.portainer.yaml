@@ -4,7 +4,6 @@
 x-app-runtime: &app-runtime
   image: "${FOCUSWIKI_IMAGE:?Set the pinned FocusWiki image (for example ghcr.io/bakkerme/focuswiki@sha256:...)}"
   restart: unless-stopped
-  init: true
   read_only: true
   security_opt:
     - no-new-privileges:true
@@ -44,6 +43,7 @@ services:
   git-worker:
     <<: *app-runtime
     command: [git-worker]
+    init: true
     user: '0:0'
     depends_on:
       init:
@@ -86,6 +86,8 @@ services:
 
   web:
     <<: *app-runtime
+    # Omit `init: true` on non-root `web`: ASUSTOR ADM's host `/sbin/docker-init` is root-only,
+    # and `web` runs a single Node process with no child subprocesses.
     command: [web]
     user: '10002:0'
     network_mode: none
