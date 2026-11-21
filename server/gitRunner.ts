@@ -46,6 +46,32 @@ function validatePublished(result: PublishedProposal, remote: string): Published
   return { url: result.url, sha: result.sha };
 }
 
+async function prepareWorkerSocket(socketPath: string): Promise<void> {
+  const existing = fs.lstatSync(socketPath, { throwIfNoEntry: false });
+  if (!existing) return;
+  const uid = process.geteuid?.();
+  if (!existing.isSocket() || (uid !== undefined && existing.uid !== uid)) {
+    throw new Error('Invalid existing Git worker socket path.');
+  }
+  await new Promise<void>((resolve, reject) => {
+    const socket = net.createConnection(socketPath);
+    socket.setTimeout(1000, () => socket.destroy(new Error('Timed out checking the existing Git worker socket.')));
+    socket.once('connect', () => {
+      socket.destroy();
+      reject(new Error('Another process is listening on FOCUSWIKI_GIT_SOCKET.'));
+    });
+    socket.once('error', (err: NodeJS.ErrnoException) => {
+      if (err.code === 'ECONNREFUSED') resolve();
+      else reject(err);
+    });
+  });
+  const current = fs.lstatSync(socketPath);
+  if (current.dev !== existing.dev || current.ino !== existing.ino) {
+    throw new Error('Git worker socket changed during startup.');
+  }
+  fs.unlinkSync(socketPath);
+}
+
 export async function startGitRunner(options: {
   enrollmentFile: string;
   reposDir: string;
@@ -66,6 +92,7 @@ export async function startGitRunner(options: {
   workerDirectory(stateDir, true);
   workerDirectory(reposDir);
   workerDirectory(socketDir);
+  await prepareWorkerSocket(socketPath);
   const enrolled = loadEnrollment(options.enrollmentFile);
   const stageRoot = path.join(reposDir, '.staging');
   if (!fs.existsSync(stageRoot)) fs.mkdirSync(stageRoot, { recursive: true, mode: 0o700 });
