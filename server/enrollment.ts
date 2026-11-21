@@ -18,11 +18,22 @@ export function validProjectId(value: unknown): value is string {
   return typeof value === 'string' && value === value.trim() && PROJECT_ID.test(value) && !value.endsWith('.');
 }
 
-export function validProjectFile(value: unknown): value is string {
+const CHECKOUT_FORBIDDEN_SEGMENT = /^(?:\.git|\.focuswiki|\.cairn|node_modules)$/i;
+const PROJECT_FORBIDDEN_SEGMENT = /^(?:\.git|\.focuswiki|\.cairn|node_modules|\.env(?:\..*)?)$/i;
+
+function hasSafeRelativeSegments(value: unknown, forbidden: RegExp): value is string {
   return typeof value === 'string' && value.length <= 1024 &&
     !/[\\\x00-\x1f\x7f]/.test(value) &&
-    value.split('/').every((part) => part && part !== '.' && part !== '..' &&
-      !/^(?:\.git|\.focuswiki|\.cairn|node_modules|\.env(?:\..*)?)$/i.test(part));
+    value.split('/').every((part) => part && part !== '.' && part !== '..' && !forbidden.test(part));
+}
+
+export function validProjectFile(value: unknown): value is string {
+  return hasSafeRelativeSegments(value, PROJECT_FORBIDDEN_SEGMENT);
+}
+
+/** Validates tracked files during initial checkout; .env* templates stay checked out but remain blocked from web/proposal APIs. */
+export function validCheckoutFile(value: unknown): value is string {
+  return hasSafeRelativeSegments(value, CHECKOUT_FORBIDDEN_SEGMENT);
 }
 
 function canonicalRemote(value: unknown): string | undefined {

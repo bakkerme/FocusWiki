@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { GitChangedFile, ProjectGitStatus } from '../shared/types.js';
-import { validProjectFile, type EnrolledProject } from './enrollment.js';
+import { validCheckoutFile, validProjectFile, type EnrolledProject } from './enrollment.js';
 import { GitRpcError, isGitSha, type ProposalContext, type ProposalService } from './gitProtocol.js';
 import { hasWorkingTree, unavailableGitStatus } from './projectRegistry.js';
 
@@ -260,7 +260,7 @@ export class ManagedRepository {
     const tree = await this.git(['ls-tree', '-r', '-z', head], signal);
     for (const entry of tree.split('\0').filter(Boolean)) {
       const tab = entry.indexOf('\t');
-      if (!/^100(?:644|755) blob /.test(entry) || tab < 0 || !validProjectFile(entry.slice(tab + 1))) {
+      if (!/^100(?:644|755) blob /.test(entry) || tab < 0 || !validCheckoutFile(entry.slice(tab + 1))) {
         throw new GitRpcError('git_not_ready');
       }
     }
