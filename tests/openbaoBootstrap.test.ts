@@ -22,7 +22,7 @@ function createSelfSignedCert(dir: string): { certPath: string; cert: Buffer; ke
     'req', '-x509', '-newkey', 'rsa:2048', '-nodes',
     '-keyout', keyPath, '-out', certPath,
     '-days', '1', '-subj', '/CN=127.0.0.1',
-    '-addext', 'subjectAltName=IP:127.0.0.1,DNS:localhost'
+    '-addext', 'subjectAltName=IP:127.0.0.1,DNS:localhost,DNS:openbao.invalid.ts.net'
   ], { stdio: 'ignore' });
   return {
     certPath,
@@ -78,7 +78,9 @@ describe('OpenBao AppRole bootstrap', () => {
     return `https://127.0.0.1:${port}`;
   }
 
-  async function startConnectProxy(): Promise<{ url: string; tunnels: string[] }> {
+  async function startConnectProxy(
+    resolveTarget?: (authority: string) => { host: string; port: number }
+  ): Promise<{ url: string; tunnels: string[] }> {
     const tunnels: string[] = [];
     const activeSockets = new Set<{ destroy(): unknown }>();
     proxyServer = http.createServer((_req, res) => {
@@ -86,11 +88,17 @@ describe('OpenBao AppRole bootstrap', () => {
       res.end();
     });
     proxyServer.on('connect', (req, clientSocket, head) => {
-      tunnels.push(req.url ?? '');
+      const authority = req.url ?? '';
+      tunnels.push(authority);
       activeSockets.add(clientSocket);
       clientSocket.once('close', () => activeSockets.delete(clientSocket));
-      const [host, portText] = (req.url ?? '').split(':');
-      const upstream = net.connect(Number(portText), host, () => {
+      const target = resolveTarget
+        ? resolveTarget(authority)
+        : (() => {
+            const [host, portText] = authority.split(':');
+            return { host, port: Number(portText) };
+          })();
+      const upstream = net.connect(target.port, target.host, () => {
         clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
         if (head.length > 0) upstream.write(head);
         upstream.pipe(clientSocket);
@@ -201,6 +209,64 @@ describe('OpenBao AppRole bootstrap', () => {
 
     expect(proxy.tunnels.length).toBeGreaterThanOrEqual(2);
     expect(fs.readFileSync(keyFile, 'utf8')).toBe(rsaPem);
+  });
+
+  it('tunnels unresolvable hostnames through FOCUSWIKI_OPENBAO_PROXY without local DNS lookup', async () => {
+    const seenHosts: Array<string | undefined> = [];
+    let revoked = false;
+    const addr = await startMockOpenBao((req, res) => {
+      seenHosts.push(req.headers.host);
+      if (req.method === 'POST' && req.url === '/v1/auth/approle/login') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ auth: { client_token: 'hvs.fictional-magicdns-token' } }));
+        return;
+      }
+      if (req.method === 'GET' && req.url === '/v1/secret/data/focuswiki/github-app') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ data: { data: { private_key: rsaPem } } }));
+        return;
+      }
+      if (req.method === 'POST' && req.url === '/v1/auth/token/revoke-self') {
+        revoked = true;
+        res.writeHead(204);
+        res.end();
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+    const mockPort = Number(new URL(addr).port);
+    const proxy = await startConnectProxy((authority) => {
+      if (authority !== 'openbao.invalid.ts.net:443') {
+        throw new Error(`Unexpected CONNECT target: ${authority}`);
+      }
+      return { host: '127.0.0.1', port: mockPort };
+    });
+
+    const keyFile = path.join(secretsDir, 'focuswiki-github-app.pem');
+    await bootstrapOpenBaoKey({
+      FOCUSWIKI_OPENBAO_ADDR: 'https://openbao.invalid.ts.net',
+      FOCUSWIKI_OPENBAO_ROLE_ID: 'fictional-role',
+      FOCUSWIKI_OPENBAO_SECRET_ID: 'fictional-secret',
+      FOCUSWIKI_OPENBAO_SECRET_PATH: 'secret/data/focuswiki/github-app',
+      FOCUSWIKI_OPENBAO_CA_FILE: tlsCert.certPath,
+      FOCUSWIKI_OPENBAO_PROXY: proxy.url,
+      FOCUSWIKI_GITHUB_APP_KEY_FILE: keyFile
+    });
+
+    expect(proxy.tunnels).toEqual([
+      'openbao.invalid.ts.net:443',
+      'openbao.invalid.ts.net:443',
+      'openbao.invalid.ts.net:443'
+    ]);
+    expect(seenHosts).toEqual([
+      'openbao.invalid.ts.net',
+      'openbao.invalid.ts.net',
+      'openbao.invalid.ts.net'
+    ]);
+    expect(revoked).toBe(true);
+    expect(fs.readFileSync(keyFile, 'utf8')).toBe(rsaPem);
+    expect(fs.statSync(keyFile).mode & 0o777).toBe(0o600);
   });
 
   it('retries transient 503 responses and fails fast on 403 or invalid key payloads', async () => {
