@@ -26,7 +26,7 @@ RUN npm ci --omit=dev --no-fund
 COPY --from=builder /app/dist ./dist
 COPY scripts/socket-health.mjs /usr/local/lib/focuswiki/socket-health.mjs
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
-RUN chmod 0755 /usr/local/bin/docker-entrypoint.sh
+RUN chmod 0755 /usr/local/bin/docker-entrypoint.sh && mkdir -p /run/secrets && chmod 0700 /run/secrets
 
 # Under rootless Docker, container uid 0 maps to the unprivileged daemon account.
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]

@@ -1,5 +1,7 @@
 # Private FocusWiki deployment
 
+> **Deploying on Portainer with OpenBao?** See [PORTAINER.md](PORTAINER.md) and [compose.portainer.yaml](../compose.portainer.yaml) for the named-volume + OpenBao AppRole + Tailscale Serve sidecar stack.
+
 Deploy an integrated release containing this access layer, the managed Git worker and routes, and the managed proposal service. The access branch builds independently against `main`. Its image has no worker executable, so the worker exits and Compose withholds web startup. The GitHub Actions pipeline withholds registry publication until the offline two-service smoke test and proposal-service checks pass. [Managed worker and routes, PR #11](https://github.com/bakkerme/FocusWiki/pull/11) · [Proposal service, PR #8](https://github.com/bakkerme/FocusWiki/pull/8)
 
 ## Host and trust boundary

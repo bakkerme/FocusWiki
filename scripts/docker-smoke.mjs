@@ -8,11 +8,14 @@ import { fileURLToPath } from 'node:url';
 
 const image = process.argv[2] ?? 'focuswiki:latest';
 const project = `focuswiki-smoke-${randomUUID()}`;
+const portainerProject = `focuswiki-portainer-${randomUUID()}`;
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'focuswiki-smoke-'));
 const origin = 'https://wiki.example.ts.net';
 const publisher = 'publisher@example.test';
 const composeFile = fileURLToPath(new URL('../compose.yaml', import.meta.url));
+const portainerComposeFile = fileURLToPath(new URL('../compose.portainer.yaml', import.meta.url));
 const override = path.join(root, 'smoke.yaml');
+const portainerOverride = path.join(root, 'portainer-smoke.yaml');
 const enrollment = path.join(root, 'enrollment.json');
 const editable = path.join(root, 'repos/fictional');
 const env = {
@@ -22,7 +25,12 @@ const env = {
   FOCUSWIKI_PUBLIC_ORIGIN: origin,
   FOCUSWIKI_PUBLISHERS: publisher,
   FOCUSWIKI_GITHUB_APP_ID: '1',
-  FOCUSWIKI_GITHUB_INSTALLATION_ID: '1'
+  FOCUSWIKI_GITHUB_INSTALLATION_ID: '1',
+  FOCUSWIKI_ENROLLMENT_HOST_PATH: enrollment,
+  FOCUSWIKI_OPENBAO_ADDR: 'https://mock-openbao:8200',
+  FOCUSWIKI_OPENBAO_ROLE_ID: 'fictional-smoke-role',
+  FOCUSWIKI_OPENBAO_SECRET_ID: 'fictional-smoke-secret',
+  FOCUSWIKI_OPENBAO_SECRET_PATH: 'secret/data/focuswiki/github-app'
 };
 
 function docker(...args) {
@@ -31,6 +39,10 @@ function docker(...args) {
 
 function compose(...args) {
   return docker('compose', '-p', project, '-f', composeFile, '-f', override, ...args);
+}
+
+function portainerCompose(...args) {
+  return docker('compose', '-p', portainerProject, '-f', portainerComposeFile, '-f', portainerOverride, ...args);
 }
 
 function inspect(service) {
@@ -206,6 +218,166 @@ try {
         typeof service?.getRepoToken === 'function'));
     `) === 'true';
     if (!releaseReady) console.log('Publication is pending the managed proposal service.');
+
+    // Validate the Portainer + OpenBao AppRole + sidecar stack end-to-end offline.
+    compose('down', '--remove-orphans');
+    docker('compose', '-f', portainerComposeFile, 'config', '--quiet');
+    const mockDir = path.join(root, 'mock-openbao');
+    fs.mkdirSync(mockDir, { mode: 0o755 });
+    const mockKeyPath = path.join(mockDir, 'server.key');
+    const mockCertPath = path.join(mockDir, 'server.crt');
+    execFileSync('openssl', [
+      'req', '-x509', '-newkey', 'rsa:2048', '-nodes',
+      '-keyout', mockKeyPath, '-out', mockCertPath,
+      '-days', '1', '-subj', '/CN=mock-openbao',
+      '-addext', 'subjectAltName=DNS:mock-openbao'
+    ], { stdio: 'ignore' });
+    fs.chmodSync(mockCertPath, 0o644);
+    fs.chmodSync(mockKeyPath, 0o644);
+    const portainerPem = privateKey.export({ type: 'pkcs8', format: 'pem' }).toString();
+    fs.writeFileSync(path.join(mockDir, 'server.mjs'), `
+      import fs from 'node:fs';
+      import https from 'node:https';
+      const pem = ${JSON.stringify(portainerPem)};
+      const server = https.createServer({
+        cert: fs.readFileSync('/mock/server.crt'),
+        key: fs.readFileSync('/mock/server.key')
+      }, (req, res) => {
+        let body = '';
+        req.on('data', (chunk) => { body += chunk; });
+        req.on('end', () => {
+          if (req.method === 'GET' && req.url === '/healthz') {
+            res.writeHead(200); res.end('ok'); return;
+          }
+          if (req.method === 'POST' && req.url === '/v1/auth/approle/login') {
+            const parsed = JSON.parse(body || '{}');
+            if (parsed.role_id === 'fictional-smoke-role' && parsed.secret_id === 'fictional-smoke-secret') {
+              res.writeHead(200, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ auth: { client_token: 'hvs.smoke-token' } }));
+              return;
+            }
+            res.writeHead(403); res.end('{}'); return;
+          }
+          if (req.method === 'GET' && req.url === '/v1/secret/data/focuswiki/github-app') {
+            if (req.headers['x-vault-token'] === 'hvs.smoke-token') {
+              res.writeHead(200, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ data: { data: { private_key: pem } } }));
+              return;
+            }
+            res.writeHead(403); res.end('{}'); return;
+          }
+          if (req.method === 'POST' && req.url === '/v1/auth/token/revoke-self') {
+            if (req.headers['x-vault-token'] === 'hvs.smoke-token') {
+              fs.writeFileSync('/tmp/revoked', 'yes');
+            }
+            res.writeHead(204); res.end(); return;
+          }
+          res.writeHead(404); res.end();
+        });
+      });
+      server.listen(8200, '0.0.0.0');
+    `, { mode: 0o644 });
+    asFixtureOwner('chmod 0644 /fixture/enrollment.json');
+    fs.writeFileSync(portainerOverride, `
+networks:
+  default:
+    internal: true
+services:
+  mock-openbao:
+    image: "${image}"
+    entrypoint: [node, /mock/server.mjs]
+    user: '0:0'
+    read_only: true
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    volumes:
+      - type: bind
+        source: "${mockDir}"
+        target: /mock
+        read_only: true
+    tmpfs:
+      - /tmp:mode=0700,nosuid,nodev,noexec,size=4m
+    healthcheck:
+      test: [CMD, node, -e, "import('node:net').then(({ createConnection }) => { const s = createConnection(8200, '127.0.0.1'); s.on('connect', () => { s.destroy(); process.exit(0); }); s.on('error', () => process.exit(1)); })"]
+      interval: 2s
+      timeout: 2s
+      retries: 10
+  git-worker:
+    depends_on:
+      init:
+        condition: service_completed_successfully
+      mock-openbao:
+        condition: service_healthy
+    environment:
+      FOCUSWIKI_OPENBAO_CA_FILE: /etc/focuswiki/openbao-ca.crt
+    volumes:
+      - type: bind
+        source: "${mockCertPath}"
+        target: /etc/focuswiki/openbao-ca.crt
+        read_only: true
+  tailscale:
+    image: "${image}"
+    entrypoint: [node, -e, "setInterval(() => {}, 60000)"]
+    command: []
+`);
+    portainerCompose('up', '-d', '--no-build', '--pull', 'never', '--wait', '--wait-timeout', '60');
+
+    // Verify OpenBao PEM was fetched into tmpfs, token revoked, and OpenBao env vars scrubbed from gitRunner.
+    portainerCompose('exec', '-T', 'git-worker', 'node', '--input-type=module', '-e', `
+      import assert from 'node:assert/strict';
+      import fs from 'node:fs';
+      const stat = fs.lstatSync('/run/secrets/focuswiki-github-app.pem');
+      assert.equal(stat.isFile(), true);
+      assert.equal(stat.mode & 0o777, 0o600);
+      assert.equal(fs.readFileSync('/run/secrets/focuswiki-github-app.pem', 'utf8'), ${JSON.stringify(portainerPem)});
+      const pids = fs.readdirSync('/proc').filter((entry) => /^\\d+$/.test(entry) && Number(entry) !== process.pid);
+      const runnerPid = pids.find((pid) => {
+        try { return fs.readFileSync('/proc/' + pid + '/cmdline', 'utf8').includes('dist/server/server/gitRunner.js'); } catch { return false; }
+      });
+      assert.ok(runnerPid, 'gitRunner.js process must be running');
+      const runnerEnv = fs.readFileSync('/proc/' + runnerPid + '/environ', 'utf8').split('\\0');
+      assert.deepEqual(runnerEnv.filter((entry) => entry.startsWith('FOCUSWIKI_OPENBAO_')), []);
+    `);
+    portainerCompose('exec', '-T', 'mock-openbao', 'node', '--input-type=module', '-e', `
+      import assert from 'node:assert/strict';
+      import fs from 'node:fs';
+      assert.equal(fs.readFileSync('/tmp/revoked', 'utf8'), 'yes');
+    `);
+
+    // Verify web has zero OpenBao/GitHub env vars and runs with network_mode: none.
+    const portainerWeb = JSON.parse(docker('inspect', portainerCompose('ps', '-q', 'web')))[0];
+    assert.equal(portainerWeb.HostConfig.NetworkMode, 'none');
+    assert.equal(portainerWeb.HostConfig.ReadonlyRootfs, true);
+    assert.deepEqual(portainerWeb.Config.Env.filter((value) => /^FOCUSWIKI_(OPENBAO|GITHUB_APP|GITHUB_INSTALLATION|GIT_STATE)/.test(value)), []);
+
+    // Verify unprivileged 0:0 cap_drop:ALL tailscale sidecar can read serve.json and proxy over serve-socket:ro.
+    portainerCompose('exec', '-T', 'tailscale', 'node', '--input-type=module', '-e', `
+      import assert from 'node:assert/strict';
+      import fs from 'node:fs';
+      import http from 'node:http';
+      const serveConfig = JSON.parse(fs.readFileSync('/etc/tailscale-serve/serve.json', 'utf8'));
+      assert.equal(serveConfig.Web['\${TS_CERT_DOMAIN}:443'].Handlers['/'].Proxy, 'unix:/run/focuswiki-serve/http.sock');
+      assert.throws(() => fs.unlinkSync('/run/focuswiki-serve/http.sock'));
+      const check = (headers) => new Promise((resolve, reject) => {
+        const req = http.request({ socketPath: '/run/focuswiki-serve/http.sock', path: '/healthz', headers }, (res) => {
+          let body = '';
+          res.setEncoding('utf8');
+          res.on('data', (chunk) => { body += chunk; });
+          res.on('end', () => resolve({ status: res.statusCode, body }));
+        });
+        req.on('error', reject);
+        req.end();
+      });
+      const unauth = await check({ Host: 'localhost', 'X-Forwarded-Host': 'wiki.example.ts.net', 'X-Forwarded-Proto': 'https' });
+      assert.equal(unauth.status, 401);
+      const ok = await check({
+        Host: 'localhost', 'X-Forwarded-Host': 'wiki.example.ts.net', 'X-Forwarded-Proto': 'https',
+        'Tailscale-User-Login': ${JSON.stringify(publisher)}
+      });
+      assert.equal(ok.status, 200);
+      assert.equal(ok.body, '{"ok":true}');
+    `);
+    console.log('PASS: Portainer stack initializes volumes, fetches PEM from OpenBao into tmpfs, scrubs env, and serves sidecar over Unix socket');
   } else {
     const missing = spawnSync('docker', ['run', '--rm', '--network', 'none', image, 'git-worker'], {
       env, encoding: 'utf8', timeout: 30_000
@@ -216,9 +388,16 @@ try {
   }
 } catch (error) {
   try { console.error(compose('logs', '--no-color')); } catch { /* Compose may not have started. */ }
+  try { if (fs.existsSync(portainerOverride)) console.error(portainerCompose('logs', '--no-color')); } catch { /* Portainer stack may not have started. */ }
   console.error(error.stderr?.toString() || error.message);
   process.exitCode = 1;
 } finally {
+  if (fs.existsSync(portainerOverride)) {
+    try { portainerCompose('down', '-v', '--remove-orphans'); } catch (error) {
+      console.error(error.stderr?.toString() || error.message);
+      process.exitCode = 1;
+    }
+  }
   if (fs.existsSync(override)) {
     try { compose('down', '--remove-orphans'); } catch (error) {
       console.error(error.stderr?.toString() || error.message);

@@ -26,17 +26,22 @@ function requiredEnv(name: string): string {
   return value;
 }
 
-async function prepareServeSocket(socketPath: string): Promise<void> {
+async function prepareServeSocket(socketPath: string): Promise<number> {
   if (!path.isAbsolute(socketPath) || path.normalize(socketPath) !== socketPath || Buffer.byteLength(socketPath) > 107) {
     throw new Error('FOCUSWIKI_HTTP_SOCKET must be a short, absolute Unix socket path.');
   }
   const uid = process.geteuid?.();
-  const dir = fs.lstatSync(path.dirname(socketPath));
-  if (!dir.isDirectory() || dir.uid !== uid || (dir.mode & 0o777) !== 0o700) {
-    throw new Error('FOCUSWIKI_HTTP_SOCKET requires a private 0700 directory owned by the web process.');
+  const gid = process.getegid?.();
+  const dirPath = path.dirname(socketPath);
+  const dir = fs.lstatSync(dirPath);
+  const dirMode = dir.mode & 0o7777;
+  const allowedMode = dirMode === 0o700 || (dirMode === 0o750 && dir.gid === gid);
+  if (!dir.isDirectory() || fs.realpathSync(dirPath) !== dirPath || dir.uid !== uid || !allowedMode) {
+    throw new Error('FOCUSWIKI_HTTP_SOCKET requires a private 0700 or 0750 directory owned by the web process.');
   }
+  const socketMode = dirMode === 0o750 ? 0o660 : 0o600;
   const existing = fs.lstatSync(socketPath, { throwIfNoEntry: false });
-  if (!existing) return;
+  if (!existing) return socketMode;
   if (!existing.isSocket() || existing.uid !== uid) throw new Error('Invalid existing Serve socket path.');
 
   // Compose runs a single web instance. Recover its stale socket after an unclean stop.
@@ -55,6 +60,7 @@ async function prepareServeSocket(socketPath: string): Promise<void> {
   const current = fs.lstatSync(socketPath);
   if (current.dev !== existing.dev || current.ino !== existing.ino) throw new Error('Serve socket changed during startup.');
   fs.unlinkSync(socketPath);
+  return socketMode;
 }
 
 async function main(): Promise<void> {
@@ -67,7 +73,7 @@ async function main(): Promise<void> {
     throw new Error('Invalid loopback development port.');
   }
   const socketPath = localDev ? undefined : requiredEnv('FOCUSWIKI_HTTP_SOCKET');
-  if (socketPath) await prepareServeSocket(socketPath);
+  const socketMode = socketPath ? await prepareServeSocket(socketPath) : undefined;
   const trustedConnections = new WeakSet<Socket>();
 
   const clientDistDir = process.env.CLIENT_DIST_DIR
@@ -109,6 +115,14 @@ async function main(): Promise<void> {
     server.once('error', reject);
     const onListen = () => {
       server.off('error', reject);
+      if (socketPath && socketMode !== undefined) {
+        try {
+          fs.chmodSync(socketPath, socketMode);
+        } catch (err) {
+          server.close(() => reject(err));
+          return;
+        }
+      }
       console.log(`[focuswiki] Listening on ${socketPath ?? `http://127.0.0.1:${port} (local development)`}`);
       resolve();
     };
