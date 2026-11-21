@@ -17,7 +17,7 @@ Production HTTP checks the designated connection, one verified Tailscale user lo
 1. Use the existing rootless Docker account and the intended Docker context. Verify `docker info --format '{{json .SecurityOptions}}'` includes `name=rootless`. Pin the integrated image by digest and pull it through the deployment account. Use the following values as examples and supply the actual host, enrollment and App IDs.
 
    ```bash
-   export FOCUSWIKI_IMAGE='gcr.io/PROJECT_ID/focuswiki@sha256:RELEASE_DIGEST'
+   export FOCUSWIKI_IMAGE='ghcr.io/bakkerme/focuswiki@sha256:RELEASE_DIGEST'
    export FOCUSWIKI_DEPLOY_DIR="$HOME/.local/share/focuswiki-production"
    export FOCUSWIKI_PUBLIC_ORIGIN='https://wiki.example.ts.net'
    export FOCUSWIKI_PUBLISHERS='publisher@example.test'
@@ -91,7 +91,7 @@ Disable the FocusWiki Serve mapping with `sudo tailscale serve --https=443 off` 
 
 - Install the GitHub App only on the enrolled repositories. Use repository permissions for metadata read, contents read/write and pull requests read/write. Keep the PEM worker-only and rotate it if its boundary changes. The installation should have no ruleset bypass.
 - Protect each enrolled base branch with required pull requests, human review and appropriate status checks. Disallow direct pushes by the App, force pushes and branch deletion. Permit the App to create proposal branches under `focuswiki/`, and verify that the resulting PR cannot merge without the same review gates. Apply the rule to administrators where supported and keep bypass lists limited.
-- Restrict the application repository's `registry-publish` GitHub environment to `main`, with approvals as required by the owner. Keep release/deploy secrets and any production environment similarly gated. See the [registry setup](DOCKER-CICD.md) for workload identity restrictions.
+- Restrict the application repository's `registry-publish` GitHub environment to `main`, with approvals as required by the owner. Keep release/deploy secrets and any production environment similarly gated. See the [registry setup](DOCKER-CICD.md) for GHCR publishing and environment restrictions.
 - Review the enrolled repositories' GitHub Actions and external automation before enabling publication. Disable expensive AI work on pushes to `focuswiki/**` and on documentation-only pushes. If an AI job is needed, use an explicit approved trigger. FocusWiki's application repository has Docker CI and no AI workflow to change. Verify branch protection checks still report for documentation PRs after trigger changes.
 
 ## Request path

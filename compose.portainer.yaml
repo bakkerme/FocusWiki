@@ -1,8 +1,8 @@
 # Portainer-ready deployment stack for FocusWiki with OpenBao AppRole and a dedicated Tailscale Serve sidecar.
-# See docs/PORTAINER.md for OpenBao policy setup, GCR pull auth, enrollment.json setup, and verification steps.
+# See docs/PORTAINER.md for OpenBao policy setup, GHCR pull auth, enrollment.json setup, and verification steps.
 
 x-app-runtime: &app-runtime
-  image: "${FOCUSWIKI_IMAGE:?Set the pinned FocusWiki image (for example gcr.io/PROJECT/focuswiki@sha256:...)}"
+  image: "${FOCUSWIKI_IMAGE:?Set the pinned FocusWiki image (for example ghcr.io/bakkerme/focuswiki@sha256:...)}"
   restart: unless-stopped
   init: true
   read_only: true
@@ -19,7 +19,7 @@ x-socket-health: &socket-health
 
 services:
   init:
-    image: "${FOCUSWIKI_IMAGE:?Set the pinned FocusWiki image (for example gcr.io/PROJECT/focuswiki@sha256:...)}"
+    image: "${FOCUSWIKI_IMAGE:?Set the pinned FocusWiki image (for example ghcr.io/bakkerme/focuswiki@sha256:...)}"
     command: [init-volumes]
     restart: "no"
     init: true
