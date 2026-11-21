@@ -66,6 +66,7 @@ services:
       # Optional: if Docker bridge containers on this NAS cannot route directly to Tailscale,
       # set FOCUSWIKI_TS_OUTBOUND_HTTP_PROXY_LISTEN=:1055 and FOCUSWIKI_OPENBAO_PROXY=http://tailscale:1055.
       FOCUSWIKI_OPENBAO_PROXY: "${FOCUSWIKI_OPENBAO_PROXY:-}"
+      FOCUSWIKI_LOG_LEVEL: "${FOCUSWIKI_LOG_LEVEL:-info}"
     volumes:
       - repos:/app/repos
       - git-state:/var/lib/focuswiki-git
@@ -103,6 +104,7 @@ services:
       FOCUSWIKI_GIT_SOCKET: /run/focuswiki/git.sock
       FOCUSWIKI_ENROLLMENT_FILE: /etc/focuswiki/enrollment.json
       FOCUSWIKI_REPOS_DIR: /app/repos
+      FOCUSWIKI_LOG_LEVEL: "${FOCUSWIKI_LOG_LEVEL:-info}"
     volumes:
       - repos:/app/repos
       - git-socket:/run/focuswiki:ro

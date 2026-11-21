@@ -1,7 +1,10 @@
 import { isIP } from 'node:net';
 import type { Socket } from 'node:net';
 import { Router, type Request, type RequestHandler } from 'express';
+import { createLogger } from './logger.js';
 import { proposalAuth, recordServeIdentity } from './proposalAuth.js';
+
+const log = createLogger('focuswiki');
 
 const HOST_SYNTAX = /^(?:[a-zA-Z0-9.-]+|\[[0-9a-fA-F:]+\])(?::\d{1,5})?$/;
 const LAN_SUFFIXES = ['.local', '.lan', '.internal', '.home.arpa', '.ts.net'];
@@ -59,17 +62,30 @@ function createServeAccess(options: ServeAccessOptions): RequestHandler {
   return (req, res, next) => {
     res.setHeader('Cache-Control', 'no-store');
     if (!options.trustedConnections.has(req.socket)) {
+      log.warn('Blocked HTTP request', { error: 'untrusted_proxy', method: req.method, path: req.path });
       res.status(403).json({ error: 'untrusted_proxy' });
       return;
     }
     const login = singleHeader(req, 'tailscale-user-login');
     if (!login || !validLogin(login) || req.headersDistinct['tailscale-funnel-request']) {
+      log.warn('Blocked HTTP request', {
+        error: 'identity_required',
+        method: req.method,
+        path: req.path,
+        funnel: Boolean(req.headersDistinct['tailscale-funnel-request'])
+      });
       res.status(401).json({ error: 'identity_required' });
       return;
     }
     // Serve may set the backend Host to localhost for Unix socket targets.
     const forwardedHost = singleHeader(req, 'x-forwarded-host');
     if (validateHost(forwardedHost) !== browser.host || singleHeader(req, 'x-forwarded-proto') !== 'https') {
+      log.warn('Blocked HTTP request', {
+        error: 'origin_blocked',
+        method: req.method,
+        path: req.path,
+        expectedHost: browser.host
+      });
       res.status(403).json({ error: 'origin_blocked' });
       return;
     }
@@ -77,6 +93,7 @@ function createServeAccess(options: ServeAccessOptions): RequestHandler {
       const fetchSite = req.headersDistinct['sec-fetch-site'];
       if (singleHeader(req, 'origin') !== browser.origin ||
           (fetchSite && (fetchSite.length !== 1 || fetchSite[0] !== 'same-origin'))) {
+        log.warn('Blocked HTTP request', { error: 'csrf_blocked', method: req.method, path: req.path });
         res.status(403).json({ error: 'csrf_blocked' });
         return;
       }

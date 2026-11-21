@@ -40,6 +40,9 @@ import { ProjectWatcherHub, type WatcherHubOptions } from './watcher.js';
 import { BROWSE_LIMITS, SEARCH_LIMITS, ScanBudget, listConflictCopies, scanRepository, searchRepositories } from './repositoryScan.js';
 import { withKeyLock, writeFileAtomicSync } from './fileLock.js';
 import { createHttpSecurity, createExpensiveRequestLimiter, validateHost, type RateLimitOptions, type ServeAccessOptions } from './httpSecurity.js';
+import { createLogger } from './logger.js';
+
+const log = createLogger('focuswiki');
 
 export function computeRevision(content: string): string {
   return crypto.createHash('sha256').update(content, 'utf8').digest('hex').slice(0, 16);
@@ -216,6 +219,8 @@ export function createHubApp(options: HubAppOptions): HubAppInstance {
     res.json(info);
   });
 
+  let lastGitStatusError: string | undefined;
+
   app.get('/api/projects', boundedBrowse(async (req, res, signal) => {
     const offset = Number(req.query.offset ?? 0);
     if (!Number.isSafeInteger(offset) || offset < 0) {
@@ -226,7 +231,22 @@ export function createHubApp(options: HubAppOptions): HubAppInstance {
     const page = projects.slice(offset, offset + 24);
     const budget = new ScanBudget(BROWSE_LIMITS, signal);
     const gitSignal = AbortSignal.any([signal, AbortSignal.timeout(2_500)]);
-    const statuses = page.some(project => registry.managed(project.id)) ? await gitClient.statuses(gitSignal).catch(() => ({})) : {};
+    let statuses: GitStatuses = {};
+    if (page.some(project => registry.managed(project.id))) {
+      try {
+        statuses = await gitClient.statuses(gitSignal);
+        if (lastGitStatusError) {
+          log.info('Restored Git worker socket connectivity');
+          lastGitStatusError = undefined;
+        }
+      } catch (err) {
+        const code = err instanceof GitRpcError ? err.code : 'git_unavailable';
+        if (lastGitStatusError !== code) {
+          lastGitStatusError = code;
+          log.warn('Failed to query Git worker statuses', { code });
+        }
+      }
+    }
     const summaries: ProjectSummary[] = [];
     for (const project of page) {
       signal.throwIfAborted();
@@ -747,7 +767,7 @@ export function createHubApp(options: HubAppOptions): HubAppInstance {
   }
 
   // Central error handler
-  app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
+  app.use((err: unknown, req: Request, res: Response, _next: NextFunction) => {
     if (err instanceof PathBoundaryError) {
       res.status(err.statusCode).json({
         error: 'path_boundary_violation',
@@ -756,6 +776,12 @@ export function createHubApp(options: HubAppOptions): HubAppInstance {
       return;
     }
     if (err instanceof GitRpcError) {
+      log.warn('Managed Git request failed', {
+        method: req.method,
+        path: req.path,
+        status: err.status,
+        code: err.code
+      });
       res.status(err.status).json({ error: err.code, message: err.message });
       return;
     }
