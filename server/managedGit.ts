@@ -334,14 +334,71 @@ export class ManagedRepository {
     ], signal, token);
   }
 
-  private async validateTree(head: string, signal: AbortSignal): Promise<void> {
+  private async validateTree(head: string, signal: AbortSignal): Promise<string[]> {
     const tree = await this.git(['ls-tree', '-r', '-z', head], signal);
+    const paths: string[] = [];
     for (const entry of tree.split('\0').filter(Boolean)) {
       const tab = entry.indexOf('\t');
       const entryPath = tab >= 0 ? entry.slice(tab + 1) : '';
       if (!/^100(?:644|755) blob /.test(entry) || tab < 0 || !validCheckoutFile(entryPath)) {
         const mode = entry.split(' ', 2)[0] || 'unknown';
         throw new GitRpcError('git_not_ready', `Rejected tree entry (mode=${mode}, path=${entryPath || '<invalid>'})`);
+      }
+      paths.push(entryPath);
+    }
+    return paths;
+  }
+
+  private async assertNoIgnoredCollision(
+    localHead: string,
+    remoteHead: string,
+    remotePaths: string[],
+    signal: AbortSignal
+  ): Promise<void> {
+    const remoteFileSet = new Set(remotePaths);
+    const remoteDirSet = new Set<string>();
+    for (const rel of remotePaths) {
+      let slash = rel.indexOf('/');
+      while (slash !== -1) {
+        remoteDirSet.add(rel.slice(0, slash));
+        slash = rel.indexOf('/', slash + 1);
+      }
+    }
+
+    const ignoredRaw = await this.git(['ls-files', '--others', '--ignored', '--exclude-standard', '-z'], signal);
+    for (const ignoredPath of ignoredRaw.split('\0').filter(Boolean)) {
+      if (remoteFileSet.has(ignoredPath)) {
+        throw new GitRpcError('git_dirty_worktree', `Upstream update would overwrite ignored path "${ignoredPath}".`);
+      }
+      if (remoteDirSet.has(ignoredPath)) {
+        throw new GitRpcError('git_dirty_worktree', `Upstream update conflicts with ignored file "${ignoredPath}".`);
+      }
+      let slash = ignoredPath.indexOf('/');
+      while (slash !== -1) {
+        const prefix = ignoredPath.slice(0, slash);
+        if (remoteFileSet.has(prefix)) {
+          throw new GitRpcError('git_dirty_worktree', `Upstream update would replace ignored directory "${prefix}".`);
+        }
+        slash = ignoredPath.indexOf('/', slash + 1);
+      }
+    }
+
+    // Also guard against empty ignored directories or other colliding entries at newly added paths.
+    const addedRaw = await this.git([
+      'diff-tree', '-r', '-z', '--name-only', '--no-renames', '--diff-filter=A', localHead, remoteHead
+    ], signal);
+    for (const addedPath of addedRaw.split('\0').filter(Boolean)) {
+      if (exists(path.join(this.context.workTree, addedPath))) {
+        throw new GitRpcError('git_dirty_worktree', `Upstream path "${addedPath}" collides with an existing local entry.`);
+      }
+      let slash = addedPath.indexOf('/');
+      while (slash !== -1) {
+        const prefix = addedPath.slice(0, slash);
+        const stat = fs.lstatSync(path.join(this.context.workTree, prefix), { throwIfNoEntry: false });
+        if (stat && !stat.isDirectory()) {
+          throw new GitRpcError('git_dirty_worktree', `Upstream path "${addedPath}" collides with local file "${prefix}".`);
+        }
+        slash = addedPath.indexOf('/', slash + 1);
       }
     }
   }
@@ -374,7 +431,8 @@ export class ManagedRepository {
       throw new GitRpcError('git_not_fast_forward', `Local ${localHead.slice(0, 12)} is not an ancestor of remote ${remoteHead.slice(0, 12)}.`);
     }
 
-    await this.validateTree(remoteHead, signal);
+    const remotePaths = await this.validateTree(remoteHead, signal);
+    await this.assertNoIgnoredCollision(localHead, remoteHead, remotePaths, signal);
     signal.throwIfAborted();
     try {
       await this.git(['read-tree', '-m', '-u', localHead, remoteHead], signal);

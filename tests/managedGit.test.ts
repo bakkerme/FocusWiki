@@ -515,6 +515,68 @@ describe('managed Git service', () => {
     expect(divergedRes.body.error).toBe('git_not_fast_forward');
     expect(fs.readFileSync(path.join(workTree, 'README.md'), 'utf8')).toBe('# Amber Observatory v3\n');
   });
+
+  it('refuses fast-forward when upstream paths collide with ignored local files or directories', async () => {
+    upstream();
+    fs.writeFileSync(path.join(fixture.source, '.gitignore'), '.env\ndrafts/\nnotes\n');
+    git(fixture.source, ['add', '.gitignore']);
+    git(fixture.source, ['commit', '-m', 'Add .gitignore']);
+    const base = git(fixture.source, ['rev-parse', 'HEAD']);
+
+    const service = companion(base);
+    const client = await start(service);
+    await vi.waitFor(async () => {
+      expect((await client.statuses()).amber).toMatchObject({ state: 'ready', headSha: base, isClean: true });
+    }, { timeout: 10_000 });
+
+    // Create ignored local files and directories that git status omits.
+    fs.writeFileSync(path.join(workTree, '.env'), 'LOCAL_SECRET=keep\n');
+    fs.mkdirSync(path.join(workTree, 'drafts'));
+    fs.writeFileSync(path.join(workTree, 'drafts', 'wip.md'), '# Keep local ignored draft\n');
+    fs.writeFileSync(path.join(workTree, 'notes'), 'local ignored file\n');
+
+    hub = app('allow');
+
+    // 1. Exact file collision: upstream force-adds tracked .env.
+    fs.writeFileSync(path.join(fixture.source, '.env'), 'UPSTREAM=overwrite\n');
+    git(fixture.source, ['add', '-f', '.env']);
+    git(fixture.source, ['commit', '-m', 'Track .env upstream']);
+    const envCollision = await request(hub.app).post('/api/projects/amber/git/update').expect(409);
+    expect(envCollision.body.error).toBe('git_dirty_worktree');
+    expect(fs.readFileSync(path.join(workTree, '.env'), 'utf8')).toBe('LOCAL_SECRET=keep\n');
+
+    // Remove .env collision from upstream, test file-replacing-ignored-directory collision.
+    git(fixture.source, ['reset', '--hard', base]);
+    fs.writeFileSync(path.join(fixture.source, 'drafts'), 'upstream file replacing dir\n');
+    git(fixture.source, ['add', '-f', 'drafts']);
+    git(fixture.source, ['commit', '-m', 'Add drafts file upstream']);
+    const dirCollision = await request(hub.app).post('/api/projects/amber/git/update').expect(409);
+    expect(dirCollision.body.error).toBe('git_dirty_worktree');
+    expect(fs.readFileSync(path.join(workTree, 'drafts', 'wip.md'), 'utf8')).toBe('# Keep local ignored draft\n');
+
+    // Remove drafts collision from upstream, test directory-replacing-ignored-file collision.
+    git(fixture.source, ['reset', '--hard', base]);
+    fs.mkdirSync(path.join(fixture.source, 'notes'));
+    fs.writeFileSync(path.join(fixture.source, 'notes', 'page.md'), '# Upstream nested page\n');
+    git(fixture.source, ['add', '-f', 'notes/page.md']);
+    git(fixture.source, ['commit', '-m', 'Add notes/page.md upstream']);
+    const fileCollision = await request(hub.app).post('/api/projects/amber/git/update').expect(409);
+    expect(fileCollision.body.error).toBe('git_dirty_worktree');
+    expect(fs.readFileSync(path.join(workTree, 'notes'), 'utf8')).toBe('local ignored file\n');
+
+    // Non-colliding upstream update still succeeds while preserving all ignored files.
+    git(fixture.source, ['reset', '--hard', base]);
+    fs.writeFileSync(path.join(fixture.source, 'README.md'), '# Safe upstream update\n');
+    git(fixture.source, ['add', 'README.md']);
+    git(fixture.source, ['commit', '-m', 'Safe non-colliding change']);
+    const safeHead = git(fixture.source, ['rev-parse', 'HEAD']);
+    const okRes = await request(hub.app).post('/api/projects/amber/git/update').expect(200);
+    expect(okRes.body).toMatchObject({ updated: true, headSha: safeHead });
+    expect(fs.readFileSync(path.join(workTree, 'README.md'), 'utf8')).toBe('# Safe upstream update\n');
+    expect(fs.readFileSync(path.join(workTree, '.env'), 'utf8')).toBe('LOCAL_SECRET=keep\n');
+    expect(fs.readFileSync(path.join(workTree, 'drafts', 'wip.md'), 'utf8')).toBe('# Keep local ignored draft\n');
+    expect(fs.readFileSync(path.join(workTree, 'notes'), 'utf8')).toBe('local ignored file\n');
+  });
 });
 
 it('bounds the queue, withdraws canceled work, and serializes jobs on the same checkout', async () => {
