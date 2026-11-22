@@ -665,6 +665,19 @@ export function createHubApp(options: HubAppOptions): HubAppInstance {
     }
   });
 
+  app.post('/api/projects/:projectId/git/update', requireManagedProject, proposalAuth, requireProposalActor, async (req, res, next) => {
+    try {
+      const project = registry.managed(req.params.projectId)!;
+      const result = await untilDisconnect(res, (signal) => gitClient.update(project, res.locals.proposalActor, signal));
+      if (!res.destroyed) {
+        res.setHeader('Cache-Control', 'no-store');
+        res.json(result);
+      }
+    } catch (err) {
+      if (!res.destroyed) next(err);
+    }
+  });
+
   app.post('/api/projects/:projectId/git/propose', requireManagedProject, proposalAuth, requireProposalActor, async (req, res, next) => {
     try {
       const project = registry.managed(req.params.projectId)!;

@@ -435,6 +435,148 @@ describe('managed Git service', () => {
     await request(hub.app).get('/api/projects/lan-docs/git/diff').expect(404);
     await request(hub.app).post('/api/projects/lan-docs/git/propose').send(proposalInput).expect(404);
   });
+
+  it('auto fast-forwards clean checkouts, preserves .focuswiki metadata, and supports on-demand update with conflict guards', async () => {
+    const base = upstream();
+    const service = companion(base);
+    const client = await start(service);
+    await vi.waitFor(async () => {
+      expect((await client.statuses()).amber).toMatchObject({
+        state: 'ready', headSha: base, isClean: true, behind: 0
+      });
+    }, { timeout: 10_000 });
+
+    // Local metadata under .focuswiki must survive fast-forward updates.
+    fs.mkdirSync(path.join(workTree, '.focuswiki'));
+    fs.writeFileSync(path.join(workTree, '.focuswiki', 'recovery.md'), '# Keep recovery\n');
+
+    // Advance upstream with modified and added files; background fetch auto fast-forwards clean tree.
+    fs.writeFileSync(path.join(fixture.source, 'README.md'), '# Amber Observatory v2\n');
+    fs.writeFileSync(path.join(fixture.source, 'guide.md'), '# New Guide\n');
+    git(fixture.source, ['add', 'README.md', 'guide.md']);
+    git(fixture.source, ['commit', '-m', 'Advance upstream while clean']);
+    const second = git(fixture.source, ['rev-parse', 'HEAD']);
+
+    const startNow = Date.now();
+    vi.spyOn(Date, 'now').mockImplementation(() => startNow + 65_000);
+    await vi.waitFor(async () => {
+      expect((await client.statuses()).amber).toMatchObject({
+        state: 'ready', headSha: second, isClean: true, behind: 0
+      });
+    }, { timeout: 10_000 });
+    expect(fs.readFileSync(path.join(workTree, 'README.md'), 'utf8')).toBe('# Amber Observatory v2\n');
+    expect(fs.readFileSync(path.join(workTree, 'guide.md'), 'utf8')).toBe('# New Guide\n');
+    expect(fs.readFileSync(path.join(workTree, '.focuswiki', 'recovery.md'), 'utf8')).toBe('# Keep recovery\n');
+
+    hub = app('allow');
+    // On-demand update when already up to date returns updated: false.
+    const noop = await request(hub.app).post('/api/projects/amber/git/update').expect(200);
+    expect(noop.body).toMatchObject({ updated: false, previousSha: second, headSha: second });
+
+    // Advance upstream again (including a file deletion) while dirty -> 409 git_dirty_worktree.
+    fs.writeFileSync(path.join(workTree, 'README.md'), '# Local unsaved edit\n');
+    fs.unlinkSync(path.join(fixture.source, 'guide.md'));
+    fs.writeFileSync(path.join(fixture.source, 'README.md'), '# Amber Observatory v3\n');
+    git(fixture.source, ['add', '-A']);
+    git(fixture.source, ['commit', '-m', 'Remove guide and bump README']);
+    const third = git(fixture.source, ['rev-parse', 'HEAD']);
+
+    const dirtyRes = await request(hub.app).post('/api/projects/amber/git/update').expect(409);
+    expect(dirtyRes.body.error).toBe('git_dirty_worktree');
+    expect(fs.readFileSync(path.join(workTree, 'README.md'), 'utf8')).toBe('# Local unsaved edit\n');
+
+    // Restore clean working tree -> on-demand update fast-forwards immediately without waiting for poll.
+    fs.writeFileSync(path.join(workTree, 'README.md'), '# Amber Observatory v2\n');
+    const updatedRes = await request(hub.app).post('/api/projects/amber/git/update').expect(200);
+    expect(updatedRes.body).toMatchObject({
+      updated: true,
+      previousSha: second,
+      headSha: third,
+      status: { state: 'ready', headSha: third, isClean: true, behind: 0 }
+    });
+    expect(fs.readFileSync(path.join(workTree, 'README.md'), 'utf8')).toBe('# Amber Observatory v3\n');
+    expect(fs.existsSync(path.join(workTree, 'guide.md'))).toBe(false);
+    expect(fs.readFileSync(path.join(workTree, '.focuswiki', 'recovery.md'), 'utf8')).toBe('# Keep recovery\n');
+
+    // Upstream introduces a symlink -> update refuses (503 git_not_ready) and keeps existing tree intact.
+    fs.symlinkSync('README.md', path.join(fixture.source, 'bad-link.md'));
+    git(fixture.source, ['add', 'bad-link.md']);
+    git(fixture.source, ['commit', '-m', 'Add forbidden symlink']);
+    const symlinkRes = await request(hub.app).post('/api/projects/amber/git/update').expect(503);
+    expect(symlinkRes.body.error).toBe('git_not_ready');
+    expect(fs.existsSync(path.join(workTree, 'bad-link.md'))).toBe(false);
+
+    // Diverged / force-pushed upstream history -> 409 git_not_fast_forward.
+    git(fixture.source, ['reset', '--hard', base]);
+    fs.writeFileSync(path.join(fixture.source, 'README.md'), '# Force pushed history\n');
+    git(fixture.source, ['add', 'README.md']);
+    git(fixture.source, ['commit', '-m', 'Force pushed branch']);
+    const divergedRes = await request(hub.app).post('/api/projects/amber/git/update').expect(409);
+    expect(divergedRes.body.error).toBe('git_not_fast_forward');
+    expect(fs.readFileSync(path.join(workTree, 'README.md'), 'utf8')).toBe('# Amber Observatory v3\n');
+  });
+
+  it('refuses fast-forward when upstream paths collide with ignored local files or directories', async () => {
+    upstream();
+    fs.writeFileSync(path.join(fixture.source, '.gitignore'), '.env\ndrafts/\nnotes\n');
+    git(fixture.source, ['add', '.gitignore']);
+    git(fixture.source, ['commit', '-m', 'Add .gitignore']);
+    const base = git(fixture.source, ['rev-parse', 'HEAD']);
+
+    const service = companion(base);
+    const client = await start(service);
+    await vi.waitFor(async () => {
+      expect((await client.statuses()).amber).toMatchObject({ state: 'ready', headSha: base, isClean: true });
+    }, { timeout: 10_000 });
+
+    // Create ignored local files and directories that git status omits.
+    fs.writeFileSync(path.join(workTree, '.env'), 'LOCAL_SECRET=keep\n');
+    fs.mkdirSync(path.join(workTree, 'drafts'));
+    fs.writeFileSync(path.join(workTree, 'drafts', 'wip.md'), '# Keep local ignored draft\n');
+    fs.writeFileSync(path.join(workTree, 'notes'), 'local ignored file\n');
+
+    hub = app('allow');
+
+    // 1. Exact file collision: upstream force-adds tracked .env.
+    fs.writeFileSync(path.join(fixture.source, '.env'), 'UPSTREAM=overwrite\n');
+    git(fixture.source, ['add', '-f', '.env']);
+    git(fixture.source, ['commit', '-m', 'Track .env upstream']);
+    const envCollision = await request(hub.app).post('/api/projects/amber/git/update').expect(409);
+    expect(envCollision.body.error).toBe('git_dirty_worktree');
+    expect(fs.readFileSync(path.join(workTree, '.env'), 'utf8')).toBe('LOCAL_SECRET=keep\n');
+
+    // Remove .env collision from upstream, test file-replacing-ignored-directory collision.
+    git(fixture.source, ['reset', '--hard', base]);
+    fs.writeFileSync(path.join(fixture.source, 'drafts'), 'upstream file replacing dir\n');
+    git(fixture.source, ['add', '-f', 'drafts']);
+    git(fixture.source, ['commit', '-m', 'Add drafts file upstream']);
+    const dirCollision = await request(hub.app).post('/api/projects/amber/git/update').expect(409);
+    expect(dirCollision.body.error).toBe('git_dirty_worktree');
+    expect(fs.readFileSync(path.join(workTree, 'drafts', 'wip.md'), 'utf8')).toBe('# Keep local ignored draft\n');
+
+    // Remove drafts collision from upstream, test directory-replacing-ignored-file collision.
+    git(fixture.source, ['reset', '--hard', base]);
+    fs.mkdirSync(path.join(fixture.source, 'notes'));
+    fs.writeFileSync(path.join(fixture.source, 'notes', 'page.md'), '# Upstream nested page\n');
+    git(fixture.source, ['add', '-f', 'notes/page.md']);
+    git(fixture.source, ['commit', '-m', 'Add notes/page.md upstream']);
+    const fileCollision = await request(hub.app).post('/api/projects/amber/git/update').expect(409);
+    expect(fileCollision.body.error).toBe('git_dirty_worktree');
+    expect(fs.readFileSync(path.join(workTree, 'notes'), 'utf8')).toBe('local ignored file\n');
+
+    // Non-colliding upstream update still succeeds while preserving all ignored files.
+    git(fixture.source, ['reset', '--hard', base]);
+    fs.writeFileSync(path.join(fixture.source, 'README.md'), '# Safe upstream update\n');
+    git(fixture.source, ['add', 'README.md']);
+    git(fixture.source, ['commit', '-m', 'Safe non-colliding change']);
+    const safeHead = git(fixture.source, ['rev-parse', 'HEAD']);
+    const okRes = await request(hub.app).post('/api/projects/amber/git/update').expect(200);
+    expect(okRes.body).toMatchObject({ updated: true, headSha: safeHead });
+    expect(fs.readFileSync(path.join(workTree, 'README.md'), 'utf8')).toBe('# Safe upstream update\n');
+    expect(fs.readFileSync(path.join(workTree, '.env'), 'utf8')).toBe('LOCAL_SECRET=keep\n');
+    expect(fs.readFileSync(path.join(workTree, 'drafts', 'wip.md'), 'utf8')).toBe('# Keep local ignored draft\n');
+    expect(fs.readFileSync(path.join(workTree, 'notes'), 'utf8')).toBe('local ignored file\n');
+  });
 });
 
 it('bounds the queue, withdraws canceled work, and serializes jobs on the same checkout', async () => {

@@ -124,6 +124,9 @@ export async function startGitRunner(options: {
       throw new GitRpcError('proposal_unavailable');
     }
     return queue.run(request.projectId, signal, async (jobSignal) => {
+      if (request.verb === 'update') {
+        return project.update(jobSignal);
+      }
       let ctx;
       try { ctx = project.proposalContext(); } catch { throw new GitRpcError('git_not_ready'); }
       jobSignal.throwIfAborted();
@@ -203,7 +206,7 @@ export async function startGitRunner(options: {
         return send({ ok: false, error: 'invalid_git_request' });
       }
       chunks.length = 0;
-      const limit = request.verb === 'propose' ? 85_000 : 25_000;
+      const limit = request.verb === 'propose' ? 85_000 : request.verb === 'update' ? 60_000 : 25_000;
       const deadline = AbortSignal.timeout(limit);
       const signal = AbortSignal.any([disconnect.signal, deadline]);
       const expired = () => {

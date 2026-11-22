@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
+  ArrowDownToLine,
   CheckCircle2,
   Code2,
   ExternalLink,
@@ -427,13 +428,16 @@ export function GitDrawerModal({ project, activeDocPath, onClose, onStatusChange
   const [message, setMessage] = useState('');
   const [publishing, setPublishing] = useState(false);
   const publishingRef = useRef(false);
+  const [updating, setUpdating] = useState(false);
+  const updatingRef = useRef(false);
+  const [updateNotice, setUpdateNotice] = useState<string | null>(null);
   const [retry, setRetry] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [published, setPublished] = useState<{ sha: string; url: string | null } | null>(null);
   const gitUrl = `/api/projects/${encodeURIComponent(project.id)}/git`;
 
   function dismiss() {
-    if (!publishingRef.current) onClose();
+    if (!publishingRef.current && !updatingRef.current) onClose();
   }
 
   useModalOverlayFocus({
@@ -482,11 +486,50 @@ export function GitDrawerModal({ project, activeDocPath, onClose, onStatusChange
   }, [loadReview]);
 
   const reviewId = typeof review?.reviewId === 'string' && review.reviewId.trim() ? review.reviewId : null;
-  const canPublish = !loading && !publishing && Boolean(reviewId && selectedPaths.length && message.trim());
+  const canPublish = !loading && !publishing && !updating && Boolean(reviewId && selectedPaths.length && message.trim());
+
+  async function pullLatest() {
+    if (updatingRef.current || publishingRef.current) return;
+    updatingRef.current = true;
+    setUpdating(true);
+    setUpdateNotice(null);
+    setError(null);
+    try {
+      const response = await fetch(`${gitUrl}/update`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{}'
+      });
+      const data = (await response.json().catch(() => null)) as {
+        updated?: boolean;
+        headSha?: string;
+        message?: string;
+      } | null;
+      if (!response.ok) {
+        throw new Error(data?.message || `Unable to pull latest upstream (${response.status}).`);
+      }
+      const shortSha = typeof data?.headSha === 'string' ? data.headSha.slice(0, 12) : '';
+      setUpdateNotice(
+        data?.updated
+          ? `Updated working copy to latest upstream${shortSha ? ` (${shortSha})` : ''}.`
+          : `Already up to date${shortSha ? ` (${shortSha})` : ''}.`
+      );
+      await Promise.all([
+        onStatusChanged().catch(() => undefined),
+        loadReview()
+      ]);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unable to pull latest upstream.');
+    } finally {
+      updatingRef.current = false;
+      setUpdating(false);
+    }
+  }
 
   async function publishProposal(event: React.FormEvent) {
     event.preventDefault();
     if (!canPublish || !reviewId || publishingRef.current) return;
+    setUpdateNotice(null);
 
     publishingRef.current = true;
     setPublishing(true);
@@ -726,14 +769,31 @@ export function GitDrawerModal({ project, activeDocPath, onClose, onStatusChange
           </div>
 
           <div className="change-review-header-actions">
+            {projectStatus.state !== 'unmanaged' && (
+              <button
+                type="button"
+                className="btn btn-compact"
+                onClick={() => void pullLatest()}
+                disabled={loading || publishing || updating || changedCount > 0}
+                title={
+                  changedCount > 0
+                    ? 'Propose or discard local changes before pulling upstream updates'
+                    : 'Fetch and fast-forward to latest upstream'
+                }
+              >
+                <ArrowDownToLine size={13} aria-hidden="true" />
+                <span>{updating ? 'Pulling…' : 'Pull latest'}</span>
+              </button>
+            )}
             <button
               type="button"
               className="btn btn-compact"
               onClick={() => {
+                setUpdateNotice(null);
                 void loadReview();
                 void onStatusChanged().catch(() => undefined);
               }}
-              disabled={loading || publishing}
+              disabled={loading || publishing || updating}
             >
               <RefreshCw size={13} aria-hidden="true" />
               <span>New review</span>
@@ -742,7 +802,7 @@ export function GitDrawerModal({ project, activeDocPath, onClose, onStatusChange
               type="button"
               className="icon-btn panel-close-btn change-review-close-btn"
               onClick={dismiss}
-              disabled={publishing}
+              disabled={publishing || updating}
               aria-label="Close Git dialog"
               title="Close"
             >
@@ -750,6 +810,12 @@ export function GitDrawerModal({ project, activeDocPath, onClose, onStatusChange
             </button>
           </div>
         </div>
+
+        {updateNotice && (
+          <div className="notice-banner change-review-banner" role="status">
+            <span>{updateNotice}</span>
+          </div>
+        )}
 
         {published && (
           <div className="notice-banner change-review-banner" role="status">
