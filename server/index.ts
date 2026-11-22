@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { proposalAuth } from './proposalAuth.js';
 import type { ProjectConfig } from '../shared/types.js';
 import { createHubApp } from './app.js';
-import { loadEnrollment } from './enrollment.js';
+import { directoriesOverlap, loadEnrollmentEntries } from './enrollment.js';
 import { createLogger } from './logger.js';
 import { ProjectRegistry } from './projectRegistry.js';
 
@@ -85,10 +85,18 @@ async function main(): Promise<void> {
 
   const enrollmentFile = localDev ? undefined : requiredEnv('FOCUSWIKI_ENROLLMENT_FILE');
   const reposDir = process.env.FOCUSWIKI_REPOS_DIR;
+  const localReposDir = process.env.FOCUSWIKI_LOCAL_REPOS_DIR || undefined;
   let registry: ProjectRegistry;
   if (enrollmentFile) {
     if (!reposDir) throw new Error('Set FOCUSWIKI_REPOS_DIR for managed enrollment.');
-    registry = new ProjectRegistry([], { projects: loadEnrollment(enrollmentFile), reposDir });
+    if (localReposDir && directoriesOverlap(path.resolve(reposDir), path.resolve(localReposDir))) {
+      throw new Error('FOCUSWIKI_LOCAL_REPOS_DIR must not overlap FOCUSWIKI_REPOS_DIR.');
+    }
+    registry = new ProjectRegistry([], {
+      projects: loadEnrollmentEntries(enrollmentFile),
+      reposDir,
+      localReposDir
+    });
   } else {
     // Static browse-only mode is also used by the fictional demo.
     const config = process.env.PROJECTS_CONFIG || path.join(ROOT_DIR, 'config', 'projects.default.json');
@@ -127,9 +135,13 @@ async function main(): Promise<void> {
         }
       }
       console.log(`[focuswiki] Listening on ${socketPath ?? `http://127.0.0.1:${port} (local development)`}`);
+      const allProjects = registry.list();
+      const managedProjects = allProjects.filter((project) => registry.managed(project.id)).length;
       log.info('Web server ready', {
         mode: enrollmentFile ? 'managed' : 'static',
-        projects: registry.list().length,
+        projects: allProjects.length,
+        managedProjects,
+        localProjects: allProjects.length - managedProjects,
         gitSocket: process.env.FOCUSWIKI_GIT_SOCKET || undefined
       });
       resolve();

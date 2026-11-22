@@ -1,15 +1,31 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { ProjectConfig, ProjectGitStatus } from '../shared/types.js';
-import type { EnrolledProject } from './enrollment.js';
+import { isLocalProject, type EnrolledProject, type EnrollmentEntry } from './enrollment.js';
 
 export class ProjectRegistry {
   private readonly projects = new Map<string, ProjectConfig>();
   private readonly enrolled = new Map<string, EnrolledProject>();
 
-  constructor(projects: ProjectConfig[], enrollment?: { projects: EnrolledProject[]; reposDir: string }) {
+  constructor(
+    projects: ProjectConfig[],
+    enrollment?: { projects: EnrollmentEntry[]; reposDir: string; localReposDir?: string }
+  ) {
     if (enrollment) {
       for (const project of enrollment.projects) {
+        if (isLocalProject(project)) {
+          if (!enrollment.localReposDir) {
+            throw new Error(`Local project "${project.id}" requires FOCUSWIKI_LOCAL_REPOS_DIR.`);
+          }
+          this.projects.set(project.id, {
+            id: project.id,
+            name: project.name,
+            description: '',
+            defaultDoc: project.defaultDoc ?? 'README.md',
+            rootPath: path.resolve(enrollment.localReposDir, project.id)
+          });
+          continue;
+        }
         this.enrolled.set(project.id, project);
         this.projects.set(project.id, {
           id: project.id,

@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import net from 'node:net';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { directoriesOverlap, enrollmentBinding, loadEnrollment } from './enrollment.js';
+import { directoriesOverlap, enrollmentBinding, isLocalProject, loadEnrollmentEntries, type EnrolledProject } from './enrollment.js';
 import {
   DEFAULT_GIT_SOCKET, GitRpcError, MAX_GIT_REQUEST_BYTES, MAX_GIT_RESPONSE_BYTES, isGitSha,
   parseGitRequest, proposalBranch, unwrapReviewId, type GitRequest, type GitResult, type ProposalService, type PublishedProposal
@@ -99,7 +99,9 @@ export async function startGitRunner(options: {
   workerDirectory(reposDir);
   workerDirectory(socketDir);
   await prepareWorkerSocket(socketPath);
-  const enrolled = loadEnrollment(options.enrollmentFile);
+  const allEntries = loadEnrollmentEntries(options.enrollmentFile);
+  const enrolled = allEntries.filter((entry): entry is EnrolledProject => !isLocalProject(entry));
+  const localCount = allEntries.length - enrolled.length;
   const stageRoot = path.join(reposDir, '.staging');
   if (!fs.existsSync(stageRoot)) fs.mkdirSync(stageRoot, { recursive: true, mode: 0o700 });
   workerDirectory(stageRoot, true);
@@ -246,6 +248,7 @@ export async function startGitRunner(options: {
   const entries = [...projects];
   log.info('Loaded enrolled projects', {
     count: enrolled.length,
+    localSkipped: localCount || undefined,
     projects: enrolled.map((p) => `${p.id}@${p.branch}`).join(',') || 'none',
     proposalService: Boolean(proposal)
   });

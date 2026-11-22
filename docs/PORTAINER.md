@@ -79,6 +79,19 @@ Before enrolling real repositories, verify the deployment end-to-end against one
 
    > **Note:** After editing `enrollment.json`, redeploy/recreate the `git-worker` and `web` containers in Portainer so both pick up the updated file (replacing a file via atomic editor save changes its inode, which a running single-file bind mount will not see until recreated).
 
+   **Optional local (non-GitHub) NAS folders:** To expose internal docs stored on your NAS without putting them on GitHub, set `FOCUSWIKI_LOCAL_REPOS_HOST_PATH` (for example `/volume1/docker/focuswiki/local-repos`), create a subfolder matching the project `id` (for example `.../local-repos/lan-docs`, writable by UID `10002` / GID `0`), and add a `"local": true` entry in `enrollment.json`:
+
+   ```json
+   {
+     "id": "lan-docs",
+     "name": "LAN Docs",
+     "local": true,
+     "defaultDoc": "README.md"
+   }
+   ```
+
+   Local projects are mounted into `web` only (`git-worker` skips them). Reading, searching, rich Markdown editing, and anchored comments work directly on disk; managed Git change review and PR proposals are disabled for local entries.
+
 ## 4. Deploy the stack in Portainer
 
 In Portainer, create a new stack using [compose.portainer.yaml](../compose.portainer.yaml) (via Git repository or Web editor) and configure the stack environment variables:
@@ -87,6 +100,7 @@ In Portainer, create a new stack using [compose.portainer.yaml](../compose.porta
 | --- | --- | --- | --- |
 | `FOCUSWIKI_IMAGE` | Yes | `ghcr.io/bakkerme/focuswiki@sha256:...` | Pinned image from CI. |
 | `FOCUSWIKI_ENROLLMENT_HOST_PATH` | Yes | `/volume1/docker/focuswiki/enrollment.json` | Absolute NAS path to `enrollment.json` (must already exist). |
+| `FOCUSWIKI_LOCAL_REPOS_HOST_PATH` | No | *(named volume `local-repos`)* | Optional absolute NAS directory mounted into `web` at `/app/local-repos` for unmanaged `"local": true` projects (one subfolder per project `id`, writable by UID `10002` / GID `0`). Never mounted into `git-worker`. |
 | `FOCUSWIKI_PUBLIC_ORIGIN` | Yes | `https://focuswiki.tailnet.ts.net` | Exact Tailscale Serve HTTPS origin (no trailing slash). Must match `FOCUSWIKI_TS_HOSTNAME` + your tailnet domain. |
 | `FOCUSWIKI_PUBLISHERS` | Recommended | `alice@example.test` | Comma-separated canonical Tailscale logins allowed to open PRs. Leave empty to run read/edit-only without PR publication. |
 | `FOCUSWIKI_GITHUB_APP_ID` | Yes | `123456` | Numeric GitHub App ID. |
