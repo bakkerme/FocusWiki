@@ -6,7 +6,7 @@ import path from 'node:path';
 import request from 'supertest';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createHubApp, type HubAppInstance } from '../server/app.js';
-import { loadEnrollment } from '../server/enrollment.js';
+import { loadEnrollment, loadEnrollmentEntries } from '../server/enrollment.js';
 import { GitQueue } from '../server/gitQueue.js';
 import type { ProposalContext, ProposalService } from '../server/gitProtocol.js';
 import { startGitRunner } from '../server/gitRunner.js';
@@ -359,6 +359,81 @@ describe('managed Git service', () => {
       });
     }, { timeout: 10_000 });
     expect(fs.existsSync(workTree)).toBe(false);
+  });
+
+  it('supports unmanaged local projects alongside managed GitHub projects while keeping git-worker isolated', async () => {
+    const localReposDir = path.join(root, 'local-repos');
+    const localProjectDir = path.join(localReposDir, 'lan-docs');
+    fs.mkdirSync(localProjectDir, { recursive: true, mode: 0o770 });
+    fs.writeFileSync(path.join(localProjectDir, 'README.md'), '# Internal LAN Docs\n\nPrivate runbook.\n');
+    fs.writeFileSync(path.join(localProjectDir, '.env'), 'SECRET=nope\n');
+
+    const localEntry = { id: 'lan-docs', name: 'LAN Docs', local: true as const, defaultDoc: 'README.md' };
+    fs.unlinkSync(enrollmentFile);
+    fs.writeFileSync(enrollmentFile, JSON.stringify({ projects: [entry, localEntry] }), { mode: 0o444 });
+
+    // Local project entries reject remote/branch/rootPath fields and require localReposDir.
+    const invalidCandidate = path.join(root, 'invalid-local.json');
+    for (const projects of [
+      [{ ...localEntry, rootPath: '/tmp/lan-docs' }],
+      [{ ...localEntry, remote: 'https://github.com/fictional-observatory/lan-docs.git' }],
+      [{ ...localEntry, branch: 'main' }],
+      [{ id: 'lan-docs', name: 'LAN Docs', local: false }],
+      [entry, { ...localEntry, id: entry.id }]
+    ]) {
+      fs.writeFileSync(invalidCandidate, JSON.stringify({ projects }));
+      expect(() => loadEnrollmentEntries(invalidCandidate)).toThrow(/Invalid (?:local|managed) project/);
+    }
+    expect(() => new ProjectRegistry([], { projects: loadEnrollmentEntries(enrollmentFile), reposDir }))
+      .toThrow('requires FOCUSWIKI_LOCAL_REPOS_DIR');
+
+    const base = upstream();
+    const service = companion(base);
+    const client = await start(service);
+    await vi.waitFor(async () => {
+      const statuses = await client.statuses();
+      expect(Object.keys(statuses)).toEqual(['amber']);
+      expect(statuses.amber).toMatchObject({ state: 'ready', headSha: base });
+    }, { timeout: 10_000 });
+
+    hub = createHubApp({
+      registry: new ProjectRegistry([], {
+        projects: loadEnrollmentEntries(enrollmentFile),
+        reposDir,
+        localReposDir
+      }),
+      gitSocketPath: socketPath,
+      proposalAuth: (_req, res, next) => {
+        res.locals.proposalActor = 'fictional-reviewer';
+        next();
+      },
+      enableWatcher: false
+    });
+
+    const envRes = await request(hub.app).get('/api/settings/environment').expect(200);
+    expect(envRes.body).toEqual({ projectCount: 2, managedProjectCount: 1 });
+
+    const list = await request(hub.app).get('/api/projects').expect(200);
+    const localSummary = list.body.projects.find((p: { id: string }) => p.id === 'lan-docs');
+    expect(localSummary).toMatchObject({
+      id: 'lan-docs',
+      name: 'LAN Docs',
+      workingTreeAvailable: true,
+      git: { state: 'unmanaged', remoteUrl: null, isClean: null },
+      docs: [{ path: 'README.md' }]
+    });
+
+    const doc = await request(hub.app).get('/api/projects/lan-docs/doc').expect(200);
+    expect(doc.body.markdown).toContain('Private runbook.');
+
+    await request(hub.app).put('/api/projects/lan-docs/doc')
+      .send({ path: 'README.md', markdown: '# Internal LAN Docs\n\nUpdated locally.\n', baseRevision: doc.body.revision })
+      .expect(200);
+    expect(fs.readFileSync(path.join(localProjectDir, 'README.md'), 'utf8')).toContain('Updated locally.');
+
+    await request(hub.app).get('/api/projects/lan-docs/doc?path=.env').expect(403);
+    await request(hub.app).get('/api/projects/lan-docs/git/diff').expect(404);
+    await request(hub.app).post('/api/projects/lan-docs/git/propose').send(proposalInput).expect(404);
   });
 });
 

@@ -14,6 +14,19 @@ export interface EnrolledProject {
   defaultDoc?: string;
 }
 
+export interface LocalEnrolledProject {
+  id: string;
+  name: string;
+  local: true;
+  defaultDoc?: string;
+}
+
+export type EnrollmentEntry = EnrolledProject | LocalEnrolledProject;
+
+export function isLocalProject(entry: EnrollmentEntry): entry is LocalEnrolledProject {
+  return 'local' in entry && entry.local === true;
+}
+
 export function validProjectId(value: unknown): value is string {
   return typeof value === 'string' && value === value.trim() && PROJECT_ID.test(value) && !value.endsWith('.');
 }
@@ -51,7 +64,7 @@ function validBranch(value: unknown): value is string {
 }
 
 /** Both processes read an operator-managed file. Filesystem paths and credentials are not enrollment fields. */
-export function loadEnrollment(file: string): EnrolledProject[] {
+export function loadEnrollmentEntries(file: string): EnrollmentEntry[] {
   const fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
   let decoded: unknown;
   try {
@@ -71,9 +84,24 @@ export function loadEnrollment(file: string): EnrolledProject[] {
   }
 
   const ids = new Set<string>();
-  return projects.map((project: EnrolledProject, index) => {
-    const remote = canonicalRemote(project?.remote);
-    if (!remote || !validProjectId(project?.id) || ids.has(project.id) ||
+  return projects.map((raw, index): EnrollmentEntry => {
+    const project = raw as Partial<EnrolledProject & LocalEnrolledProject> | null;
+    if (!project || typeof project !== 'object') {
+      throw new Error(`Invalid managed project at enrollment index ${index}.`);
+    }
+    if (project.local === true) {
+      if (!validProjectId(project.id) || ids.has(project.id) ||
+          typeof project.name !== 'string' || !project.name.trim() || project.name.length > 120 ||
+          (project.defaultDoc !== undefined &&
+            (!validProjectFile(project.defaultDoc) || !project.defaultDoc.endsWith('.md'))) ||
+          Object.keys(project).some((key) => !['id', 'name', 'local', 'defaultDoc'].includes(key))) {
+        throw new Error(`Invalid local project at enrollment index ${index}.`);
+      }
+      ids.add(project.id);
+      return { id: project.id, name: project.name.trim(), local: true, defaultDoc: project.defaultDoc };
+    }
+    const remote = canonicalRemote(project.remote);
+    if (!remote || !validProjectId(project.id) || ids.has(project.id) ||
         typeof project.name !== 'string' || !project.name.trim() || project.name.length > 120 ||
         !validBranch(project.branch) ||
         (project.defaultDoc !== undefined &&
@@ -84,6 +112,11 @@ export function loadEnrollment(file: string): EnrolledProject[] {
     ids.add(project.id);
     return { id: project.id, name: project.name.trim(), remote, branch: project.branch, defaultDoc: project.defaultDoc };
   });
+}
+
+/** Returns only GitHub-managed enrolled projects (local entries are validated and skipped). */
+export function loadEnrollment(file: string): EnrolledProject[] {
+  return loadEnrollmentEntries(file).filter((entry): entry is EnrolledProject => !isLocalProject(entry));
 }
 
 export function enrollmentBinding(project: EnrolledProject): string {

@@ -104,9 +104,11 @@ services:
       FOCUSWIKI_GIT_SOCKET: /run/focuswiki/git.sock
       FOCUSWIKI_ENROLLMENT_FILE: /etc/focuswiki/enrollment.json
       FOCUSWIKI_REPOS_DIR: /app/repos
+      FOCUSWIKI_LOCAL_REPOS_DIR: /app/local-repos
       FOCUSWIKI_LOG_LEVEL: "${FOCUSWIKI_LOG_LEVEL:-info}"
     volumes:
       - repos:/app/repos
+      - "${FOCUSWIKI_LOCAL_REPOS_HOST_PATH:-local-repos}:/app/local-repos"
       - git-socket:/run/focuswiki:ro
       - serve-socket:/run/focuswiki-serve
       - type: bind
@@ -153,6 +155,7 @@ services:
 
 volumes:
   repos:
+  local-repos:
   git-state:
   git-socket:
   serve-socket:
