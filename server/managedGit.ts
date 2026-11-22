@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type { GitChangedFile, ProjectGitStatus } from '../shared/types.js';
 import { validCheckoutFile, validProjectFile, type EnrolledProject } from './enrollment.js';
-import { GitRpcError, isGitSha, type ProposalContext, type ProposalService } from './gitProtocol.js';
+import { GitRpcError, isGitSha, type GitUpdateResult, type ProposalContext, type ProposalService } from './gitProtocol.js';
 import { hasWorkingTree, unavailableGitStatus } from './projectRegistry.js';
 import { createLogger, sanitizeLogText } from './logger.js';
 
@@ -197,24 +197,7 @@ export class ManagedRepository {
       if (fetchDue) {
         let fetchPhase = 'token';
         try {
-          if (!this.proposal) throw new GitRpcError('git_unavailable', 'Proposal service is unavailable.');
-          // The token provider validates an existing worktree. Before provisioning,
-          // give it the empty private stage and keep the enrolled path unpublished.
-          const workTree = exists(this.installedFile) ? this.context.workTree : this.workingStage;
-          if (workTree === this.workingStage) {
-            if (!exists(workTree)) fs.mkdirSync(workTree, { mode: 0o700 });
-            workerDirectory(workTree, true);
-          }
-          const token = await this.proposal.getRepoToken({ ...this.context, workTree, branch: 'focuswiki/bootstrap' }, 'read');
-          signal.throwIfAborted();
-          fetchPhase = 'fetch';
-          await this.git([
-            'fetch', '--no-tags', '--no-recurse-submodules', '--no-write-fetch-head', '--no-auto-maintenance',
-            '--', this.context.remote, `+${this.localRef}:${this.remoteRef}`
-          ], signal, token);
-          this.fetchedAt = new Date().toISOString();
-          this.fetchState = 'current';
-          log.debug('Fetched remote branch', { project: this.project.id, branch: this.context.branch });
+          await this.fetchRemote(signal, (nextPhase) => { fetchPhase = nextPhase; });
         } catch (err) {
           this.fetchState = 'unavailable';
           this.logError(fetchPhase, describeError(err));
@@ -225,6 +208,16 @@ export class ManagedRepository {
           await this.prepareCheckout(signal);
           phase = 'install';
           this.finishInstall(signal);
+        } else if (this.fetchState === 'current' && exists(this.installedFile)) {
+          try {
+            await this.fastForward(signal);
+          } catch (err) {
+            if (err instanceof GitRpcError && err.code === 'git_dirty_worktree') {
+              log.debug('Skipped auto fast-forward because working tree has local changes', { project: this.project.id });
+            } else {
+              this.logError('fast-forward', describeError(err));
+            }
+          }
         }
         if (exists(this.installedFile)) {
           phase = 'inspect';
@@ -237,6 +230,48 @@ export class ManagedRepository {
       this.logError(phase, describeError(err));
       this.recordUnavailable('unavailable');
     }
+  }
+
+  /** Fetches upstream immediately and fast-forwards the working tree if clean. */
+  async update(signal: AbortSignal): Promise<GitUpdateResult> {
+    this.proposalContext();
+    this.nextFetch = Date.now() + FETCH_RETRY_MS;
+    this.nextStatus = Date.now() + STATUS_INTERVAL_MS;
+    let fetchPhase = 'token';
+    try {
+      await this.fetchRemote(signal, (nextPhase) => { fetchPhase = nextPhase; });
+    } catch (err) {
+      this.fetchState = 'unavailable';
+      this.logError(fetchPhase, describeError(err));
+      await this.inspect(signal).catch(() => {});
+      if (err instanceof GitRpcError) throw err;
+      throw new GitRpcError('git_unavailable', describeError(err));
+    }
+    const result = await this.fastForward(signal);
+    await this.inspect(signal);
+    return { ...result, status: this.status };
+  }
+
+  private async fetchRemote(signal: AbortSignal, onPhase?: (phase: string) => void): Promise<void> {
+    onPhase?.('token');
+    if (!this.proposal) throw new GitRpcError('git_unavailable', 'Proposal service is unavailable.');
+    // The token provider validates an existing worktree. Before provisioning,
+    // give it the empty private stage and keep the enrolled path unpublished.
+    const workTree = exists(this.installedFile) ? this.context.workTree : this.workingStage;
+    if (workTree === this.workingStage) {
+      if (!exists(workTree)) fs.mkdirSync(workTree, { mode: 0o700 });
+      workerDirectory(workTree, true);
+    }
+    const token = await this.proposal.getRepoToken({ ...this.context, workTree, branch: 'focuswiki/bootstrap' }, 'read');
+    signal.throwIfAborted();
+    onPhase?.('fetch');
+    await this.git([
+      'fetch', '--no-tags', '--no-recurse-submodules', '--no-write-fetch-head', '--no-auto-maintenance',
+      '--', this.context.remote, `+${this.localRef}:${this.remoteRef}`
+    ], signal, token);
+    this.fetchedAt = new Date().toISOString();
+    this.fetchState = 'current';
+    log.debug('Fetched remote branch', { project: this.project.id, branch: this.context.branch });
   }
 
   private get binding(): string {
@@ -299,12 +334,7 @@ export class ManagedRepository {
     ], signal, token);
   }
 
-  private async prepareCheckout(signal: AbortSignal): Promise<void> {
-    if (exists(this.context.workTree)) {
-      throw new GitRpcError('git_not_ready', `Worktree already exists at ${this.context.workTree}`);
-    }
-    const head = (await this.git(['rev-parse', '--verify', this.remoteRef + '^{commit}'], signal)).trim();
-    if (!isGitSha(head)) throw new GitRpcError('git_not_ready', `Remote ref ${this.remoteRef} did not resolve to a commit.`);
+  private async validateTree(head: string, signal: AbortSignal): Promise<void> {
     const tree = await this.git(['ls-tree', '-r', '-z', head], signal);
     for (const entry of tree.split('\0').filter(Boolean)) {
       const tab = entry.indexOf('\t');
@@ -314,6 +344,61 @@ export class ManagedRepository {
         throw new GitRpcError('git_not_ready', `Rejected tree entry (mode=${mode}, path=${entryPath || '<invalid>'})`);
       }
     }
+  }
+
+  private async fastForward(signal: AbortSignal): Promise<{ updated: boolean; previousSha: string; headSha: string }> {
+    const localHead = (await this.git(['rev-parse', '--verify', this.localRef + '^{commit}'], signal)).trim();
+    const remoteHead = (await this.git(['rev-parse', '--verify', this.remoteRef + '^{commit}'], signal)).trim();
+    if (!isGitSha(localHead) || !isGitSha(remoteHead)) {
+      throw new GitRpcError('git_not_ready', 'Could not resolve local or remote branch commit.');
+    }
+    if (localHead === remoteHead) {
+      return { updated: false, previousSha: localHead, headSha: localHead };
+    }
+
+    try {
+      await this.git(['update-index', '-q', '--refresh'], signal);
+    } catch {
+      throw new GitRpcError('git_dirty_worktree', 'Working copy has local changes.');
+    }
+    const porcelain = await this.git([
+      'status', '--porcelain=v1', '-z', '--no-renames', '--untracked-files=all', '--ignore-submodules=all'
+    ], signal);
+    if (porcelain.length > 0) {
+      throw new GitRpcError('git_dirty_worktree', 'Working copy has local changes.');
+    }
+
+    try {
+      await this.git(['merge-base', '--is-ancestor', localHead, remoteHead], signal);
+    } catch {
+      throw new GitRpcError('git_not_fast_forward', `Local ${localHead.slice(0, 12)} is not an ancestor of remote ${remoteHead.slice(0, 12)}.`);
+    }
+
+    await this.validateTree(remoteHead, signal);
+    signal.throwIfAborted();
+    try {
+      await this.git(['read-tree', '-m', '-u', localHead, remoteHead], signal);
+    } catch (err) {
+      // read-tree refuses to overwrite concurrently modified or colliding untracked files.
+      throw new GitRpcError('git_dirty_worktree', describeError(err));
+    }
+    await this.git(['update-ref', this.localRef, remoteHead, localHead], signal);
+    log.info('Fast-forwarded managed repository', {
+      project: this.project.id,
+      branch: this.context.branch,
+      from: localHead.slice(0, 12),
+      to: remoteHead.slice(0, 12)
+    });
+    return { updated: true, previousSha: localHead, headSha: remoteHead };
+  }
+
+  private async prepareCheckout(signal: AbortSignal): Promise<void> {
+    if (exists(this.context.workTree)) {
+      throw new GitRpcError('git_not_ready', `Worktree already exists at ${this.context.workTree}`);
+    }
+    const head = (await this.git(['rev-parse', '--verify', this.remoteRef + '^{commit}'], signal)).trim();
+    if (!isGitSha(head)) throw new GitRpcError('git_not_ready', `Remote ref ${this.remoteRef} did not resolve to a commit.`);
+    await this.validateTree(head, signal);
 
     // Only our private staging directory may be discarded on a failed initial checkout.
     fs.rmSync(this.workingStage, { recursive: true, force: true });

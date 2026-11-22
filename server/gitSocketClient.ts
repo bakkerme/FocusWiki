@@ -2,7 +2,7 @@ import { createConnection } from 'node:net';
 import { enrollmentBinding, type EnrolledProject } from './enrollment.js';
 import {
   DEFAULT_GIT_SOCKET, GitRpcError, MAX_GIT_REQUEST_BYTES, MAX_GIT_RESPONSE_BYTES, readGitError,
-  type GitRequest, type GitStatuses, type ProposalInput, type ProposalReview, type PublishedProposal
+  type GitRequest, type GitStatuses, type GitUpdateResult, type ProposalInput, type ProposalReview, type PublishedProposal
 } from './gitProtocol.js';
 
 export class GitSocketClient {
@@ -14,6 +14,10 @@ export class GitSocketClient {
 
   review(project: EnrolledProject, actor: string, signal?: AbortSignal): Promise<ProposalReview> {
     return this.request({ verb: 'review', projectId: project.id, binding: enrollmentBinding(project), actor }, 30_000, signal);
+  }
+
+  update(project: EnrolledProject, actor: string, signal?: AbortSignal): Promise<GitUpdateResult> {
+    return this.request({ verb: 'update', projectId: project.id, binding: enrollmentBinding(project), actor }, 65_000, signal);
   }
 
   propose(project: EnrolledProject, actor: string, input: ProposalInput, signal?: AbortSignal): Promise<PublishedProposal> {

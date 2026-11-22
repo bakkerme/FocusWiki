@@ -34,6 +34,13 @@ export interface PublishedProposal {
   sha: string;
 }
 
+export interface GitUpdateResult {
+  updated: boolean;
+  previousSha: string;
+  headSha: string;
+  status: ProjectGitStatus;
+}
+
 export interface ProposalService {
   /** The companion validates the PR base branch against the worker-owned HEAD. */
   enforcesManagedBase?: true;
@@ -45,16 +52,19 @@ export interface ProposalService {
 export type GitRequest =
   | { verb: 'statuses' }
   | { verb: 'review'; projectId: string; binding: string; actor: string }
+  | { verb: 'update'; projectId: string; binding: string; actor: string }
   | { verb: 'propose'; projectId: string; binding: string; actor: string; input: ProposalInput };
 
 export type GitStatuses = Record<string, ProjectGitStatus>;
-export type GitResult = GitStatuses | ProposalReview | PublishedProposal;
+export type GitResult = GitStatuses | ProposalReview | PublishedProposal | GitUpdateResult;
 
 const failures = {
   git_unavailable: [503, 'Managed Git is unavailable. Try again later.'],
   git_not_ready: [503, 'The managed checkout is not ready.'],
   git_busy: [503, 'Managed Git is busy. Try again shortly.'],
   git_timeout: [504, 'The managed Git request timed out.'],
+  git_dirty_worktree: [409, 'Save or propose local changes before pulling upstream updates.'],
+  git_not_fast_forward: [409, 'Upstream history cannot be fast-forwarded cleanly.'],
   proposal_auth_required: [403, 'Verified proposal authorization is required.'],
   proposal_unavailable: [503, 'Git proposals are unavailable.'],
   invalid_git_request: [400, 'Invalid managed Git request.'],
@@ -123,6 +133,9 @@ export function parseGitRequest(raw: Buffer): GitRequest {
         value.binding.length === 64 && isGitSha(value.binding) && validProposalActor(value.actor)) {
       if (value.verb === 'review' && exactKeys(value, ['verb', 'projectId', 'binding', 'actor'])) {
         return { verb: 'review', projectId: value.projectId, binding: value.binding, actor: value.actor };
+      }
+      if (value.verb === 'update' && exactKeys(value, ['verb', 'projectId', 'binding', 'actor'])) {
+        return { verb: 'update', projectId: value.projectId, binding: value.binding, actor: value.actor };
       }
       if (value.verb === 'propose' && exactKeys(value, ['verb', 'projectId', 'binding', 'actor', 'input'])) {
         return { verb: 'propose', projectId: value.projectId, binding: value.binding, actor: value.actor, input: parseProposalInput(value.input) };

@@ -157,6 +157,7 @@ export function createHttpSecurity(options: { allowedHosts?: string[]; serveAcce
   if (options.serveAccess) {
     security.use(createServeAccess(options.serveAccess));
     security.get('/api/projects/:projectId/git/diff', proposalAuth);
+    security.post('/api/projects/:projectId/git/update', proposalAuth);
     security.post('/api/projects/:projectId/git/propose', proposalAuth);
   }
   return security;
@@ -176,7 +177,7 @@ export function createExpensiveRequestLimiter(options: RateLimitOptions = {}): R
   return (req, res, next) => {
     const read = ['GET', 'HEAD'].includes(req.method) && /^\/api\/(?:search|projects|projects\/[^/]+\/git\/diff)\/?$/i.test(req.path);
     const write = req.method === 'POST' && /^\/api\/(?:projects\/(?:inspect-local|inspect-remote|import)|(?:settings\/)?credentials\/test|projects\/[^/]+\/git\/(?:fetch|pull))\/?$/i.test(req.path);
-    if (!read && !write && !(req.method === 'POST' && /^\/api\/projects\/[^/]+\/git\/propose\/?$/i.test(req.path))) {
+    if (!read && !write && !(req.method === 'POST' && /^\/api\/projects\/[^/]+\/git\/(?:propose|update)\/?$/i.test(req.path))) {
       next();
       return;
     }
