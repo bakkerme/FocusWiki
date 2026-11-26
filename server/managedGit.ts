@@ -29,9 +29,39 @@ const gitConfig = [
   'maintenance.auto=false'
 ];
 
-function runGit(cwd: string, args: string[], signal: AbortSignal, token?: string): Promise<string> {
+function parseForgejoHttpProxy(raw: string | undefined): string | undefined {
+  const trimmed = raw?.trim();
+  if (!trimmed) return undefined;
+  let parsed: URL;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    throw new GitRpcError('git_unavailable', 'FOCUSWIKI_FORGEJO_PROXY must be a valid HTTP proxy URL.');
+  }
+  if (parsed.protocol !== 'http:' || parsed.username || parsed.password || parsed.search || parsed.hash ||
+      parsed.pathname !== '/' || !parsed.hostname) {
+    throw new GitRpcError('git_unavailable', 'FOCUSWIKI_FORGEJO_PROXY must be an http://host:port URL without credentials or path.');
+  }
+  return parsed.origin;
+}
+
+function parseForgejoCaFile(raw: string | undefined): string | undefined {
+  const trimmed = raw?.trim();
+  if (!trimmed) return undefined;
+  if (!path.isAbsolute(trimmed) || path.normalize(trimmed) !== trimmed || Buffer.byteLength(trimmed, 'utf8') > 512) {
+    throw new GitRpcError('git_unavailable', 'FOCUSWIKI_FORGEJO_CA_FILE must be a normalized absolute path.');
+  }
+  return trimmed;
+}
+
+interface GitFetchAuth {
+  token: string;
+  remote: string;
+}
+
+function runGit(cwd: string, args: string[], signal: AbortSignal, auth?: GitFetchAuth): Promise<string> {
   signal.throwIfAborted();
-  const deadline = AbortSignal.any([signal, AbortSignal.timeout(token ? 45_000 : 10_000)]);
+  const deadline = AbortSignal.any([signal, AbortSignal.timeout(auth ? 45_000 : 10_000)]);
   const env: NodeJS.ProcessEnv = {
     PATH: '/usr/bin:/bin',
     HOME: '/nonexistent',
@@ -43,11 +73,31 @@ function runGit(cwd: string, args: string[], signal: AbortSignal, token?: string
     GIT_OPTIONAL_LOCKS: '0',
     GIT_NO_REPLACE_OBJECTS: '1'
   };
-  if (token !== undefined) {
-    if (!/^[!-~]{1,4096}$/.test(token)) throw new GitRpcError('git_unavailable');
-    env.GIT_CONFIG_COUNT = '1';
-    env.GIT_CONFIG_KEY_0 = 'http.https://github.com/.extraHeader';
-    env.GIT_CONFIG_VALUE_0 = 'Authorization: Basic ' + Buffer.from('x-access-token:' + token).toString('base64');
+  if (auth !== undefined) {
+    if (!/^[!-~]{1,4096}$/.test(auth.token)) throw new GitRpcError('git_unavailable');
+    let origin: string;
+    try {
+      const parsed = new URL(auth.remote);
+      if (parsed.protocol !== 'https:' || !parsed.hostname) throw new Error();
+      origin = parsed.origin.toLowerCase();
+    } catch {
+      throw new GitRpcError('git_unavailable');
+    }
+    const configPairs: Array<[string, string]> = [[
+      `http.${origin}/.extraHeader`,
+      'Authorization: Basic ' + Buffer.from('x-access-token:' + auth.token).toString('base64')
+    ]];
+    if (origin !== 'https://github.com') {
+      const proxy = parseForgejoHttpProxy(process.env.FOCUSWIKI_FORGEJO_PROXY);
+      if (proxy) configPairs.push([`http.${origin}/.proxy`, proxy]);
+      const caFile = parseForgejoCaFile(process.env.FOCUSWIKI_FORGEJO_CA_FILE);
+      if (caFile) configPairs.push([`http.${origin}/.sslCAInfo`, caFile]);
+    }
+    env.GIT_CONFIG_COUNT = String(configPairs.length);
+    configPairs.forEach(([key, value], idx) => {
+      env[`GIT_CONFIG_KEY_${idx}`] = key;
+      env[`GIT_CONFIG_VALUE_${idx}`] = value;
+    });
   }
   return new Promise((resolve, reject) => {
     const child = spawn(GIT_PATH, [...gitConfig.flatMap((value) => ['-c', value]), ...args], {
@@ -268,7 +318,7 @@ export class ManagedRepository {
     await this.git([
       'fetch', '--no-tags', '--no-recurse-submodules', '--no-write-fetch-head', '--no-auto-maintenance',
       '--', this.context.remote, `+${this.localRef}:${this.remoteRef}`
-    ], signal, token);
+    ], signal, { token, remote: this.context.remote });
     this.fetchedAt = new Date().toISOString();
     this.fetchState = 'current';
     log.debug('Fetched remote branch', { project: this.project.id, branch: this.context.branch });
@@ -328,10 +378,10 @@ export class ManagedRepository {
     }
   }
 
-  private git(args: string[], signal: AbortSignal, token?: string, workTree = this.context.workTree): Promise<string> {
+  private git(args: string[], signal: AbortSignal, auth?: GitFetchAuth, workTree = this.context.workTree): Promise<string> {
     return runGit(this.metadataDir, [
       `--git-dir=${this.context.gitDir}`, `--work-tree=${workTree}`, ...args
-    ], signal, token);
+    ], signal, auth);
   }
 
   private async validateTree(head: string, signal: AbortSignal): Promise<string[]> {

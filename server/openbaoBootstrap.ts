@@ -11,6 +11,7 @@ const MAX_CREDENTIAL_FILE_BYTES = 4 * 1024;
 const MAX_CA_FILE_BYTES = 512 * 1024;
 const MAX_RESPONSE_BYTES = 256 * 1024;
 const MAX_KEY_BYTES = 16 * 1024;
+const MAX_TOKEN_BYTES = 4 * 1024;
 const DEFAULT_REQUEST_TIMEOUT_MS = 15_000;
 const REVOKE_TIMEOUT_MS = 5_000;
 
@@ -20,12 +21,15 @@ export interface OpenBaoConfig {
   roleId: string;
   secretId: string;
   authMount: string;
-  secretPath: string;
+  secretPath?: string;
   secretField: string;
+  keyFile?: string;
+  forgejoSecretPath?: string;
+  forgejoSecretField: string;
+  forgejoTokenFile?: string;
   namespace?: string;
   ca?: Buffer;
   proxy?: URL;
-  keyFile: string;
   retries: number;
   retryDelayMs: number;
 }
@@ -127,16 +131,37 @@ export function parseOpenBaoConfig(env: NodeJS.ProcessEnv = process.env): OpenBa
   const authMount = normalizeRelativeApiPath(rawMount, 'FOCUSWIKI_OPENBAO_AUTH_MOUNT', 128);
 
   const rawSecretPath = env.FOCUSWIKI_OPENBAO_SECRET_PATH?.trim() ?? '';
-  if (!rawSecretPath) throw new OpenBaoBootstrapError('FOCUSWIKI_OPENBAO_SECRET_PATH is required.');
-  const strippedSecretPath = rawSecretPath.replace(/^\/+/, '');
-  if (strippedSecretPath.startsWith('v1/')) {
-    throw new OpenBaoBootstrapError('FOCUSWIKI_OPENBAO_SECRET_PATH must be relative to /v1/ (for example, secret/data/focuswiki/github-app).');
+  const rawForgejoSecretPath = env.FOCUSWIKI_OPENBAO_FORGEJO_SECRET_PATH?.trim() ?? '';
+  if (!rawSecretPath && !rawForgejoSecretPath) {
+    throw new OpenBaoBootstrapError('FOCUSWIKI_OPENBAO_SECRET_PATH is required.');
   }
-  const secretPath = normalizeRelativeApiPath(strippedSecretPath, 'FOCUSWIKI_OPENBAO_SECRET_PATH', 512);
+
+  let secretPath: string | undefined;
+  if (rawSecretPath) {
+    const strippedSecretPath = rawSecretPath.replace(/^\/+/, '');
+    if (strippedSecretPath.startsWith('v1/')) {
+      throw new OpenBaoBootstrapError('FOCUSWIKI_OPENBAO_SECRET_PATH must be relative to /v1/ (for example, secret/data/focuswiki/github-app).');
+    }
+    secretPath = normalizeRelativeApiPath(strippedSecretPath, 'FOCUSWIKI_OPENBAO_SECRET_PATH', 512);
+  }
 
   const secretField = env.FOCUSWIKI_OPENBAO_SECRET_FIELD?.trim() || 'private_key';
   if (secretField.length > 128 || /[\x00-\x1f\x7f]/.test(secretField)) {
     throw new OpenBaoBootstrapError('FOCUSWIKI_OPENBAO_SECRET_FIELD is invalid.');
+  }
+
+  let forgejoSecretPath: string | undefined;
+  if (rawForgejoSecretPath) {
+    const strippedForgejoPath = rawForgejoSecretPath.replace(/^\/+/, '');
+    if (strippedForgejoPath.startsWith('v1/')) {
+      throw new OpenBaoBootstrapError('FOCUSWIKI_OPENBAO_FORGEJO_SECRET_PATH must be relative to /v1/ (for example, secret/data/apps/focuswiki/forgejo).');
+    }
+    forgejoSecretPath = normalizeRelativeApiPath(strippedForgejoPath, 'FOCUSWIKI_OPENBAO_FORGEJO_SECRET_PATH', 512);
+  }
+
+  const forgejoSecretField = env.FOCUSWIKI_OPENBAO_FORGEJO_SECRET_FIELD?.trim() || 'token';
+  if (forgejoSecretField.length > 128 || /[\x00-\x1f\x7f]/.test(forgejoSecretField)) {
+    throw new OpenBaoBootstrapError('FOCUSWIKI_OPENBAO_FORGEJO_SECRET_FIELD is invalid.');
   }
 
   const namespace = env.FOCUSWIKI_OPENBAO_NAMESPACE?.trim() || undefined;
@@ -161,17 +186,36 @@ export function parseOpenBaoConfig(env: NodeJS.ProcessEnv = process.env): OpenBa
     }
   }
 
-  const keyFile = env.FOCUSWIKI_GITHUB_APP_KEY_FILE?.trim() ?? '';
-  if (!keyFile || !path.isAbsolute(keyFile) || path.normalize(keyFile) !== keyFile || Buffer.byteLength(keyFile, 'utf8') > 512) {
-    throw new OpenBaoBootstrapError('FOCUSWIKI_GITHUB_APP_KEY_FILE must be a normalized absolute path.');
+  let keyFile: string | undefined;
+  if (secretPath) {
+    const candidate = env.FOCUSWIKI_GITHUB_APP_KEY_FILE?.trim() ?? '';
+    if (!candidate || !path.isAbsolute(candidate) || path.normalize(candidate) !== candidate || Buffer.byteLength(candidate, 'utf8') > 512) {
+      throw new OpenBaoBootstrapError('FOCUSWIKI_GITHUB_APP_KEY_FILE must be a normalized absolute path.');
+    }
+    keyFile = candidate;
+  }
+
+  let forgejoTokenFile: string | undefined;
+  if (forgejoSecretPath) {
+    const candidate = env.FOCUSWIKI_FORGEJO_TOKEN_FILE?.trim() ?? '';
+    if (!candidate || !path.isAbsolute(candidate) || path.normalize(candidate) !== candidate || Buffer.byteLength(candidate, 'utf8') > 512) {
+      throw new OpenBaoBootstrapError('FOCUSWIKI_FORGEJO_TOKEN_FILE must be a normalized absolute path.');
+    }
+    forgejoTokenFile = candidate;
+  }
+
+  if (keyFile && forgejoTokenFile && keyFile === forgejoTokenFile) {
+    throw new OpenBaoBootstrapError('FOCUSWIKI_GITHUB_APP_KEY_FILE and FOCUSWIKI_FORGEJO_TOKEN_FILE must be distinct paths.');
   }
 
   const retries = parsePositiveInt(env.FOCUSWIKI_OPENBAO_RETRIES, 3, 1, 10, 'FOCUSWIKI_OPENBAO_RETRIES');
   const retryDelayMs = parsePositiveInt(env.FOCUSWIKI_OPENBAO_RETRY_DELAY_MS, 1500, 0, 30_000, 'FOCUSWIKI_OPENBAO_RETRY_DELAY_MS');
 
   return {
-    addr, basePath, roleId, secretId, authMount, secretPath, secretField,
-    namespace, ca, proxy, keyFile, retries, retryDelayMs
+    addr, basePath, roleId, secretId, authMount,
+    secretPath, secretField, keyFile,
+    forgejoSecretPath, forgejoSecretField, forgejoTokenFile,
+    namespace, ca, proxy, retries, retryDelayMs
   };
 }
 
@@ -389,7 +433,20 @@ function extractSecretValue(payload: unknown, field: string): unknown {
   return undefined;
 }
 
-export async function fetchGitHubAppKeyFromOpenBao(config: OpenBaoConfig): Promise<string> {
+export function normalizeAndValidateForgejoToken(raw: unknown): string {
+  if (typeof raw !== 'string') {
+    throw new OpenBaoBootstrapError('OpenBao Forgejo token field is missing or not a string.', false);
+  }
+  const value = raw.trim();
+  if (!value || Buffer.byteLength(value, 'utf8') > MAX_TOKEN_BYTES || !/^[!-~]{1,4096}$/.test(value)) {
+    throw new OpenBaoBootstrapError('OpenBao Forgejo token is invalid.', false);
+  }
+  return `${value}\n`;
+}
+
+export async function fetchSecretsFromOpenBao(
+  config: OpenBaoConfig
+): Promise<{ githubAppPem?: string; forgejoToken?: string }> {
   const login = await openBaoRequest<{ auth?: { client_token?: unknown } }>(
     config,
     'POST',
@@ -405,12 +462,22 @@ export async function fetchGitHubAppKeyFromOpenBao(config: OpenBaoConfig): Promi
   }
 
   try {
-    const secret = await openBaoRequest<unknown>(config, 'GET', config.secretPath, { token });
-    if (secret.status < 200 || secret.status >= 300) {
-      throw new OpenBaoBootstrapError(`OpenBao secret read failed (HTTP ${secret.status}).`, isRetryableStatus(secret.status));
+    const result: { githubAppPem?: string; forgejoToken?: string } = {};
+    if (config.secretPath) {
+      const secret = await openBaoRequest<unknown>(config, 'GET', config.secretPath, { token });
+      if (secret.status < 200 || secret.status >= 300) {
+        throw new OpenBaoBootstrapError(`OpenBao secret read failed (HTTP ${secret.status}).`, isRetryableStatus(secret.status));
+      }
+      result.githubAppPem = normalizeAndValidateRsaPem(extractSecretValue(secret.data, config.secretField));
     }
-    const rawPem = extractSecretValue(secret.data, config.secretField);
-    return normalizeAndValidateRsaPem(rawPem);
+    if (config.forgejoSecretPath) {
+      const secret = await openBaoRequest<unknown>(config, 'GET', config.forgejoSecretPath, { token });
+      if (secret.status < 200 || secret.status >= 300) {
+        throw new OpenBaoBootstrapError(`OpenBao Forgejo secret read failed (HTTP ${secret.status}).`, isRetryableStatus(secret.status));
+      }
+      result.forgejoToken = normalizeAndValidateForgejoToken(extractSecretValue(secret.data, config.forgejoSecretField));
+    }
+    return result;
   } finally {
     try {
       await openBaoRequest(config, 'POST', 'auth/token/revoke-self', {
@@ -424,9 +491,17 @@ export async function fetchGitHubAppKeyFromOpenBao(config: OpenBaoConfig): Promi
   }
 }
 
-export function writeWorkerSecretFile(filePath: string, pem: string): void {
+export async function fetchGitHubAppKeyFromOpenBao(config: OpenBaoConfig): Promise<string> {
+  const { githubAppPem } = await fetchSecretsFromOpenBao(config);
+  if (!githubAppPem) {
+    throw new OpenBaoBootstrapError('FOCUSWIKI_OPENBAO_SECRET_PATH is required.');
+  }
+  return githubAppPem;
+}
+
+export function writeWorkerSecretFile(filePath: string, content: string): void {
   if (!path.isAbsolute(filePath) || path.normalize(filePath) !== filePath) {
-    throw new OpenBaoBootstrapError('FOCUSWIKI_GITHUB_APP_KEY_FILE must be a normalized absolute path.');
+    throw new OpenBaoBootstrapError('Worker secret file path must be a normalized absolute path.');
   }
   const uid = process.geteuid?.();
   const dirPath = path.dirname(filePath);
@@ -450,7 +525,7 @@ export function writeWorkerSecretFile(filePath: string, pem: string): void {
   try {
     const fd = fs.openSync(tempPath, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW, 0o600);
     try {
-      fs.writeFileSync(fd, pem, 'utf8');
+      fs.writeFileSync(fd, content, 'utf8');
       fs.fsyncSync(fd);
     } finally {
       fs.closeSync(fd);
@@ -467,14 +542,25 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-export async function bootstrapOpenBaoKey(env: NodeJS.ProcessEnv = process.env): Promise<void> {
+export async function bootstrapOpenBaoKey(env: NodeJS.ProcessEnv = process.env): Promise<{
+  githubAppLoaded: boolean;
+  forgejoTokenLoaded: boolean;
+}> {
   const config = parseOpenBaoConfig(env);
   let lastError: unknown;
   for (let attempt = 1; attempt <= config.retries; attempt++) {
     try {
-      const pem = await fetchGitHubAppKeyFromOpenBao(config);
-      writeWorkerSecretFile(config.keyFile, pem);
-      return;
+      const secrets = await fetchSecretsFromOpenBao(config);
+      if (secrets.githubAppPem && config.keyFile) {
+        writeWorkerSecretFile(config.keyFile, secrets.githubAppPem);
+      }
+      if (secrets.forgejoToken && config.forgejoTokenFile) {
+        writeWorkerSecretFile(config.forgejoTokenFile, secrets.forgejoToken);
+      }
+      return {
+        githubAppLoaded: Boolean(secrets.githubAppPem),
+        forgejoTokenLoaded: Boolean(secrets.forgejoToken)
+      };
     } catch (err) {
       lastError = err;
       const retryable = err instanceof OpenBaoBootstrapError && err.retryable;
@@ -486,8 +572,12 @@ export async function bootstrapOpenBaoKey(env: NodeJS.ProcessEnv = process.env):
 }
 
 if (process.argv[1] && pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url) {
-  bootstrapOpenBaoKey().then(() => {
-    console.log('[focuswiki-git] Loaded GitHub App key from OpenBao.');
+  bootstrapOpenBaoKey().then(({ githubAppLoaded, forgejoTokenLoaded }) => {
+    const loaded = [
+      githubAppLoaded ? 'GitHub App key' : '',
+      forgejoTokenLoaded ? 'Forgejo token' : ''
+    ].filter(Boolean).join(' and ');
+    console.log(`[focuswiki-git] Loaded ${loaded} from OpenBao.`);
   }).catch((err: unknown) => {
     console.error('[focuswiki-git] OpenBao bootstrap failed:', err instanceof Error ? err.message : 'Unknown error.');
     process.exitCode = 1;

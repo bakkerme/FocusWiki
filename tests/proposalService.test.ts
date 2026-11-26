@@ -1,6 +1,9 @@
 import { execFileSync, type ExecFileException, type ExecFileOptionsWithBufferEncoding } from 'node:child_process';
 import { generateKeyPairSync, verify } from 'node:crypto';
 import fs from 'node:fs';
+import http from 'node:http';
+import https from 'node:https';
+import net, { type AddressInfo } from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -24,7 +27,8 @@ vi.mock('node:child_process', async (importOriginal) => {
       upstream.pushes.push({ args, env: options.env ?? {} });
       upstream.beforePush?.();
       return actual.execFile(file, args.map((arg) =>
-        arg === 'https://github.com/ExampleOrg/FableDocs.git' ? upstream.localUrl : arg
+        arg === 'https://github.com/ExampleOrg/FableDocs.git' || arg === 'https://git.invalid.ts.net/ExampleOrg/LanDocs.git'
+          ? upstream.localUrl : arg
       ), { ...options, env: { ...options.env, GIT_ALLOW_PROTOCOL: 'file' } }, (error, stdout, stderr) => {
         if (!error && upstream.losePushResponse) {
           upstream.losePushResponse = false;
@@ -446,5 +450,229 @@ describe('proposal worker', () => {
     await expect(publishProposal(ctx, input)).resolves.toEqual({ url: pullRequestUrl, sha });
     expect(upstream.pushes).toHaveLength(1);
     expect(calls.postCount).toBe(1);
+  });
+
+  it('supports Forgejo proposals, exact ref matching, token file guards, and crash recovery', async () => {
+    const forgejoOrigin = 'https://git.invalid.ts.net';
+    const forgejoRemote = `${forgejoOrigin}/ExampleOrg/LanDocs.git`;
+    const forgejoPrUrl = `${forgejoOrigin}/ExampleOrg/LanDocs/pulls/12`;
+    const forgejoToken = 'fictional-forgejo-token-value';
+    const tokenPath = path.join(root, 'forgejo.token');
+    fs.writeFileSync(tokenPath, `${forgejoToken}\n`, { mode: 0o400 });
+    const forgejoCtx: ProposalContext = { ...ctx, projectId: 'lan-docs', remote: forgejoRemote };
+
+    // Rejects Forgejo remote when FOCUSWIKI_FORGEJO_ORIGIN is unset or mismatched.
+    await expect(getRepoToken(forgejoCtx, 'read')).rejects.toThrow(/github\.com/);
+    vi.stubEnv('FOCUSWIKI_FORGEJO_ORIGIN', 'https://other.invalid.ts.net');
+    vi.stubEnv('FOCUSWIKI_FORGEJO_TOKEN_FILE', tokenPath);
+    await expect(getRepoToken(forgejoCtx, 'read')).rejects.toThrow(/FOCUSWIKI_FORGEJO_ORIGIN/);
+
+    // Rejects symlinked token file.
+    vi.stubEnv('FOCUSWIKI_FORGEJO_ORIGIN', forgejoOrigin);
+    const linkedToken = path.join(root, 'linked-forgejo.token');
+    fs.symlinkSync(tokenPath, linkedToken);
+    vi.stubEnv('FOCUSWIKI_FORGEJO_TOKEN_FILE', linkedToken);
+    await expect(getRepoToken(forgejoCtx, 'read')).rejects.toThrow(/Forgejo token could not be read/);
+
+    vi.stubEnv('FOCUSWIKI_FORGEJO_TOKEN_FILE', tokenPath);
+    await expect(getRepoToken(forgejoCtx, 'read')).resolves.toBe(forgejoToken);
+    await expect(getRepoToken(forgejoCtx, 'write')).resolves.toBe(forgejoToken);
+
+    const pulls: unknown[] = [];
+    let postCount = 0;
+    let losePrResponse = true;
+    const forgejoFetch = vi.fn(async (urlString: string, init: RequestInit) => {
+      const url = new URL(urlString);
+      const auth = new Headers(init.headers).get('Authorization');
+      expect(url.origin).toBe(forgejoOrigin);
+      expect(auth).toBe(`token ${forgejoToken}`);
+      expect(init.redirect).toBe('error');
+      const apiBase = '/api/v1/repos/ExampleOrg/LanDocs';
+      if (url.pathname.startsWith(`${apiBase}/git/refs/heads/`)) {
+        const suffix = decodeURIComponent(url.pathname.slice(`${apiBase}/git/refs/heads/`.length));
+        const ref = `refs/heads/${suffix}`;
+        try {
+          const sha = origin('rev-parse', '--verify', ref);
+          // Include a prefix-matching sibling ref to verify exact ref filtering.
+          return Response.json([
+            { ref: `${ref}-extra`, object: { type: 'commit', sha: '0'.repeat(40) } },
+            { ref, object: { type: 'commit', sha } }
+          ]);
+        } catch {
+          // Return only a prefix-matching sibling when the exact branch does not exist yet.
+          return Response.json([
+            { ref: `${ref}-extra`, object: { type: 'commit', sha: base } }
+          ]);
+        }
+      }
+      if (url.pathname === `${apiBase}/pulls`) {
+        if (init.method === 'GET') {
+          expect(url.searchParams.get('state')).toBe('all');
+          return Response.json(pulls);
+        }
+        postCount++;
+        const body = JSON.parse(String(init.body));
+        expect(body.head).toBe(forgejoCtx.branch);
+        expect(body.base).toBe(baseBranch);
+        const pull = {
+          html_url: forgejoPrUrl,
+          head: { ref: forgejoCtx.branch, sha: origin('rev-parse', `refs/heads/${forgejoCtx.branch}`), repo: { full_name: 'ExampleOrg/LanDocs' } },
+          base: { ref: body.base, repo: { full_name: 'ExampleOrg/LanDocs' } }
+        };
+        pulls.push(pull);
+        if (losePrResponse) {
+          losePrResponse = false;
+          throw new Error(`mock lost Forgejo PR response: ${forgejoToken}`);
+        }
+        return Response.json(pull, { status: 201 });
+      }
+      throw new Error(`Unexpected Forgejo route: ${url.pathname}`);
+    });
+    vi.stubGlobal('fetch', forgejoFetch);
+
+    draft();
+    const review = await reviewProposal(forgejoCtx);
+    const input = { reviewId: review.reviewId, message: 'Update internal LAN guide', paths: ['Guide.md'] };
+    await expect(publishProposal(forgejoCtx, input)).rejects.toThrow(/^Forgejo request could not be completed\.$/);
+    const sha = origin('rev-parse', `refs/heads/${forgejoCtx.branch}`);
+    await expect(publishProposal(forgejoCtx, input)).resolves.toEqual({ url: forgejoPrUrl, sha });
+    expect(upstream.pushes).toHaveLength(1);
+    expect(upstream.pushes[0].args).toContain(forgejoRemote);
+    expect(upstream.pushes[0].env.FOCUSWIKI_PUSH_TOKEN).toBe(forgejoToken);
+    expect(postCount).toBe(1);
+  });
+
+  it('tunnels Forgejo API and Git push through FOCUSWIKI_FORGEJO_PROXY without local DNS lookup', async () => {
+    const forgejoOrigin = 'https://git.invalid.ts.net';
+    const forgejoRemote = `${forgejoOrigin}/ExampleOrg/LanDocs.git`;
+    const forgejoPrUrl = `${forgejoOrigin}/ExampleOrg/LanDocs/pulls/19`;
+    const forgejoToken = 'fictional-proxied-forgejo-token';
+    const tokenPath = path.join(root, 'forgejo-proxy.token');
+    fs.writeFileSync(tokenPath, `${forgejoToken}\n`, { mode: 0o400 });
+
+    const keyPath = path.join(root, 'forgejo.key');
+    const certPath = path.join(root, 'forgejo.crt');
+    execFileSync('openssl', [
+      'req', '-x509', '-newkey', 'rsa:2048', '-nodes',
+      '-keyout', keyPath, '-out', certPath,
+      '-days', '1', '-subj', '/CN=git.invalid.ts.net',
+      '-addext', 'subjectAltName=DNS:git.invalid.ts.net,IP:127.0.0.1'
+    ], { stdio: 'ignore' });
+
+    const pulls: unknown[] = [];
+    const seenHosts: Array<string | undefined> = [];
+    const forgejoServer = https.createServer({
+      cert: fs.readFileSync(certPath),
+      key: fs.readFileSync(keyPath)
+    }, (req, res) => {
+      seenHosts.push(req.headers.host);
+      let raw = '';
+      req.on('data', (chunk) => { raw += chunk; });
+      req.on('end', () => {
+        if (req.headers.authorization !== `token ${forgejoToken}`) {
+          res.writeHead(401);
+          res.end();
+          return;
+        }
+        const url = new URL(req.url ?? '/', forgejoOrigin);
+        const apiBase = '/api/v1/repos/ExampleOrg/LanDocs';
+        if (req.method === 'GET' && url.pathname.startsWith(`${apiBase}/git/refs/heads/`)) {
+          const suffix = decodeURIComponent(url.pathname.slice(`${apiBase}/git/refs/heads/`.length));
+          const ref = `refs/heads/${suffix}`;
+          try {
+            const sha = origin('rev-parse', '--verify', ref);
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify([{ ref, object: { type: 'commit', sha } }]));
+          } catch {
+            res.writeHead(404, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ message: 'Not Found' }));
+          }
+          return;
+        }
+        if (url.pathname === `${apiBase}/pulls`) {
+          if (req.method === 'GET') {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify(pulls));
+            return;
+          }
+          const body = JSON.parse(raw);
+          const pull = {
+            html_url: forgejoPrUrl,
+            head: { ref: ctx.branch, sha: origin('rev-parse', `refs/heads/${ctx.branch}`), repo: { full_name: 'ExampleOrg/LanDocs' } },
+            base: { ref: body.base, repo: { full_name: 'ExampleOrg/LanDocs' } }
+          };
+          pulls.push(pull);
+          res.writeHead(201, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(pull));
+          return;
+        }
+        res.writeHead(404);
+        res.end();
+      });
+    });
+
+    const tunnels: string[] = [];
+    const activeSockets = new Set<{ destroy(): unknown }>();
+    const proxyServer = http.createServer((_req, res) => {
+      res.writeHead(405);
+      res.end();
+    });
+    await new Promise<void>((resolve) => forgejoServer.listen(0, '127.0.0.1', resolve));
+    const forgejoPort = (forgejoServer.address() as AddressInfo).port;
+    proxyServer.on('connect', (req, clientSocket, head) => {
+      const authority = req.url ?? '';
+      tunnels.push(authority);
+      activeSockets.add(clientSocket);
+      clientSocket.once('close', () => activeSockets.delete(clientSocket));
+      if (authority !== 'git.invalid.ts.net:443') {
+        clientSocket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
+        clientSocket.destroy();
+        return;
+      }
+      const sock = net.connect(forgejoPort, '127.0.0.1', () => {
+        clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
+        if (head.length > 0) sock.write(head);
+        sock.pipe(clientSocket);
+        clientSocket.pipe(sock);
+      });
+      activeSockets.add(sock);
+      sock.once('close', () => activeSockets.delete(sock));
+      sock.on('error', () => clientSocket.destroy());
+      clientSocket.on('error', () => sock.destroy());
+    });
+    await new Promise<void>((resolve) => proxyServer.listen(0, '127.0.0.1', resolve));
+    const proxyPort = (proxyServer.address() as AddressInfo).port;
+    const proxyUrl = `http://127.0.0.1:${proxyPort}`;
+
+    try {
+      vi.stubEnv('FOCUSWIKI_FORGEJO_ORIGIN', forgejoOrigin);
+      vi.stubEnv('FOCUSWIKI_FORGEJO_TOKEN_FILE', tokenPath);
+      vi.stubEnv('FOCUSWIKI_FORGEJO_PROXY', proxyUrl);
+      vi.stubEnv('FOCUSWIKI_FORGEJO_CA_FILE', certPath);
+
+      const forgejoCtx: ProposalContext = { ...ctx, projectId: 'lan-docs', remote: forgejoRemote };
+      draft();
+      const review = await reviewProposal(forgejoCtx);
+      const result = await publishProposal(forgejoCtx, {
+        reviewId: review.reviewId,
+        message: 'Proxied Forgejo proposal',
+        paths: ['Guide.md']
+      });
+      expect(result.url).toBe(forgejoPrUrl);
+      expect(tunnels.length).toBeGreaterThanOrEqual(4);
+      expect(tunnels.every((target) => target === 'git.invalid.ts.net:443')).toBe(true);
+      expect(seenHosts.every((host) => host === 'git.invalid.ts.net')).toBe(true);
+      expect(upstream.pushes).toHaveLength(1);
+      expect(upstream.pushes[0].args).toContain(`http.proxy=${proxyUrl}`);
+      expect(upstream.pushes[0].args).toContain(`http.sslCAInfo=${certPath}`);
+    } finally {
+      for (const s of activeSockets) s.destroy();
+      forgejoServer.closeAllConnections();
+      proxyServer.closeAllConnections();
+      await Promise.all([
+        new Promise<void>((resolve) => forgejoServer.close(() => resolve())),
+        new Promise<void>((resolve) => proxyServer.close(() => resolve()))
+      ]);
+    }
   });
 });

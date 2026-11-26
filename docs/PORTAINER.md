@@ -92,6 +92,27 @@ Before enrolling real repositories, verify the deployment end-to-end against one
 
    Local projects are mounted into `web` only (`git-worker` skips them). Reading, searching, rich Markdown editing, and anchored comments work directly on disk; managed Git change review and PR proposals are disabled for local entries.
 
+   **Optional self-hosted Forgejo repositories:** To manage private internal repositories on a self-hosted Forgejo instance (such as `https://git.tailnet.ts.net`) with full auto fast-forward, Pull latest, diff review, and PR proposals:
+
+   1. Create a dedicated non-admin Forgejo bot user (for example `focuswiki-bot`), add it as a **Write** collaborator on only the repositories FocusWiki should manage, protect the base branch (`main`/`master`) to require PRs, and generate an access token with `write:repository` and `write:issue` scopes.
+   2. Store that token in OpenBao (for example `bao kv put secret/apps/focuswiki/forgejo token=<token>`) and grant `read` on `secret/data/apps/focuswiki/forgejo` to your `focuswiki-git-worker` OpenBao policy.
+   3. If Forgejo runs behind a Tailscale Serve sidecar (`tag:git`), grant `tag:focuswiki` → `tag:git` on `tcp:443` in your Tailscale ACL.
+   4. Set `FOCUSWIKI_FORGEJO_ORIGIN=https://git.tailnet.ts.net`, `FOCUSWIKI_OPENBAO_FORGEJO_SECRET_PATH=secret/data/apps/focuswiki/forgejo`, and (when routing Tailscale traffic through the sidecar) `FOCUSWIKI_FORGEJO_PROXY=http://tailscale:1055` in Portainer.
+   5. Add a `"provider": "forgejo"` entry in `enrollment.json`:
+
+      ```json
+      {
+        "id": "lan-docs",
+        "name": "LAN Docs",
+        "provider": "forgejo",
+        "remote": "https://git.tailnet.ts.net/brandon/lan-docs.git",
+        "branch": "main",
+        "defaultDoc": "README.md"
+      }
+      ```
+
+      `git-worker` enforces that every `"provider": "forgejo"` remote matches `FOCUSWIKI_FORGEJO_ORIGIN` exactly; `web` still runs with `network_mode: none` and never receives Forgejo or OpenBao credentials.
+
 ## 4. Deploy the stack in Portainer
 
 In Portainer, create a new stack using [compose.portainer.yaml](../compose.portainer.yaml) (via Git repository or Web editor) and configure the stack environment variables:
@@ -103,13 +124,17 @@ In Portainer, create a new stack using [compose.portainer.yaml](../compose.porta
 | `FOCUSWIKI_LOCAL_REPOS_HOST_PATH` | No | *(named volume `local-repos`)* | Optional absolute NAS directory mounted into `web` at `/app/local-repos` for unmanaged `"local": true` projects (one subfolder per project `id`, writable by UID `10002` / GID `0`). Never mounted into `git-worker`. |
 | `FOCUSWIKI_PUBLIC_ORIGIN` | Yes | `https://focuswiki.tailnet.ts.net` | Exact Tailscale Serve HTTPS origin (no trailing slash). Must match `FOCUSWIKI_TS_HOSTNAME` + your tailnet domain. |
 | `FOCUSWIKI_PUBLISHERS` | Recommended | `alice@example.test` | Comma-separated canonical Tailscale logins allowed to open PRs. Leave empty to run read/edit-only without PR publication. |
-| `FOCUSWIKI_GITHUB_APP_ID` | Yes | `123456` | Numeric GitHub App ID. |
-| `FOCUSWIKI_GITHUB_INSTALLATION_ID` | Yes | `12345678` | Numeric GitHub App installation ID. |
+| `FOCUSWIKI_GITHUB_APP_ID` | GitHub only | `123456` | Numeric GitHub App ID (required when enrolling GitHub repositories). |
+| `FOCUSWIKI_GITHUB_INSTALLATION_ID` | GitHub only | `12345678` | Numeric GitHub App installation ID. |
+| `FOCUSWIKI_FORGEJO_ORIGIN` | Forgejo only | `https://git.tailnet.ts.net` | Exact HTTPS origin of your self-hosted Forgejo server (no trailing slash). Required when enrolling `"provider": "forgejo"` repositories. |
+| `FOCUSWIKI_FORGEJO_PROXY` | No | `http://tailscale:1055` | Set alongside `FOCUSWIKI_TS_OUTBOUND_HTTP_PROXY_LISTEN=:1055` to tunnel Forgejo HTTPS Git and API traffic through the stack's `tailscale` sidecar. |
 | `FOCUSWIKI_OPENBAO_ADDR` | Yes | `https://openbao.tailnet.ts.net` | HTTPS OpenBao URL (TLS is strictly verified). |
 | `FOCUSWIKI_OPENBAO_ROLE_ID` | Yes | `...` | AppRole Role ID from step 1. |
 | `FOCUSWIKI_OPENBAO_SECRET_ID` | Yes | `...` | AppRole Secret ID from step 1. |
-| `FOCUSWIKI_OPENBAO_SECRET_PATH` | Yes | `secret/data/focuswiki/github-app` | OpenBao API path relative to `/v1/`. |
-| `FOCUSWIKI_OPENBAO_SECRET_FIELD` | No | `private_key` | Field name inside the secret containing the RSA PEM. |
+| `FOCUSWIKI_OPENBAO_SECRET_PATH` | GitHub only | `secret/data/focuswiki/github-app` | OpenBao API path relative to `/v1/` for the GitHub App RSA PEM. |
+| `FOCUSWIKI_OPENBAO_SECRET_FIELD` | No | `private_key` | Field name inside the GitHub App secret containing the RSA PEM. |
+| `FOCUSWIKI_OPENBAO_FORGEJO_SECRET_PATH` | Forgejo only | `secret/data/apps/focuswiki/forgejo` | OpenBao API path relative to `/v1/` for the Forgejo access token. |
+| `FOCUSWIKI_OPENBAO_FORGEJO_SECRET_FIELD` | No | `token` | Field name inside the Forgejo secret containing the access token. |
 | `FOCUSWIKI_OPENBAO_AUTH_MOUNT` | No | `approle` | AppRole mount path if customized. |
 | `FOCUSWIKI_OPENBAO_NAMESPACE` | No | *(empty)* | Optional `X-Vault-Namespace` header. |
 | `FOCUSWIKI_TS_HOSTNAME` | No | `focuswiki` | Tailscale node name for the Serve sidecar. |
