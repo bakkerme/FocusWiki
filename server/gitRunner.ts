@@ -41,15 +41,36 @@ function proposalFailure(error: unknown): GitRpcError {
   return new GitRpcError('git_operation_failed');
 }
 
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 function validatePublished(result: PublishedProposal, remote: string): PublishedProposal {
-  const target = /^https:\/\/github\.com\/([^/]+\/[^/]+)\/pull\/([1-9]\d{0,19})$/
-    .exec(typeof result?.url === 'string' ? result.url : '');
-  const slug = remote.slice('https://github.com/'.length, -4);
-  if (!target || target[0] !== result.url || target[1].toLowerCase() !== slug ||
-      !isGitSha(result.sha)) {
+  const url = typeof result?.url === 'string' ? result.url : '';
+  if (remote.startsWith('https://github.com/')) {
+    const target = /^https:\/\/github\.com\/([^/]+\/[^/]+)\/pull\/([1-9]\d{0,19})$/.exec(url);
+    const slug = remote.slice('https://github.com/'.length, -4);
+    if (!target || target[0] !== url || target[1].toLowerCase() !== slug || !isGitSha(result.sha)) {
+      throw new GitRpcError('git_operation_failed');
+    }
+    return { url, sha: result.sha };
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(remote);
+  } catch {
     throw new GitRpcError('git_operation_failed');
   }
-  return { url: result.url, sha: result.sha };
+  if (parsed.protocol !== 'https:' || !parsed.pathname.endsWith('.git')) {
+    throw new GitRpcError('git_operation_failed');
+  }
+  const origin = parsed.origin.toLowerCase();
+  const slug = parsed.pathname.slice(1, -4).toLowerCase();
+  const target = new RegExp(`^${escapeRegExp(origin)}/([^/]+/[^/]+)/pulls/([1-9]\\d{0,19})$`).exec(url);
+  if (!target || target[0] !== url || target[1].toLowerCase() !== slug || !isGitSha(result.sha)) {
+    throw new GitRpcError('git_operation_failed');
+  }
+  return { url, sha: result.sha };
 }
 
 async function prepareWorkerSocket(socketPath: string): Promise<void> {

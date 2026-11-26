@@ -4,11 +4,15 @@ import path from 'node:path';
 
 export const MAX_PROJECTS = 64;
 const PROJECT_ID = /^[a-z0-9][a-z0-9._-]{0,63}$/;
-const REMOTE = /^https:\/\/github\.com\/([a-z0-9](?:[a-z0-9-]{0,37}[a-z0-9])?)\/([a-z0-9_.-]{1,100})$/i;
+const GITHUB_REMOTE = /^https:\/\/github\.com\/([a-z0-9](?:[a-z0-9-]{0,37}[a-z0-9])?)\/([a-z0-9_.-]{1,100})$/i;
+const FORGEJO_PATH = /^\/([a-z0-9](?:[a-z0-9._-]{0,38}[a-z0-9])?)\/([a-z0-9_.-]{1,100})$/i;
+
+export type GitProvider = 'github' | 'forgejo';
 
 export interface EnrolledProject {
   id: string;
   name: string;
+  provider?: GitProvider;
   remote: string;
   branch: string;
   defaultDoc?: string;
@@ -49,12 +53,53 @@ export function validCheckoutFile(value: unknown): value is string {
   return hasSafeRelativeSegments(value, CHECKOUT_FORBIDDEN_SEGMENT);
 }
 
-function canonicalRemote(value: unknown): string | undefined {
+export function normalizeHttpsOrigin(value: unknown): string | undefined {
+  if (typeof value !== 'string' || !value || value !== value.trim() || /[\s\\\x00-\x1f\x7f]/.test(value)) {
+    return undefined;
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    return undefined;
+  }
+  if (parsed.protocol !== 'https:' || parsed.username || parsed.password || parsed.search || parsed.hash ||
+      parsed.pathname !== '/' || !parsed.hostname) {
+    return undefined;
+  }
+  return parsed.origin.toLowerCase();
+}
+
+export function projectProvider(project: { provider?: GitProvider; remote: string }): GitProvider {
+  if (project.provider === 'forgejo') return 'forgejo';
+  if (project.provider === 'github') return 'github';
+  return project.remote.startsWith('https://github.com/') ? 'github' : 'forgejo';
+}
+
+function canonicalRemote(value: unknown, provider: GitProvider): string | undefined {
   if (typeof value !== 'string' || value !== value.trim()) return;
-  const match = REMOTE.exec(value);
+  if (provider === 'github') {
+    const match = GITHUB_REMOTE.exec(value);
+    const repo = match?.[2].replace(/\.git$/i, '');
+    if (!match || !repo || /^\.+$/.test(repo) || /\.git$/i.test(repo)) return;
+    return `https://github.com/${match[1].toLowerCase()}/${repo.toLowerCase()}.git`;
+  }
+  if (/[%\\\s\x00-\x1f\x7f]/.test(value)) return;
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    return;
+  }
+  if (parsed.protocol !== 'https:' || parsed.username || parsed.password || parsed.search || parsed.hash ||
+      !parsed.hostname || parsed.hostname.toLowerCase() === 'github.com') {
+    return;
+  }
+  const match = FORGEJO_PATH.exec(parsed.pathname);
+  const owner = match?.[1];
   const repo = match?.[2].replace(/\.git$/i, '');
-  if (!match || !repo || /^\.+$/.test(repo) || /\.git$/i.test(repo)) return;
-  return `https://github.com/${match[1].toLowerCase()}/${repo.toLowerCase()}.git`;
+  if (!owner || !repo || /^\.+$/.test(owner) || /^\.+$/.test(repo) || /\.git$/i.test(repo)) return;
+  return `${parsed.origin.toLowerCase()}/${owner.toLowerCase()}/${repo.toLowerCase()}.git`;
 }
 
 function validBranch(value: unknown): value is string {
@@ -100,27 +145,37 @@ export function loadEnrollmentEntries(file: string): EnrollmentEntry[] {
       ids.add(project.id);
       return { id: project.id, name: project.name.trim(), local: true, defaultDoc: project.defaultDoc };
     }
-    const remote = canonicalRemote(project.remote);
+    const rawProvider = project.provider;
+    if (rawProvider !== undefined && rawProvider !== 'github' && rawProvider !== 'forgejo') {
+      throw new Error(`Invalid managed project at enrollment index ${index}.`);
+    }
+    const provider: GitProvider = rawProvider ?? 'github';
+    const remote = canonicalRemote(project.remote, provider);
     if (!remote || !validProjectId(project.id) || ids.has(project.id) ||
         typeof project.name !== 'string' || !project.name.trim() || project.name.length > 120 ||
         !validBranch(project.branch) ||
         (project.defaultDoc !== undefined &&
           (!validProjectFile(project.defaultDoc) || !project.defaultDoc.endsWith('.md'))) ||
-        Object.keys(project).some((key) => !['id', 'name', 'remote', 'branch', 'defaultDoc'].includes(key))) {
+        Object.keys(project).some((key) => !['id', 'name', 'provider', 'remote', 'branch', 'defaultDoc'].includes(key))) {
       throw new Error(`Invalid managed project at enrollment index ${index}.`);
     }
     ids.add(project.id);
-    return { id: project.id, name: project.name.trim(), remote, branch: project.branch, defaultDoc: project.defaultDoc };
+    return provider === 'forgejo'
+      ? { id: project.id, name: project.name.trim(), provider: 'forgejo', remote, branch: project.branch, defaultDoc: project.defaultDoc }
+      : { id: project.id, name: project.name.trim(), remote, branch: project.branch, defaultDoc: project.defaultDoc };
   });
 }
 
-/** Returns only GitHub-managed enrolled projects (local entries are validated and skipped). */
+/** Returns only Git-managed enrolled projects (local entries are validated and skipped). */
 export function loadEnrollment(file: string): EnrolledProject[] {
   return loadEnrollmentEntries(file).filter((entry): entry is EnrolledProject => !isLocalProject(entry));
 }
 
 export function enrollmentBinding(project: EnrolledProject): string {
-  return createHash('sha256').update(JSON.stringify([project.id, project.remote, project.branch])).digest('hex');
+  const fields = project.provider === 'forgejo'
+    ? [project.id, project.remote, project.branch, 'forgejo']
+    : [project.id, project.remote, project.branch];
+  return createHash('sha256').update(JSON.stringify(fields)).digest('hex');
 }
 
 export function directoriesOverlap(a: string, b: string): boolean {

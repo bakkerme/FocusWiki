@@ -13,7 +13,11 @@ import { startGitRunner } from '../server/gitRunner.js';
 import { GitSocketClient } from '../server/gitSocketClient.js';
 import { ProjectRegistry } from '../server/projectRegistry.js';
 
-const fixture = vi.hoisted(() => ({ source: '', fetches: [] as string[][] }));
+const fixture = vi.hoisted(() => ({
+  source: '',
+  fetches: [] as string[][],
+  fetchEnvs: [] as Array<NodeJS.ProcessEnv | undefined>
+}));
 
 vi.mock('node:child_process', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:child_process')>();
@@ -24,20 +28,30 @@ vi.mock('node:child_process', async (importOriginal) => {
       if (command !== '/usr/bin/git' || fetchIndex < 0) return actual.spawn(command, args, options);
 
       const remote = args[fetchIndex + 6];
-      if (remote !== 'https://github.com/fictional-observatory/amber-wiki.git' || !fixture.source) {
+      const allowed = new Set([
+        'https://github.com/fictional-observatory/amber-wiki.git',
+        'https://git.invalid.ts.net/fictional-lan/lan-docs.git'
+      ]);
+      if (!allowed.has(remote) || !fixture.source) {
         throw new Error('Only disposable test transport is allowed.');
       }
-      expect(options.env?.GIT_CONFIG_KEY_0).toBe('http.https://github.com/.extraHeader');
+      const origin = new URL(remote).origin;
+      expect(options.env?.GIT_CONFIG_KEY_0).toBe(`http.${origin}/.extraHeader`);
       expect(options.env?.GIT_CONFIG_VALUE_0).toBe('Authorization: Basic ' +
         Buffer.from('x-access-token:fictional-read-token').toString('base64'));
       expect(args.join(' ')).not.toContain('fictional-read-token');
       fixture.fetches.push(args);
+      fixture.fetchEnvs.push({ ...options.env });
       const localArgs = [...args.slice(0, fetchIndex), '-c', 'protocol.file.allow=always', ...args.slice(fetchIndex)];
       localArgs[fetchIndex + 8] = fixture.source;
       const env = { ...options.env };
       delete env.GIT_CONFIG_COUNT;
       delete env.GIT_CONFIG_KEY_0;
       delete env.GIT_CONFIG_VALUE_0;
+      delete env.GIT_CONFIG_KEY_1;
+      delete env.GIT_CONFIG_VALUE_1;
+      delete env.GIT_CONFIG_KEY_2;
+      delete env.GIT_CONFIG_VALUE_2;
       return actual.spawn(command, localArgs, { ...options, env });
     }
   };
@@ -67,6 +81,7 @@ describe('managed Git service', () => {
   beforeEach(() => {
     fixture.source = '';
     fixture.fetches.length = 0;
+    fixture.fetchEnvs.length = 0;
     root = fs.mkdtempSync(path.join(os.tmpdir(), 'fw-git-'));
     reposDir = path.join(root, 'repos');
     stateDir = path.join(root, 'state');
@@ -80,6 +95,7 @@ describe('managed Git service', () => {
   });
 
   afterEach(async () => {
+    vi.unstubAllEnvs();
     vi.restoreAllMocks();
     await hub?.close();
     await runner?.close();
@@ -576,6 +592,106 @@ describe('managed Git service', () => {
     expect(fs.readFileSync(path.join(workTree, '.env'), 'utf8')).toBe('LOCAL_SECRET=keep\n');
     expect(fs.readFileSync(path.join(workTree, 'drafts', 'wip.md'), 'utf8')).toBe('# Keep local ignored draft\n');
     expect(fs.readFileSync(path.join(workTree, 'notes'), 'utf8')).toBe('local ignored file\n');
+  });
+
+  it('supports Forgejo managed projects with origin-scoped auth/proxy headers and /pulls/ URL validation', async () => {
+    const forgejoEntry = {
+      id: 'lan-docs',
+      name: 'LAN Docs',
+      provider: 'forgejo' as const,
+      remote: 'https://git.invalid.ts.net/Fictional-LAN/LAN-Docs',
+      branch: 'main',
+      defaultDoc: 'README.md'
+    };
+
+    const invalidCandidate = path.join(root, 'invalid-forgejo.json');
+    for (const projects of [
+      [{ ...forgejoEntry, remote: 'http://git.invalid.ts.net/fictional-lan/lan-docs.git' }],
+      [{ ...forgejoEntry, remote: 'https://github.com/fictional-lan/lan-docs.git' }],
+      [{ ...forgejoEntry, remote: 'https://user@git.invalid.ts.net/fictional-lan/lan-docs.git' }],
+      [{ ...forgejoEntry, remote: 'https://git.invalid.ts.net/fictional-lan/lan-docs?ref=main' }],
+      [{ ...forgejoEntry, remote: 'https://git.invalid.ts.net/fictional-lan/lan-docs.git.git' }],
+      [{ ...forgejoEntry, provider: 'gitlab' }],
+      [{ id: 'lan-docs', name: 'LAN Docs', remote: 'https://git.invalid.ts.net/fictional-lan/lan-docs.git', branch: 'main' }]
+    ]) {
+      fs.writeFileSync(invalidCandidate, JSON.stringify({ projects }));
+      expect(() => loadEnrollmentEntries(invalidCandidate)).toThrow('Invalid managed project');
+    }
+
+    vi.stubEnv('FOCUSWIKI_FORGEJO_PROXY', 'http://127.0.0.1:1055');
+    fs.unlinkSync(enrollmentFile);
+    fs.writeFileSync(enrollmentFile, JSON.stringify({ projects: [entry, forgejoEntry] }), { mode: 0o444 });
+    const parsed = loadEnrollment(enrollmentFile);
+    expect(parsed[1]).toMatchObject({
+      id: 'lan-docs',
+      provider: 'forgejo',
+      remote: 'https://git.invalid.ts.net/fictional-lan/lan-docs.git'
+    });
+
+    const base = upstream();
+    const service: ProposalService = {
+      enforcesManagedBase: true,
+      getRepoToken: vi.fn(async () => 'fictional-read-token'),
+      reviewProposal: vi.fn(async () => ({
+        reviewId: 'forgejo-review', snapshotDigest: 'forgejo-snapshot', diff: 'forgejo diff', commitScopeNote: '',
+        files: [], status: {
+          branch: 'main', headSha: base, headSubject: '', isClean: false,
+          changedFiles: [{ path: 'README.md', status: 'modified' }]
+        }
+      })),
+      publishProposal: vi.fn(async (ctx) => ({
+        url: ctx.remote.startsWith('https://github.com/')
+          ? 'https://github.com/fictional-observatory/amber-wiki/pull/7'
+          : 'https://git.invalid.ts.net/fictional-lan/lan-docs/pulls/3',
+        sha: base
+      }))
+    };
+
+    const client = await start(service);
+    await vi.waitFor(async () => {
+      const statuses = await client.statuses();
+      expect(statuses.amber).toMatchObject({ state: 'ready', headSha: base });
+      expect(statuses['lan-docs']).toMatchObject({
+        state: 'ready',
+        headSha: base,
+        remoteUrl: 'https://git.invalid.ts.net/fictional-lan/lan-docs.git'
+      });
+    }, { timeout: 10_000 });
+
+    // GitHub fetch must NOT receive FOCUSWIKI_FORGEJO_PROXY; Forgejo fetch MUST receive it.
+    const ghEnv = fixture.fetchEnvs.find((e) => e?.GIT_CONFIG_KEY_0 === 'http.https://github.com/.extraHeader');
+    const fjEnv = fixture.fetchEnvs.find((e) => e?.GIT_CONFIG_KEY_0 === 'http.https://git.invalid.ts.net/.extraHeader');
+    expect(ghEnv?.GIT_CONFIG_COUNT).toBe('1');
+    expect(ghEnv?.GIT_CONFIG_KEY_1).toBeUndefined();
+    expect(fjEnv?.GIT_CONFIG_COUNT).toBe('2');
+    expect(fjEnv?.GIT_CONFIG_KEY_1).toBe('http.https://git.invalid.ts.net/.proxy');
+    expect(fjEnv?.GIT_CONFIG_VALUE_1).toBe('http://127.0.0.1:1055');
+
+    hub = app('allow');
+    const review = await request(hub.app).get('/api/projects/lan-docs/git/diff').expect(200);
+    await request(hub.app).post('/api/projects/lan-docs/git/propose')
+      .send({ reviewId: review.body.reviewId, message: 'Update LAN docs', paths: ['README.md'] })
+      .expect(200, {
+        url: 'https://git.invalid.ts.net/fictional-lan/lan-docs/pulls/3',
+        sha: base
+      });
+
+    // Reject a malformed or mismatched-origin PR URL from the companion for Forgejo.
+    vi.mocked(service.publishProposal).mockResolvedValueOnce({
+      url: 'https://git.invalid.ts.net/fictional-lan/lan-docs/pull/3',
+      sha: base
+    });
+    await request(hub.app).post('/api/projects/lan-docs/git/propose')
+      .send({ reviewId: review.body.reviewId, message: 'Wrong path', paths: ['README.md'] })
+      .expect(502);
+
+    vi.mocked(service.publishProposal).mockResolvedValueOnce({
+      url: 'https://github.com/fictional-lan/lan-docs/pulls/3',
+      sha: base
+    });
+    await request(hub.app).post('/api/projects/lan-docs/git/propose')
+      .send({ reviewId: review.body.reviewId, message: 'Wrong origin', paths: ['README.md'] })
+      .expect(502);
   });
 });
 

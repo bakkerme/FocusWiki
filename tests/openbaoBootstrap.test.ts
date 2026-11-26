@@ -10,6 +10,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 import { startGitRunner } from '../server/gitRunner.js';
 import {
   bootstrapOpenBaoKey,
+  normalizeAndValidateForgejoToken,
   normalizeAndValidateRsaPem,
   parseOpenBaoConfig,
   writeWorkerSecretFile
@@ -398,5 +399,82 @@ describe('OpenBao AppRole bootstrap', () => {
     } finally {
       await runner.close();
     }
+  });
+
+  it('loads both GitHub App PEM and Forgejo token in one AppRole session, and supports Forgejo-only bootstrap', async () => {
+    let logins = 0;
+    let revokes = 0;
+    const addr = await startMockOpenBao((req, res) => {
+      if (req.method === 'POST' && req.url === '/v1/auth/approle/login') {
+        logins++;
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ auth: { client_token: `hvs.combined-${logins}` } }));
+        return;
+      }
+      if (req.method === 'GET' && req.url === '/v1/secret/data/apps/focuswiki/github-app') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ data: { data: { private_key: rsaPem } } }));
+        return;
+      }
+      if (req.method === 'GET' && req.url === '/v1/secret/data/apps/focuswiki/forgejo') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ data: { data: { token: 'fictional-forgejo-secret-token' } } }));
+        return;
+      }
+      if (req.method === 'POST' && req.url === '/v1/auth/token/revoke-self') {
+        revokes++;
+        res.writeHead(204);
+        res.end();
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+
+    const keyFile = path.join(secretsDir, 'focuswiki-github-app.pem');
+    const forgejoFile = path.join(secretsDir, 'focuswiki-forgejo.token');
+    const both = await bootstrapOpenBaoKey({
+      FOCUSWIKI_OPENBAO_ADDR: addr,
+      FOCUSWIKI_OPENBAO_ROLE_ID: 'r',
+      FOCUSWIKI_OPENBAO_SECRET_ID: 's',
+      FOCUSWIKI_OPENBAO_SECRET_PATH: 'secret/data/apps/focuswiki/github-app',
+      FOCUSWIKI_OPENBAO_FORGEJO_SECRET_PATH: 'secret/data/apps/focuswiki/forgejo',
+      FOCUSWIKI_OPENBAO_CA_FILE: tlsCert.certPath,
+      FOCUSWIKI_GITHUB_APP_KEY_FILE: keyFile,
+      FOCUSWIKI_FORGEJO_TOKEN_FILE: forgejoFile
+    });
+
+    expect(both).toEqual({ githubAppLoaded: true, forgejoTokenLoaded: true });
+    expect(logins).toBe(1);
+    expect(revokes).toBe(1);
+    expect(fs.readFileSync(keyFile, 'utf8')).toBe(rsaPem);
+    expect(fs.readFileSync(forgejoFile, 'utf8')).toBe('fictional-forgejo-secret-token\n');
+    expect(fs.statSync(forgejoFile).mode & 0o777).toBe(0o600);
+
+    // Forgejo-only bootstrap works without GitHub App secret path or key file.
+    const forgejoOnlyFile = path.join(secretsDir, 'forgejo-only.token');
+    const only = await bootstrapOpenBaoKey({
+      FOCUSWIKI_OPENBAO_ADDR: addr,
+      FOCUSWIKI_OPENBAO_ROLE_ID: 'r',
+      FOCUSWIKI_OPENBAO_SECRET_ID: 's',
+      FOCUSWIKI_OPENBAO_FORGEJO_SECRET_PATH: 'secret/data/apps/focuswiki/forgejo',
+      FOCUSWIKI_OPENBAO_CA_FILE: tlsCert.certPath,
+      FOCUSWIKI_FORGEJO_TOKEN_FILE: forgejoOnlyFile
+    });
+    expect(only).toEqual({ githubAppLoaded: false, forgejoTokenLoaded: true });
+    expect(logins).toBe(2);
+    expect(revokes).toBe(2);
+    expect(fs.readFileSync(forgejoOnlyFile, 'utf8')).toBe('fictional-forgejo-secret-token\n');
+
+    expect(() => normalizeAndValidateForgejoToken('has whitespace')).toThrow('Forgejo token is invalid');
+    expect(() => parseOpenBaoConfig({
+      FOCUSWIKI_OPENBAO_ADDR: addr,
+      FOCUSWIKI_OPENBAO_ROLE_ID: 'r',
+      FOCUSWIKI_OPENBAO_SECRET_ID: 's',
+      FOCUSWIKI_OPENBAO_SECRET_PATH: 'secret/data/apps/focuswiki/github-app',
+      FOCUSWIKI_OPENBAO_FORGEJO_SECRET_PATH: 'secret/data/apps/focuswiki/forgejo',
+      FOCUSWIKI_GITHUB_APP_KEY_FILE: keyFile,
+      FOCUSWIKI_FORGEJO_TOKEN_FILE: keyFile
+    })).toThrow('distinct paths');
   });
 });

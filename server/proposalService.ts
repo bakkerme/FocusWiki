@@ -1,7 +1,11 @@
 import { execFile } from 'node:child_process';
 import { createHash, createPrivateKey, randomUUID, sign } from 'node:crypto';
 import fs from 'node:fs';
+import http from 'node:http';
+import https from 'node:https';
+import { isIP } from 'node:net';
 import path from 'node:path';
+import tls from 'node:tls';
 import {
   buildCodeFileReview,
   buildCommentSidecarReview,
@@ -10,6 +14,7 @@ import {
   type ChangeFileSummary,
   type GitChangeReviewPayload
 } from '../shared/changeReview.js';
+import { normalizeHttpsOrigin } from './enrollment.js';
 import { withKeyLock } from './fileLock.js';
 import { buildGitEnv } from './gitService.js';
 
@@ -44,8 +49,12 @@ const MAX_PATHS = 2500;
 const MAX_REVIEW_FILES = 32;
 const MAX_DIFF_BYTES = 512 * 1024;
 const MAX_API_BYTES = 1024 * 1024;
+const MAX_CA_FILE_BYTES = 512 * 1024;
+const MAX_FORGEJO_PULL_PAGES = 5;
+const FORGEJO_PULL_PAGE_SIZE = 50;
 const SHA = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 const UUID = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/;
+const FORGEJO_PATH = /^\/([a-z\d](?:[a-z\d._-]{0,38}[a-z\d])?)\/([a-z\d_.-]{1,100})$/i;
 const decoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
 export const enforcesManagedBase = true;
 
@@ -56,19 +65,66 @@ class ProposalError extends Error {
   }
 }
 
-function parseRemote(remote: string) {
-  const match = /^https:\/\/github\.com\/([a-z\d](?:[a-z\d-]{0,37}[a-z\d])?)\/([a-z\d_.-]{1,100})$/i.exec(remote);
-  const owner = match?.[1];
-  const name = match?.[2].replace(/\.git$/i, '');
-  if (!owner || !name || name === '.' || name === '..' || name.toLowerCase().endsWith('.git') || remote.trim() !== remote ||
-      !remote.startsWith('https://github.com/')) {
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function parseRemote(remote: string): {
+  provider: 'github' | 'forgejo';
+  origin: string;
+  owner: string;
+  name: string;
+  slug: string;
+  api: string;
+  url: string;
+} {
+  if (remote.startsWith('https://github.com/')) {
+    const match = /^https:\/\/github\.com\/([a-z\d](?:[a-z\d-]{0,37}[a-z\d])?)\/([a-z\d_.-]{1,100})$/i.exec(remote);
+    const owner = match?.[1];
+    const name = match?.[2].replace(/\.git$/i, '');
+    if (!owner || !name || name === '.' || name === '..' || name.toLowerCase().endsWith('.git') || remote.trim() !== remote) {
+      throw new ProposalError('Expected an enrolled https://github.com/OWNER/REPO remote.');
+    }
+    return {
+      provider: 'github',
+      origin: 'https://github.com',
+      owner, name,
+      slug: `${owner}/${name}`,
+      api: `/repos/${owner}/${name}`,
+      url: `https://github.com/${owner}/${name}.git`
+    };
+  }
+
+  const configuredOrigin = normalizeHttpsOrigin(process.env.FOCUSWIKI_FORGEJO_ORIGIN);
+  if (!configuredOrigin || configuredOrigin === 'https://github.com') {
     throw new ProposalError('Expected an enrolled https://github.com/OWNER/REPO remote.');
   }
+  if (remote.trim() !== remote || /[%\\\s\x00-\x1f\x7f]/.test(remote)) {
+    throw new ProposalError('Expected an enrolled Forgejo HTTPS OWNER/REPO remote.');
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(remote);
+  } catch {
+    throw new ProposalError('Expected an enrolled Forgejo HTTPS OWNER/REPO remote.');
+  }
+  if (parsed.protocol !== 'https:' || parsed.username || parsed.password || parsed.search || parsed.hash ||
+      parsed.origin.toLowerCase() !== configuredOrigin) {
+    throw new ProposalError('The enrolled remote does not match FOCUSWIKI_FORGEJO_ORIGIN.');
+  }
+  const match = FORGEJO_PATH.exec(parsed.pathname);
+  const owner = match?.[1];
+  const name = match?.[2].replace(/\.git$/i, '');
+  if (!owner || !name || /^\.+$/.test(owner) || /^\.+$/.test(name) || name.toLowerCase().endsWith('.git')) {
+    throw new ProposalError('Expected an enrolled Forgejo HTTPS OWNER/REPO remote.');
+  }
   return {
+    provider: 'forgejo',
+    origin: configuredOrigin,
     owner, name,
     slug: `${owner}/${name}`,
-    api: `/repos/${owner}/${name}`,
-    url: `https://github.com/${owner}/${name}.git`
+    api: `/api/v1/repos/${owner}/${name}`,
+    url: `${configuredOrigin}/${owner}/${name}.git`
   };
 }
 
@@ -169,8 +225,299 @@ function appJwt(ctx: Enrollment): { jwt: string; installation: string } {
   }
 }
 
+function parseForgejoProxy(): URL | undefined {
+  const raw = process.env.FOCUSWIKI_FORGEJO_PROXY?.trim();
+  if (!raw) return undefined;
+  let proxy: URL;
+  try {
+    proxy = new URL(raw);
+  } catch {
+    throw new ProposalError('FOCUSWIKI_FORGEJO_PROXY must be a valid HTTP proxy URL.');
+  }
+  if (proxy.protocol !== 'http:' || proxy.username || proxy.password || proxy.search || proxy.hash ||
+      proxy.pathname !== '/' || !proxy.hostname) {
+    throw new ProposalError('FOCUSWIKI_FORGEJO_PROXY must be an http://host:port URL without credentials or path.');
+  }
+  return proxy;
+}
+
+function readForgejoCa(ctx: Enrollment): { filePath: string; pem: Buffer } | undefined {
+  const raw = process.env.FOCUSWIKI_FORGEJO_CA_FILE?.trim();
+  if (!raw) return undefined;
+  if (!path.isAbsolute(raw) || path.normalize(raw) !== raw || Buffer.byteLength(raw, 'utf8') > 512) {
+    throw new ProposalError('FOCUSWIKI_FORGEJO_CA_FILE must be a normalized absolute path.');
+  }
+  try {
+    const resolved = fs.realpathSync(raw);
+    if (inside(ctx.workTree, resolved) || inside(ctx.gitDir, resolved)) throw new Error();
+    const descriptor = fs.openSync(raw, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+    try {
+      const stat = fs.fstatSync(descriptor);
+      if (!stat.isFile() || stat.size < 1 || stat.size > MAX_CA_FILE_BYTES) throw new Error();
+      return { filePath: raw, pem: readBounded(descriptor, MAX_CA_FILE_BYTES) };
+    } finally {
+      fs.closeSync(descriptor);
+    }
+  } catch {
+    throw new ProposalError('Forgejo CA certificate could not be read.');
+  }
+}
+
+function unbracketHost(hostname: string): string {
+  return hostname.startsWith('[') && hostname.endsWith(']') ? hostname.slice(1, -1) : hostname;
+}
+
+function openConnectTlsSocket(target: URL, proxy: URL, ca: Buffer | undefined, timeoutMs: number): Promise<tls.TLSSocket> {
+  const targetPort = Number(target.port || 443);
+  const bareHost = unbracketHost(target.hostname);
+  const authority = `${target.hostname}:${targetPort}`;
+
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const fail = (err: Error) => {
+      if (settled) return;
+      settled = true;
+      reject(err);
+    };
+    const req = http.request({
+      host: unbracketHost(proxy.hostname),
+      port: Number(proxy.port || 80),
+      method: 'CONNECT',
+      path: authority,
+      headers: { Host: authority },
+      timeout: timeoutMs
+    });
+    req.on('timeout', () => {
+      req.destroy();
+      fail(new ProposalError('Forgejo proxy tunnel timed out.'));
+    });
+    req.on('error', () => {
+      fail(new ProposalError('Forgejo proxy connection failed.'));
+    });
+    req.on('connect', (res, socket) => {
+      if (res.statusCode !== 200) {
+        socket.destroy();
+        fail(new ProposalError(`Forgejo proxy rejected tunnel (HTTP ${res.statusCode ?? 'unknown'}).`));
+        return;
+      }
+      const tlsSocket = tls.connect({
+        socket,
+        servername: isIP(bareHost) ? undefined : bareHost,
+        ca,
+        rejectUnauthorized: true
+      });
+      const timer = setTimeout(() => {
+        tlsSocket.destroy();
+        fail(new ProposalError('Forgejo TLS handshake through proxy timed out.'));
+      }, timeoutMs);
+      tlsSocket.once('secureConnect', () => {
+        clearTimeout(timer);
+        if (settled) {
+          tlsSocket.destroy();
+          return;
+        }
+        settled = true;
+        resolve(tlsSocket);
+      });
+      tlsSocket.once('error', () => {
+        clearTimeout(timer);
+        fail(new ProposalError('Forgejo TLS verification failed.'));
+      });
+    });
+    req.end();
+  });
+}
+
+async function forgejoViaNodeTls<T>(
+  origin: string,
+  endpoint: string,
+  token: string,
+  body: object | undefined,
+  optional: boolean,
+  proxy: URL | undefined,
+  ca: Buffer | undefined
+): Promise<T | null> {
+  const target = new URL(origin);
+  const timeoutMs = 15_000;
+  const payload = body === undefined ? undefined : Buffer.from(JSON.stringify(body), 'utf8');
+  const headers: http.OutgoingHttpHeaders = {
+    Accept: 'application/json',
+    Authorization: `token ${token}`,
+    Connection: 'close'
+  };
+  if (payload) {
+    headers['Content-Type'] = 'application/json';
+    headers['Content-Length'] = payload.length;
+  }
+
+  const tlsSocket = proxy ? await openConnectTlsSocket(target, proxy, ca, timeoutMs) : undefined;
+  const bareHost = unbracketHost(target.hostname);
+  const port = Number(target.port || 443);
+
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (fn: () => void) => {
+      if (settled) return;
+      settled = true;
+      fn();
+    };
+    const handleResponse = (res: http.IncomingMessage) => {
+      const chunks: Buffer[] = [];
+      let total = 0;
+      res.on('data', (chunk: Buffer) => {
+        total += chunk.length;
+        if (total > MAX_API_BYTES) {
+          req.destroy();
+          tlsSocket?.destroy();
+          finish(() => reject(new ProposalError('Forgejo response exceeded the size limit.')));
+          return;
+        }
+        chunks.push(chunk);
+      });
+      res.on('error', () => {
+        finish(() => reject(new ProposalError('Forgejo request could not be completed.')));
+      });
+      res.on('end', () => {
+        tlsSocket?.end();
+        const status = res.statusCode ?? 0;
+        if (status >= 300 && status < 400) {
+          finish(() => reject(new ProposalError('Forgejo request could not be completed.')));
+          return;
+        }
+        if (status < 200 || status >= 300) {
+          if (optional && status === 404) {
+            finish(() => resolve(null));
+            return;
+          }
+          finish(() => reject(new ProposalError(`Forgejo request failed (HTTP ${status}).`)));
+          return;
+        }
+        if (total === 0) {
+          finish(() => reject(new ProposalError('Forgejo returned an empty response.')));
+          return;
+        }
+        try {
+          finish(() => resolve(JSON.parse(Buffer.concat(chunks, total).toString('utf8')) as T));
+        } catch {
+          finish(() => reject(new ProposalError('Forgejo request could not be completed.')));
+        }
+      });
+    };
+
+    const req = tlsSocket
+      ? http.request({
+          hostname: bareHost,
+          port,
+          path: endpoint,
+          method: body === undefined ? 'GET' : 'POST',
+          headers: { ...headers, Host: target.host },
+          timeout: timeoutMs,
+          createConnection: () => tlsSocket
+        }, handleResponse)
+      : https.request({
+          hostname: bareHost,
+          port,
+          path: endpoint,
+          method: body === undefined ? 'GET' : 'POST',
+          headers,
+          timeout: timeoutMs,
+          agent: false,
+          rejectUnauthorized: true,
+          ca,
+          servername: isIP(bareHost) ? undefined : bareHost
+        }, handleResponse);
+
+    req.on('timeout', () => {
+      req.destroy();
+      tlsSocket?.destroy();
+      finish(() => reject(new ProposalError('Forgejo request could not be completed.')));
+    });
+    req.on('error', () => {
+      tlsSocket?.destroy();
+      finish(() => reject(new ProposalError('Forgejo request could not be completed.')));
+    });
+    req.end(payload);
+  });
+}
+
+async function forgejo<T>(
+  ctx: Enrollment,
+  endpoint: string,
+  token: string,
+  body?: object,
+  optional = false
+): Promise<T | null> {
+  const proxy = parseForgejoProxy();
+  const ca = readForgejoCa(ctx);
+  if (proxy || ca) {
+    return forgejoViaNodeTls<T>(ctx.repo.origin, endpoint, token, body, optional, proxy, ca?.pem);
+  }
+  try {
+    const response = await fetch(`${ctx.repo.origin}${endpoint}`, {
+      method: body === undefined ? 'GET' : 'POST',
+      redirect: 'error',
+      signal: AbortSignal.timeout(15_000),
+      headers: {
+        Accept: 'application/json',
+        Authorization: `token ${token}`,
+        ...(body === undefined ? {} : { 'Content-Type': 'application/json' })
+      },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) })
+    });
+    if (!response.ok) {
+      await response.body?.cancel();
+      if (optional && response.status === 404) return null;
+      throw new ProposalError(`Forgejo request failed (HTTP ${response.status}).`);
+    }
+    const reader = response.body?.getReader();
+    if (!reader) throw new ProposalError('Forgejo returned an empty response.');
+    const chunks: Uint8Array[] = [];
+    let bytes = 0;
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      bytes += value.length;
+      if (bytes > MAX_API_BYTES) {
+        await reader.cancel();
+        throw new ProposalError('Forgejo response exceeded the size limit.');
+      }
+      chunks.push(value);
+    }
+    return JSON.parse(Buffer.concat(chunks).toString('utf8')) as T;
+  } catch (error) {
+    if (error instanceof ProposalError) throw error;
+    throw new ProposalError('Forgejo request could not be completed.');
+  }
+}
+
+function readForgejoToken(ctx: Enrollment): string {
+  const tokenFile = process.env.FOCUSWIKI_FORGEJO_TOKEN_FILE?.trim();
+  if (!tokenFile || !path.isAbsolute(tokenFile) || path.normalize(tokenFile) !== tokenFile) {
+    throw new ProposalError('Forgejo configuration is incomplete.');
+  }
+  try {
+    const resolvedToken = fs.realpathSync(tokenFile);
+    if (inside(ctx.workTree, resolvedToken) || inside(ctx.gitDir, resolvedToken)) throw new Error();
+    const descriptor = fs.openSync(tokenFile, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+    try {
+      const stat = fs.fstatSync(descriptor);
+      if (!stat.isFile() || stat.size < 1 || stat.size > 4096) throw new Error();
+      const token = readBounded(descriptor, 4096).toString('utf8').trim();
+      if (!token || !/^[!-~]{1,4096}$/.test(token)) throw new Error();
+      return token;
+    } finally {
+      fs.closeSync(descriptor);
+    }
+  } catch {
+    throw new ProposalError('Forgejo token could not be read from the worker secret file.');
+  }
+}
+
 async function issueToken(ctx: Enrollment, mode: TokenMode): Promise<string> {
   if (mode !== 'read' && mode !== 'write') throw new ProposalError('Invalid token mode.');
+  if (ctx.repo.provider === 'forgejo') {
+    return readForgejoToken(ctx);
+  }
   const { jwt, installation } = appJwt(ctx);
   const installed = await github<{ id?: number }>(`${ctx.repo.api}/installation`, jwt);
   if (String(installed?.id) !== installation) {
@@ -615,9 +962,24 @@ export async function reviewProposal(ctx: ProposalContext): Promise<GitChangeRev
   };
 }
 
+type RemoteRef = { ref?: string; object?: { sha?: string; type?: string } };
+
 async function remoteTip(ctx: Enrollment, token: string, branch: string, optional = false): Promise<string | null> {
   const suffix = branch.split('/').map(encodeURIComponent).join('/');
-  const ref = await github<{ ref?: string; object?: { sha?: string; type?: string } }>(
+  if (ctx.repo.provider === 'forgejo') {
+    const raw = await forgejo<RemoteRef | RemoteRef[]>(
+      ctx, `${ctx.repo.api}/git/refs/heads/${suffix}`, token, undefined, optional
+    );
+    if (raw === null && optional) return null;
+    const refs = Array.isArray(raw) ? raw : raw ? [raw] : [];
+    const exact = refs.find((entry) => entry?.ref === `refs/heads/${branch}`);
+    if (!exact && optional) return null;
+    if (!exact || exact.object?.type !== 'commit' || !SHA.test(exact.object.sha ?? '')) {
+      throw new ProposalError('Forgejo returned an unexpected branch ref.');
+    }
+    return exact.object.sha!;
+  }
+  const ref = await github<RemoteRef>(
     `${ctx.repo.api}/git/ref/heads/${suffix}`, token, undefined, optional
   );
   if (ref === null && optional) return null;
@@ -712,9 +1074,18 @@ async function pushProposal(ctx: Enrollment, directory: string, sha: string, tok
       'done',
       ''
     ].join('\n'), { mode: 0o700 });
+    const extraHttpArgs: string[] = [];
+    if (ctx.repo.provider === 'forgejo') {
+      const proxy = parseForgejoProxy();
+      extraHttpArgs.push('-c', `http.proxy=${proxy ? proxy.origin : ''}`);
+      const ca = readForgejoCa(ctx);
+      if (ca) extraHttpArgs.push('-c', `http.sslCAInfo=${ca.filePath}`);
+    } else {
+      extraHttpArgs.push('-c', 'http.proxy=');
+    }
     await git(transport, [
       `--git-dir=${transport}`, '-c', `core.hooksPath=${hooks}`,
-      '-c', 'http.followRedirects=false', '-c', 'http.sslVerify=true', '-c', 'http.proxy=',
+      '-c', 'http.followRedirects=false', '-c', 'http.sslVerify=true', ...extraHttpArgs,
       '-c', 'credential.helper=', '-c', 'credential.interactive=false',
       'push', '--porcelain', '--no-follow-tags', '--recurse-submodules=no', '--',
       ctx.repo.url, `${sha}:refs/heads/${ctx.branch}`
@@ -730,28 +1101,49 @@ async function pushProposal(ctx: Enrollment, directory: string, sha: string, tok
   }
 }
 
-type GitHubPull = {
+type RemotePull = {
   html_url?: string;
   head?: { ref?: string; sha?: string; repo?: { full_name?: string } };
   base?: { ref?: string; repo?: { full_name?: string } };
 };
 
-function pullUrl(ctx: Enrollment, prepared: Prepared, pull: GitHubPull | null): string | null {
+function pullUrl(ctx: Enrollment, prepared: Prepared, pull: RemotePull | null): string | null {
   const slug = ctx.repo.slug.toLowerCase();
   const url = pull?.html_url;
-  if (!url || !url.startsWith('https://github.com/') || pull.head?.ref !== ctx.branch ||
+  if (!url || !url.startsWith(`${ctx.repo.origin}/`) || pull.head?.ref !== ctx.branch ||
       pull.head.sha !== prepared.sha || pull.head.repo?.full_name?.toLowerCase() !== slug ||
       pull.base?.ref !== prepared.baseBranch || pull.base.repo?.full_name?.toLowerCase() !== slug) return null;
-  const match = /^https:\/\/github\.com\/([^/]+\/[^/]+)\/pull\/([1-9]\d*)$/.exec(url);
+  const pattern = ctx.repo.provider === 'forgejo'
+    ? new RegExp(`^${escapeRegExp(ctx.repo.origin)}/([^/]+/[^/]+)/pulls/([1-9]\\d*)$`)
+    : /^https:\/\/github\.com\/([^/]+\/[^/]+)\/pull\/([1-9]\d*)$/;
+  const match = pattern.exec(url);
   return match?.[1].toLowerCase() === slug ? url : null;
 }
 
 async function findPullRequest(ctx: Enrollment, prepared: Prepared, token: string): Promise<string | null> {
+  if (ctx.repo.provider === 'forgejo') {
+    for (let page = 1; page <= MAX_FORGEJO_PULL_PAGES; page++) {
+      const query = new URLSearchParams({
+        state: 'all',
+        sort: 'recentupdate',
+        limit: String(FORGEJO_PULL_PAGE_SIZE),
+        page: String(page)
+      });
+      const pulls = await forgejo<RemotePull[]>(ctx, `${ctx.repo.api}/pulls?${query}`, token);
+      if (!Array.isArray(pulls)) throw new ProposalError('Forgejo returned an unexpected pull request listing.');
+      for (const pull of pulls) {
+        const url = pullUrl(ctx, prepared, pull);
+        if (url) return url;
+      }
+      if (pulls.length < FORGEJO_PULL_PAGE_SIZE) break;
+    }
+    return null;
+  }
   const endpoint = `${ctx.repo.api}/pulls`;
   const query = new URLSearchParams({
     head: `${ctx.repo.owner}:${ctx.branch}`, base: prepared.baseBranch, state: 'all', per_page: '100'
   });
-  const pulls = await github<GitHubPull[]>(`${endpoint}?${query}`, token);
+  const pulls = await github<RemotePull[]>(`${endpoint}?${query}`, token);
   if (!Array.isArray(pulls)) throw new ProposalError('GitHub returned an unexpected pull request listing.');
   for (const pull of pulls) {
     const url = pullUrl(ctx, prepared, pull);
@@ -764,11 +1156,23 @@ async function ensurePullRequest(ctx: Enrollment, prepared: Prepared, token: str
   const existing = await findPullRequest(ctx, prepared, token);
   if (existing) return existing;
   const title = message.split(/\r?\n/).find((line) => line.trim())!.trim();
-  const pull = await github<GitHubPull>(`${ctx.repo.api}/pulls`, token, {
-    title: Array.from(title).slice(0, 240).join(''), body: message, head: ctx.branch, base: prepared.baseBranch
-  });
+  const payload = {
+    title: Array.from(title).slice(0, 240).join(''),
+    body: message,
+    head: ctx.branch,
+    base: prepared.baseBranch
+  };
+  const pull = ctx.repo.provider === 'forgejo'
+    ? await forgejo<RemotePull>(ctx, `${ctx.repo.api}/pulls`, token, payload)
+    : await github<RemotePull>(`${ctx.repo.api}/pulls`, token, payload);
   const url = pullUrl(ctx, prepared, pull);
-  if (!url) throw new ProposalError('GitHub returned an unexpected proposal pull request.');
+  if (!url) {
+    throw new ProposalError(
+      ctx.repo.provider === 'forgejo'
+        ? 'Forgejo returned an unexpected proposal pull request.'
+        : 'GitHub returned an unexpected proposal pull request.'
+    );
+  }
   return url;
 }
 

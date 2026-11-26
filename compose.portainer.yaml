@@ -54,17 +54,24 @@ services:
       FOCUSWIKI_REPOS_DIR: /app/repos
       FOCUSWIKI_GIT_STATE_DIR: /var/lib/focuswiki-git
       FOCUSWIKI_GITHUB_APP_KEY_FILE: /run/secrets/focuswiki-github-app.pem
-      FOCUSWIKI_GITHUB_APP_ID: "${FOCUSWIKI_GITHUB_APP_ID:?Set the GitHub App ID}"
-      FOCUSWIKI_GITHUB_INSTALLATION_ID: "${FOCUSWIKI_GITHUB_INSTALLATION_ID:?Set the GitHub App installation ID}"
+      FOCUSWIKI_GITHUB_APP_ID: "${FOCUSWIKI_GITHUB_APP_ID:-}"
+      FOCUSWIKI_GITHUB_INSTALLATION_ID: "${FOCUSWIKI_GITHUB_INSTALLATION_ID:-}"
+      # Optional: self-hosted Forgejo origin (for example https://git.tailnet.ts.net) and OpenBao token secret.
+      FOCUSWIKI_FORGEJO_ORIGIN: "${FOCUSWIKI_FORGEJO_ORIGIN:-}"
+      FOCUSWIKI_FORGEJO_TOKEN_FILE: /run/secrets/focuswiki-forgejo.token
+      FOCUSWIKI_FORGEJO_PROXY: "${FOCUSWIKI_FORGEJO_PROXY:-}"
       FOCUSWIKI_OPENBAO_ADDR: "${FOCUSWIKI_OPENBAO_ADDR:?Set the HTTPS OpenBao URL (for example https://openbao.tailnet.ts.net)}"
       FOCUSWIKI_OPENBAO_ROLE_ID: "${FOCUSWIKI_OPENBAO_ROLE_ID:?Set the OpenBao AppRole Role ID}"
       FOCUSWIKI_OPENBAO_SECRET_ID: "${FOCUSWIKI_OPENBAO_SECRET_ID:?Set the OpenBao AppRole Secret ID}"
-      FOCUSWIKI_OPENBAO_SECRET_PATH: "${FOCUSWIKI_OPENBAO_SECRET_PATH:?Set the OpenBao KV path relative to /v1/ (for example secret/data/focuswiki/github-app)}"
+      FOCUSWIKI_OPENBAO_SECRET_PATH: "${FOCUSWIKI_OPENBAO_SECRET_PATH:-}"
       FOCUSWIKI_OPENBAO_SECRET_FIELD: "${FOCUSWIKI_OPENBAO_SECRET_FIELD:-private_key}"
+      FOCUSWIKI_OPENBAO_FORGEJO_SECRET_PATH: "${FOCUSWIKI_OPENBAO_FORGEJO_SECRET_PATH:-}"
+      FOCUSWIKI_OPENBAO_FORGEJO_SECRET_FIELD: "${FOCUSWIKI_OPENBAO_FORGEJO_SECRET_FIELD:-token}"
       FOCUSWIKI_OPENBAO_AUTH_MOUNT: "${FOCUSWIKI_OPENBAO_AUTH_MOUNT:-approle}"
       FOCUSWIKI_OPENBAO_NAMESPACE: "${FOCUSWIKI_OPENBAO_NAMESPACE:-}"
       # Optional: if Docker bridge containers on this NAS cannot route directly to Tailscale,
-      # set FOCUSWIKI_TS_OUTBOUND_HTTP_PROXY_LISTEN=:1055 and FOCUSWIKI_OPENBAO_PROXY=http://tailscale:1055.
+      # set FOCUSWIKI_TS_OUTBOUND_HTTP_PROXY_LISTEN=:1055, FOCUSWIKI_OPENBAO_PROXY=http://tailscale:1055,
+      # and (when using Tailscale-hosted Forgejo) FOCUSWIKI_FORGEJO_PROXY=http://tailscale:1055.
       FOCUSWIKI_OPENBAO_PROXY: "${FOCUSWIKI_OPENBAO_PROXY:-}"
       FOCUSWIKI_LOG_LEVEL: "${FOCUSWIKI_LOG_LEVEL:-info}"
     volumes:
