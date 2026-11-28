@@ -77,7 +77,9 @@ Before enrolling real repositories, verify the deployment end-to-end against one
    }
    ```
 
-   > **Note:** After editing `enrollment.json`, redeploy/recreate the `git-worker` and `web` containers in Portainer so both pick up the updated file (replacing a file via atomic editor save changes its inode, which a running single-file bind mount will not see until recreated).
+   > **Live reload:** Both `git-worker` and `web` watch `enrollment.json` via OS filesystem events (`fs.watch` / `inotify`, debounced ~150 ms with zero idle polling) and pick up added, updated, or removed projects without a container restart (invalid JSON edits are logged and ignored while keeping the last valid configuration active, and open browser tabs refresh automatically).
+   >
+   > **Docker single-file bind mount note:** When using the default single-file bind mount (`FOCUSWIKI_ENROLLMENT_HOST_PATH`), edit `enrollment.json` **in place** (for example `nano`, `tee`/`>` redirect, ADM Text Editor, or `vim` with `:set backupcopy=yes`) so the file keeps its inode. Editors that save via atomic temp-file rename (`vim` default, `sed -i`, `mv`) replace the host inode, which a single-file Docker bind mount will not see until the containers are recreated. To support atomic-rename editors as well, place `enrollment.json` in a dedicated config folder (separate from `local-repos`) and bind-mount that folder to `/etc/focuswiki:ro` instead of the individual file.
 
    **Optional local (non-GitHub) NAS folders:** To expose internal docs stored on your NAS without putting them on GitHub, set `FOCUSWIKI_LOCAL_REPOS_HOST_PATH` (for example `/volume1/docker/focuswiki/local-repos`), create a subfolder matching the project `id` (for example `.../local-repos/lan-docs`, writable by UID `10002` / GID `0`), and add a `"local": true` entry in `enrollment.json`:
 
