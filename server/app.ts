@@ -181,7 +181,12 @@ export function createHubApp(options: HubAppOptions): HubAppInstance {
       }
     };
 
-  async function buildProjectSummary(project: ProjectConfig, statuses: GitStatuses, budget: ScanBudget): Promise<ProjectSummary> {
+  async function buildProjectSummary(
+    project: ProjectConfig,
+    statuses: GitStatuses,
+    budget: ScanBudget,
+    gitWorkerError?: string
+  ): Promise<ProjectSummary> {
     const enrollment = registry.managed(project.id);
     const hasFiles = hasWorkingTree(project.rootPath);
     if (watcherEnabled && hasFiles) {
@@ -189,7 +194,12 @@ export function createHubApp(options: HubAppOptions): HubAppInstance {
     }
     const status = Object.hasOwn(statuses, project.id) ? statuses[project.id] : undefined;
     const git = enrollment && status?.branch === enrollment.branch && status.remoteUrl === enrollment.remote &&
-      (status.state !== 'ready' || hasFiles) ? status : unavailableGitStatus(enrollment);
+      (status.state !== 'ready' || hasFiles)
+      ? status
+      : {
+          ...unavailableGitStatus(enrollment),
+          ...(enrollment && gitWorkerError ? { lastError: gitWorkerError } : {})
+        };
     return {
       ...project,
       git,
@@ -275,6 +285,7 @@ export function createHubApp(options: HubAppOptions): HubAppInstance {
     const budget = new ScanBudget(BROWSE_LIMITS, signal);
     const gitSignal = AbortSignal.any([signal, AbortSignal.timeout(2_500)]);
     let statuses: GitStatuses = {};
+    let gitWorkerError: string | undefined;
     if (page.some(project => registry.managed(project.id))) {
       try {
         statuses = await gitClient.statuses(gitSignal);
@@ -284,6 +295,7 @@ export function createHubApp(options: HubAppOptions): HubAppInstance {
         }
       } catch (err) {
         const code = err instanceof GitRpcError ? err.code : 'git_unavailable';
+        gitWorkerError = `Git worker is unreachable (${code}). Check the git-worker container logs.`;
         if (lastGitStatusError !== code) {
           lastGitStatusError = code;
           log.warn('Failed to query Git worker statuses', { code });
@@ -293,7 +305,7 @@ export function createHubApp(options: HubAppOptions): HubAppInstance {
     const summaries: ProjectSummary[] = [];
     for (const project of page) {
       signal.throwIfAborted();
-      summaries.push(await buildProjectSummary(project, statuses, budget.child()));
+      summaries.push(await buildProjectSummary(project, statuses, budget.child(), gitWorkerError));
     }
     const nextOffset = offset + page.length;
     res.json({ projects: summaries, ...(nextOffset < projects.length ? { nextOffset } : {}) });

@@ -379,6 +379,32 @@ describe('Settings and managed Git browser flows', () => {
     await page.getByRole('button', { name: /Managed Git pending/ }).waitFor();
   });
 
+  it('surfaces the managed Git sync error on the unavailable screen and in the Git drawer', async () => {
+    const syncError = '[token] Non-GitHub remote (https://git.invalid.ts.net) requires FOCUSWIKI_FORGEJO_ORIGIN to be set in git-worker.';
+    await page.route('**/api/projects', async (route) => {
+      const response = await route.fetch();
+      const { projects } = (await response.json()) as { projects: ProjectSummary[] };
+      await route.fulfill({
+        response,
+        json: {
+          projects: projects.map((project) => ({
+            ...project,
+            workingTreeAvailable: false,
+            docs: [],
+            git: { ...project.git, state: 'unavailable', isClean: null, fetchState: 'unavailable', lastError: syncError }
+          }))
+        }
+      });
+    });
+    await page.route(DIFF_API, (route) => route.fulfill({ status: 503, json: { error: 'git_unavailable' } }));
+    await page.reload();
+    await page.getByRole('heading', { name: 'Working copy unavailable' }).waitFor();
+    expect(await page.locator('.workspace-error-detail').innerText()).toContain('FOCUSWIKI_FORGEJO_ORIGIN');
+
+    const dialog = await openGitReview();
+    await dialog.getByText(`Last sync error: ${syncError}`).waitFor();
+  });
+
   it.each([
     ['phone portrait', { width: 390, height: 844 }],
     ['short landscape', { width: 844, height: 390 }]

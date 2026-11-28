@@ -95,9 +95,25 @@ function parseRemote(remote: string): {
     };
   }
 
-  const configuredOrigin = normalizeHttpsOrigin(process.env.FOCUSWIKI_FORGEJO_ORIGIN);
+  const rawConfiguredOrigin = process.env.FOCUSWIKI_FORGEJO_ORIGIN?.trim();
+  const configuredOrigin = normalizeHttpsOrigin(rawConfiguredOrigin);
+  if (!rawConfiguredOrigin) {
+    let parsedOrigin: string | null = null;
+    try {
+      const candidate = new URL(remote);
+      if (candidate.protocol === 'https:') parsedOrigin = candidate.origin.toLowerCase();
+    } catch {
+      parsedOrigin = null;
+    }
+    if (parsedOrigin) {
+      throw new ProposalError(
+        `Non-GitHub remote (${parsedOrigin}) requires FOCUSWIKI_FORGEJO_ORIGIN to be set in git-worker.`
+      );
+    }
+    throw new ProposalError('Expected an enrolled https://github.com/OWNER/REPO or Forgejo HTTPS remote.');
+  }
   if (!configuredOrigin || configuredOrigin === 'https://github.com') {
-    throw new ProposalError('Expected an enrolled https://github.com/OWNER/REPO remote.');
+    throw new ProposalError('FOCUSWIKI_FORGEJO_ORIGIN must be a valid non-GitHub https:// origin without path or credentials.');
   }
   if (remote.trim() !== remote || /[%\\\s\x00-\x1f\x7f]/.test(remote)) {
     throw new ProposalError('Expected an enrolled Forgejo HTTPS OWNER/REPO remote.');
@@ -108,9 +124,13 @@ function parseRemote(remote: string): {
   } catch {
     throw new ProposalError('Expected an enrolled Forgejo HTTPS OWNER/REPO remote.');
   }
-  if (parsed.protocol !== 'https:' || parsed.username || parsed.password || parsed.search || parsed.hash ||
-      parsed.origin.toLowerCase() !== configuredOrigin) {
-    throw new ProposalError('The enrolled remote does not match FOCUSWIKI_FORGEJO_ORIGIN.');
+  if (parsed.protocol !== 'https:' || parsed.username || parsed.password || parsed.search || parsed.hash) {
+    throw new ProposalError('Expected an enrolled Forgejo HTTPS OWNER/REPO remote.');
+  }
+  if (parsed.origin.toLowerCase() !== configuredOrigin) {
+    throw new ProposalError(
+      `Remote origin (${parsed.origin.toLowerCase()}) does not match FOCUSWIKI_FORGEJO_ORIGIN (${configuredOrigin}).`
+    );
   }
   const match = FORGEJO_PATH.exec(parsed.pathname);
   const owner = match?.[1];
@@ -493,7 +513,7 @@ async function forgejo<T>(
 function readForgejoToken(ctx: Enrollment): string {
   const tokenFile = process.env.FOCUSWIKI_FORGEJO_TOKEN_FILE?.trim();
   if (!tokenFile || !path.isAbsolute(tokenFile) || path.normalize(tokenFile) !== tokenFile) {
-    throw new ProposalError('Forgejo configuration is incomplete.');
+    throw new ProposalError('FOCUSWIKI_FORGEJO_TOKEN_FILE is not configured as an absolute path in git-worker.');
   }
   try {
     const resolvedToken = fs.realpathSync(tokenFile);
@@ -508,7 +528,12 @@ function readForgejoToken(ctx: Enrollment): string {
     } finally {
       fs.closeSync(descriptor);
     }
-  } catch {
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT') {
+      throw new ProposalError(
+        'Forgejo token file was not found (check OpenBao bootstrap and FOCUSWIKI_OPENBAO_FORGEJO_SECRET_PATH).'
+      );
+    }
     throw new ProposalError('Forgejo token could not be read from the worker secret file.');
   }
 }

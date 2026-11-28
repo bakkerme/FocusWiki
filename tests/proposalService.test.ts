@@ -461,14 +461,20 @@ describe('proposal worker', () => {
     fs.writeFileSync(tokenPath, `${forgejoToken}\n`, { mode: 0o400 });
     const forgejoCtx: ProposalContext = { ...ctx, projectId: 'lan-docs', remote: forgejoRemote };
 
-    // Rejects Forgejo remote when FOCUSWIKI_FORGEJO_ORIGIN is unset or mismatched.
-    await expect(getRepoToken(forgejoCtx, 'read')).rejects.toThrow(/github\.com/);
+    // Rejects Forgejo remote with actionable config errors when FOCUSWIKI_FORGEJO_ORIGIN is unset, invalid, or mismatched.
+    await expect(getRepoToken(forgejoCtx, 'read')).rejects.toThrow(/requires FOCUSWIKI_FORGEJO_ORIGIN to be set/);
+    vi.stubEnv('FOCUSWIKI_FORGEJO_ORIGIN', 'https://github.com');
+    await expect(getRepoToken(forgejoCtx, 'read')).rejects.toThrow(/valid non-GitHub https:\/\/ origin/);
     vi.stubEnv('FOCUSWIKI_FORGEJO_ORIGIN', 'https://other.invalid.ts.net');
     vi.stubEnv('FOCUSWIKI_FORGEJO_TOKEN_FILE', tokenPath);
-    await expect(getRepoToken(forgejoCtx, 'read')).rejects.toThrow(/FOCUSWIKI_FORGEJO_ORIGIN/);
+    await expect(getRepoToken(forgejoCtx, 'read')).rejects.toThrow(/does not match FOCUSWIKI_FORGEJO_ORIGIN/);
 
-    // Rejects symlinked token file.
+    // Reports missing/unconfigured token file clearly and rejects symlinked token file.
     vi.stubEnv('FOCUSWIKI_FORGEJO_ORIGIN', forgejoOrigin);
+    vi.stubEnv('FOCUSWIKI_FORGEJO_TOKEN_FILE', '');
+    await expect(getRepoToken(forgejoCtx, 'read')).rejects.toThrow(/FOCUSWIKI_FORGEJO_TOKEN_FILE/);
+    vi.stubEnv('FOCUSWIKI_FORGEJO_TOKEN_FILE', path.join(root, 'missing-forgejo.token'));
+    await expect(getRepoToken(forgejoCtx, 'read')).rejects.toThrow(/FOCUSWIKI_OPENBAO_FORGEJO_SECRET_PATH/);
     const linkedToken = path.join(root, 'linked-forgejo.token');
     fs.symlinkSync(tokenPath, linkedToken);
     vi.stubEnv('FOCUSWIKI_FORGEJO_TOKEN_FILE', linkedToken);

@@ -1307,7 +1307,7 @@ export function App() {
                     aria-label={`Repository ${activeProject.name}${gitStatus.branch && gitStatus.branch !== 'uninitialized'
                       ? ` on branch ${gitStatus.branch}`
                       : ''}. ${workingTreeLabel(gitStatus)}. Review working changes.`}
-                    title="Review working changes"
+                    title={activeProject.git.lastError ? `Sync error: ${activeProject.git.lastError}` : 'Review working changes'}
                   >
                     <GitBranch size={12} aria-hidden="true" />
                     {gitStatus.branch && gitStatus.branch !== 'uninitialized' && (
@@ -1569,6 +1569,15 @@ export function App() {
               <div className="empty-workspace-card">
                 <h2>Working copy unavailable</h2>
                 <p>{activeProject.name} will show its documents once its working copy is ready.</p>
+                {activeProject.git.lastError ? (
+                  <p className="workspace-error-detail" role="alert">
+                    {activeProject.git.lastError}
+                  </p>
+                ) : activeProject.git.state === 'unmanaged' ? (
+                  <p className="workspace-error-detail">
+                    Expected local folder at <code>{activeProject.rootPath}</code>.
+                  </p>
+                ) : null}
               </div>
             </div>
           ) : activeProject ? (

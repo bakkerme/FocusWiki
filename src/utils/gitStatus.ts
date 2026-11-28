@@ -9,6 +9,7 @@ export type ProjectGitStatusView = Pick<
   state?: 'ready' | 'unmanaged' | 'pending' | 'unavailable';
   changesTruncated?: boolean;
   fetchState?: 'pending' | 'current' | 'unavailable';
+  lastError?: string;
 };
 
 export function managedGitLabel(status: ProjectGitStatusView): string {

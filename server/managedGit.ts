@@ -174,6 +174,7 @@ export class ManagedRepository {
   private fetchedAt?: string;
   private fetchState: ProjectGitStatus['fetchState'] = 'pending';
   private lastErrorKey?: string;
+  private lastErrorMessage?: string;
   private wasReady = false;
   private readonly context: ProposalContext;
   private readonly metadataDir: string;
@@ -321,6 +322,7 @@ export class ManagedRepository {
     ], signal, { token, remote: this.context.remote });
     this.fetchedAt = new Date().toISOString();
     this.fetchState = 'current';
+    this.lastErrorMessage = undefined;
     log.debug('Fetched remote branch', { project: this.project.id, branch: this.context.branch });
   }
 
@@ -553,9 +555,10 @@ export class ManagedRepository {
       fetchState: this.fetchState,
       fetchedAt: this.fetchedAt,
       ahead,
-      behind
+      behind,
+      ...(this.lastErrorMessage ? { lastError: this.lastErrorMessage } : {})
     };
-    if (!this.wasReady || (this.fetchState === 'current' && this.lastErrorKey)) {
+    if (!this.wasReady || (this.fetchState === 'current' && !this.lastErrorMessage && this.lastErrorKey)) {
       log.info('Managed repository ready', {
         project: this.project.id,
         branch: this.context.branch,
@@ -564,11 +567,13 @@ export class ManagedRepository {
       });
     }
     this.wasReady = true;
-    if (this.fetchState === 'current') this.lastErrorKey = undefined;
+    if (this.fetchState === 'current' && !this.lastErrorMessage) this.lastErrorKey = undefined;
   }
 
   private logError(phase: string, reason: string): void {
-    const key = `${phase}:${reason}`;
+    const sanitizedReason = sanitizeLogText(reason, 240);
+    this.lastErrorMessage = sanitizeLogText(`[${phase}] ${sanitizedReason}`, 260);
+    const key = `${phase}:${sanitizedReason}`;
     if (this.lastErrorKey === key) return;
     this.lastErrorKey = key;
     log.warn('Managed repository sync failed', {
@@ -576,7 +581,7 @@ export class ManagedRepository {
       branch: this.context.branch,
       remote: this.context.remote,
       phase,
-      reason
+      reason: sanitizedReason
     });
   }
 
@@ -585,15 +590,16 @@ export class ManagedRepository {
     this.status = {
       ...unavailableGitStatus(this.project, state),
       fetchState: this.fetchState,
-      fetchedAt: this.fetchedAt
+      fetchedAt: this.fetchedAt,
+      ...(this.lastErrorMessage ? { lastError: this.lastErrorMessage } : {})
     };
   }
 }
 
 function describeError(err: unknown): string {
   if (err instanceof GitRpcError) {
-    return err.detail ? `${err.code}: ${err.detail}` : `${err.code}: ${err.message}`;
+    return sanitizeLogText(err.detail ? `${err.code}: ${err.detail}` : `${err.code}: ${err.message}`, 240);
   }
-  if (err instanceof Error) return sanitizeLogText(err.message || err.name, 260);
+  if (err instanceof Error) return sanitizeLogText(err.message || err.name, 240);
   return 'Unknown error';
 }
