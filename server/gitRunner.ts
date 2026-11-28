@@ -108,7 +108,7 @@ export async function startGitRunner(options: {
   stateDir: string;
   socketPath: string;
   proposalService?: ProposalService;
-  enrollmentPollIntervalMs?: number;
+  enrollmentDebounceMs?: number;
 }): Promise<{ close(): Promise<void> }> {
   const socketPath = path.resolve(options.socketPath);
   const socketDir = path.dirname(socketPath);
@@ -336,7 +336,7 @@ export async function startGitRunner(options: {
   const background = setInterval(refresh, 500);
   const enrollmentWatcher = watchEnrollmentFile(options.enrollmentFile, {
     initialEntries: allEntries,
-    pollIntervalMs: options.enrollmentPollIntervalMs,
+    debounceMs: options.enrollmentDebounceMs,
     onReload: (nextEntries) => {
       checkEnrollmentPath();
       const summary = reconcileEnrollment(nextEntries);

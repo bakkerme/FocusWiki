@@ -186,7 +186,7 @@ export function directoriesOverlap(a: string, b: string): boolean {
   return contains(a, b) || contains(b, a);
 }
 
-export const DEFAULT_ENROLLMENT_POLL_MS = 2_000;
+export const DEFAULT_ENROLLMENT_DEBOUNCE_MS = 150;
 
 export interface EnrollmentWatchHandle {
   reloadNow(): Promise<boolean>;
@@ -195,52 +195,102 @@ export interface EnrollmentWatchHandle {
 
 export interface WatchEnrollmentOptions {
   initialEntries?: EnrollmentEntry[];
-  pollIntervalMs?: number;
+  debounceMs?: number;
   onReload: (entries: EnrollmentEntry[]) => void | Promise<void>;
   onError?: (reason: string) => void;
 }
 
-function statSignature(file: string): string | null {
+function inodeSignature(file: string): string | null {
   try {
     const stat = fs.lstatSync(file);
     if (!stat.isFile()) return null;
-    return `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`;
+    return `${stat.dev}:${stat.ino}`;
   } catch {
     return null;
   }
 }
 
 /**
- * Polls an operator-managed enrollment.json file and invokes onReload only when
- * the validated enrollment entries change. Invalid edits keep the previous config active.
+ * Watches an operator-managed enrollment.json via OS filesystem events (`fs.watch`),
+ * with zero idle polling. Watches both the file (for single-file Docker bind mounts)
+ * and its parent directory (for atomic-rename saves), debouncing rapid writes and
+ * keeping the last valid configuration active on parse or validation errors.
  */
 export function watchEnrollmentFile(file: string, options: WatchEnrollmentOptions): EnrollmentWatchHandle {
-  const pollIntervalMs = options.pollIntervalMs ?? DEFAULT_ENROLLMENT_POLL_MS;
-  let lastStat = statSignature(file);
+  const resolvedFile = path.resolve(file);
+  const dir = path.dirname(resolvedFile);
+  const baseName = path.basename(resolvedFile);
+  const debounceMs = Math.max(0, options.debounceMs ?? DEFAULT_ENROLLMENT_DEBOUNCE_MS);
+
   let lastFingerprint = options.initialEntries ? JSON.stringify(options.initialEntries) : undefined;
   let lastError: string | undefined;
   let closed = false;
+  let debounceTimer: NodeJS.Timeout | undefined;
   let activeCheck: Promise<boolean> | undefined;
+  let recheckAfterActive = false;
 
-  const check = (force = false): Promise<boolean> => {
+  let fileWatcher: fs.FSWatcher | undefined;
+  let dirWatcher: fs.FSWatcher | undefined;
+  let watchedInode: string | null = null;
+
+  const closeFileWatcher = () => {
+    if (!fileWatcher) return;
+    try { fileWatcher.close(); } catch { /* ignore */ }
+    fileWatcher = undefined;
+    watchedInode = null;
+  };
+
+  const ensureFileWatcher = () => {
+    if (closed) return;
+    const currentInode = inodeSignature(resolvedFile);
+    if (!currentInode) {
+      closeFileWatcher();
+      return;
+    }
+    if (fileWatcher && watchedInode === currentInode) return;
+    closeFileWatcher();
+    try {
+      const watcher = fs.watch(resolvedFile, { persistent: false }, (eventType) => {
+        if (eventType === 'rename') closeFileWatcher();
+        schedule();
+      });
+      watcher.on('error', () => {
+        if (fileWatcher === watcher) closeFileWatcher();
+      });
+      fileWatcher = watcher;
+      watchedInode = currentInode;
+    } catch {
+      watchedInode = null;
+    }
+  };
+
+  const schedule = () => {
+    if (closed) return;
+    if (debounceTimer) clearTimeout(debounceTimer);
+    debounceTimer = setTimeout(() => {
+      debounceTimer = undefined;
+      void check();
+    }, debounceMs);
+    debounceTimer.unref();
+  };
+
+  const check = (): Promise<boolean> => {
     if (closed) return Promise.resolve(false);
-    if (activeCheck) return activeCheck;
+    if (activeCheck) {
+      recheckAfterActive = true;
+      return activeCheck;
+    }
     const run = (async () => {
       try {
-        const currentStat = statSignature(file);
-        if (!force && !lastError && currentStat !== null && currentStat === lastStat) {
-          return false;
-        }
-        const entries = loadEnrollmentEntries(file);
+        ensureFileWatcher();
+        const entries = loadEnrollmentEntries(resolvedFile);
         const fingerprint = JSON.stringify(entries);
         if (fingerprint === lastFingerprint) {
-          lastStat = currentStat;
           lastError = undefined;
           return false;
         }
         if (closed) return false;
         await options.onReload(entries);
-        lastStat = currentStat;
         lastFingerprint = fingerprint;
         lastError = undefined;
         return true;
@@ -256,25 +306,39 @@ export function watchEnrollmentFile(file: string, options: WatchEnrollmentOption
     activeCheck = run;
     void run.finally(() => {
       if (activeCheck === run) activeCheck = undefined;
+      if (recheckAfterActive && !closed) {
+        recheckAfterActive = false;
+        schedule();
+      }
     });
     return run;
   };
 
-  let timer: NodeJS.Timeout | undefined;
-  if (pollIntervalMs > 0) {
-    timer = setInterval(() => {
-      void check(false);
-    }, pollIntervalMs);
-    timer.unref();
+  ensureFileWatcher();
+  try {
+    dirWatcher = fs.watch(dir, { persistent: false }, (_event, name) => {
+      if (!name || name === baseName) schedule();
+    });
+    dirWatcher.on('error', () => {
+      try { dirWatcher?.close(); } catch { /* ignore */ }
+      dirWatcher = undefined;
+    });
+  } catch {
+    dirWatcher = undefined;
   }
 
   return {
-    reloadNow: () => check(true),
+    reloadNow: () => check(),
     close: () => {
       closed = true;
-      if (timer) {
-        clearInterval(timer);
-        timer = undefined;
+      if (debounceTimer) {
+        clearTimeout(debounceTimer);
+        debounceTimer = undefined;
+      }
+      closeFileWatcher();
+      if (dirWatcher) {
+        try { dirWatcher.close(); } catch { /* ignore */ }
+        dirWatcher = undefined;
       }
     }
   };

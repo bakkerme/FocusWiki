@@ -77,7 +77,7 @@ Before enrolling real repositories, verify the deployment end-to-end against one
    }
    ```
 
-   > **Live reload:** Both `git-worker` and `web` automatically poll `enrollment.json` every 2 seconds and pick up added, updated, or removed projects without a container restart (invalid JSON edits are logged and ignored while keeping the last valid configuration active, and open browser tabs refresh automatically).
+   > **Live reload:** Both `git-worker` and `web` watch `enrollment.json` via OS filesystem events (`fs.watch` / `inotify`, debounced ~150 ms with zero idle polling) and pick up added, updated, or removed projects without a container restart (invalid JSON edits are logged and ignored while keeping the last valid configuration active, and open browser tabs refresh automatically).
    >
    > **Docker single-file bind mount note:** When using the default single-file bind mount (`FOCUSWIKI_ENROLLMENT_HOST_PATH`), edit `enrollment.json` **in place** (for example `nano`, `tee`/`>` redirect, ADM Text Editor, or `vim` with `:set backupcopy=yes`) so the file keeps its inode. Editors that save via atomic temp-file rename (`vim` default, `sed -i`, `mv`) replace the host inode, which a single-file Docker bind mount will not see until the containers are recreated. To support atomic-rename editors as well, place `enrollment.json` in a dedicated config folder (separate from `local-repos`) and bind-mount that folder to `/etc/focuswiki:ro` instead of the individual file.
 

@@ -721,7 +721,7 @@ describe('managed Git service', () => {
       stateDir,
       socketPath,
       proposalService: service,
-      enrollmentPollIntervalMs: 50
+      enrollmentDebounceMs: 30
     });
     const client = new GitSocketClient(socketPath);
     await vi.waitFor(async () => {
@@ -734,7 +734,7 @@ describe('managed Git service', () => {
         reposDir,
         localReposDir
       }),
-      enrollmentWatch: { file: enrollmentFile, pollIntervalMs: 50 },
+      enrollmentWatch: { file: enrollmentFile, debounceMs: 30 },
       gitSocketPath: socketPath,
       proposalAuth: (_req, res, next) => {
         res.locals.proposalActor = 'fictional-reviewer';

@@ -81,7 +81,7 @@ export interface HubAppOptions {
   registry?: ProjectRegistry;
   enrollmentWatch?: {
     file: string;
-    pollIntervalMs?: number;
+    debounceMs?: number;
   };
   gitSocketPath?: string;
   proposalAuth?: RequestHandler;
@@ -112,7 +112,7 @@ export function createHubApp(options: HubAppOptions): HubAppInstance {
   if (options.enrollmentWatch) {
     enrollmentWatcher = watchEnrollmentFile(options.enrollmentWatch.file, {
       initialEntries: registry.enrollmentSnapshot(),
-      pollIntervalMs: options.enrollmentWatch.pollIntervalMs,
+      debounceMs: options.enrollmentWatch.debounceMs,
       onReload: async (entries) => {
         const diff = registry.syncEnrollment(entries);
         if (!diff.changed) return;
