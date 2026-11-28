@@ -35,6 +35,7 @@ import {
   readCommentSidecar,
   updateCommentStatus
 } from './commentStore.js';
+import { watchEnrollmentFile, type EnrollmentWatchHandle } from './enrollment.js';
 import { ProjectRegistry, hasWorkingTree, unavailableGitStatus } from './projectRegistry.js';
 import { ProjectWatcherHub, type WatcherHubOptions } from './watcher.js';
 import { BROWSE_LIMITS, SEARCH_LIMITS, ScanBudget, listConflictCopies, scanRepository, searchRepositories } from './repositoryScan.js';
@@ -78,6 +79,10 @@ export interface HubAppInstance {
 export interface HubAppOptions {
   projects?: ProjectConfig[];
   registry?: ProjectRegistry;
+  enrollmentWatch?: {
+    file: string;
+    pollIntervalMs?: number;
+  };
   gitSocketPath?: string;
   proposalAuth?: RequestHandler;
   clientDistDir?: string;
@@ -101,6 +106,41 @@ export function createHubApp(options: HubAppOptions): HubAppInstance {
   const watcherHub = new ProjectWatcherHub(options.sse);
   if (watcherEnabled) {
     watcherHub.start(registry.list());
+  }
+
+  let enrollmentWatcher: EnrollmentWatchHandle | undefined;
+  if (options.enrollmentWatch) {
+    enrollmentWatcher = watchEnrollmentFile(options.enrollmentWatch.file, {
+      initialEntries: registry.enrollmentSnapshot(),
+      pollIntervalMs: options.enrollmentWatch.pollIntervalMs,
+      onReload: async (entries) => {
+        const diff = registry.syncEnrollment(entries);
+        if (!diff.changed) return;
+        if (watcherEnabled) {
+          const toStop = new Set([...diff.removed, ...diff.rootChanged]);
+          for (const id of toStop) {
+            await watcherHub.removeProject(id);
+          }
+          const toStart = [
+            ...diff.added,
+            ...diff.updated.filter((project) => diff.rootChanged.includes(project.id))
+          ];
+          for (const project of toStart) {
+            watcherHub.addProject(project);
+          }
+        }
+        watcherHub.broadcast({ type: 'projects:updated', reason: 'updated', at: new Date().toISOString() });
+        log.info('Reloaded enrollment configuration', {
+          projects: entries.length,
+          added: diff.added.length,
+          removed: diff.removed.length,
+          updated: diff.updated.length
+        });
+      },
+      onError: (reason) => {
+        log.warn('Failed to reload enrollment.json; keeping last valid configuration', { reason });
+      }
+    });
   }
 
   app.disable('x-powered-by');
@@ -144,6 +184,9 @@ export function createHubApp(options: HubAppOptions): HubAppInstance {
   async function buildProjectSummary(project: ProjectConfig, statuses: GitStatuses, budget: ScanBudget): Promise<ProjectSummary> {
     const enrollment = registry.managed(project.id);
     const hasFiles = hasWorkingTree(project.rootPath);
+    if (watcherEnabled && hasFiles) {
+      watcherHub.retryFailedProject(project);
+    }
     const status = Object.hasOwn(statuses, project.id) ? statuses[project.id] : undefined;
     const git = enrollment && status?.branch === enrollment.branch && status.remoteUrl === enrollment.remote &&
       (status.state !== 'ready' || hasFiles) ? status : unavailableGitStatus(enrollment);
@@ -817,6 +860,7 @@ export function createHubApp(options: HubAppOptions): HubAppInstance {
     watcherHub,
     registry,
     close: async () => {
+      enrollmentWatcher?.close();
       await watcherHub.close();
     }
   };

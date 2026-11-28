@@ -79,6 +79,19 @@ export class ProjectWatcherHub {
     this.discover(project, state);
   }
 
+  /** Re-attaches a watcher that previously failed (for example while a newly enrolled repo was cloning). */
+  public retryFailedProject(project: ProjectConfig): void {
+    const state = this.watchers.get(project.id);
+    if (!state) {
+      this.addProject(project);
+      return;
+    }
+    if (!state.failed) return;
+    this.stop(state);
+    this.watchers.delete(project.id);
+    this.addProject(project);
+  }
+
   private invalidate(projectId: string, reason: 'updated' | 'watch-overflow' = 'updated'): void {
     this.broadcast({ type: 'projects:updated', projectId, reason, at: new Date().toISOString() });
   }

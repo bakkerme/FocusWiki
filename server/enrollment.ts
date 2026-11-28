@@ -185,3 +185,97 @@ export function directoriesOverlap(a: string, b: string): boolean {
   };
   return contains(a, b) || contains(b, a);
 }
+
+export const DEFAULT_ENROLLMENT_POLL_MS = 2_000;
+
+export interface EnrollmentWatchHandle {
+  reloadNow(): Promise<boolean>;
+  close(): void;
+}
+
+export interface WatchEnrollmentOptions {
+  initialEntries?: EnrollmentEntry[];
+  pollIntervalMs?: number;
+  onReload: (entries: EnrollmentEntry[]) => void | Promise<void>;
+  onError?: (reason: string) => void;
+}
+
+function statSignature(file: string): string | null {
+  try {
+    const stat = fs.lstatSync(file);
+    if (!stat.isFile()) return null;
+    return `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Polls an operator-managed enrollment.json file and invokes onReload only when
+ * the validated enrollment entries change. Invalid edits keep the previous config active.
+ */
+export function watchEnrollmentFile(file: string, options: WatchEnrollmentOptions): EnrollmentWatchHandle {
+  const pollIntervalMs = options.pollIntervalMs ?? DEFAULT_ENROLLMENT_POLL_MS;
+  let lastStat = statSignature(file);
+  let lastFingerprint = options.initialEntries ? JSON.stringify(options.initialEntries) : undefined;
+  let lastError: string | undefined;
+  let closed = false;
+  let activeCheck: Promise<boolean> | undefined;
+
+  const check = (force = false): Promise<boolean> => {
+    if (closed) return Promise.resolve(false);
+    if (activeCheck) return activeCheck;
+    const run = (async () => {
+      try {
+        const currentStat = statSignature(file);
+        if (!force && !lastError && currentStat !== null && currentStat === lastStat) {
+          return false;
+        }
+        const entries = loadEnrollmentEntries(file);
+        const fingerprint = JSON.stringify(entries);
+        if (fingerprint === lastFingerprint) {
+          lastStat = currentStat;
+          lastError = undefined;
+          return false;
+        }
+        if (closed) return false;
+        await options.onReload(entries);
+        lastStat = currentStat;
+        lastFingerprint = fingerprint;
+        lastError = undefined;
+        return true;
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : 'Unknown error.';
+        if (reason !== lastError) {
+          lastError = reason;
+          options.onError?.(reason);
+        }
+        return false;
+      }
+    })();
+    activeCheck = run;
+    void run.finally(() => {
+      if (activeCheck === run) activeCheck = undefined;
+    });
+    return run;
+  };
+
+  let timer: NodeJS.Timeout | undefined;
+  if (pollIntervalMs > 0) {
+    timer = setInterval(() => {
+      void check(false);
+    }, pollIntervalMs);
+    timer.unref();
+  }
+
+  return {
+    reloadNow: () => check(true),
+    close: () => {
+      closed = true;
+      if (timer) {
+        clearInterval(timer);
+        timer = undefined;
+      }
+    }
+  };
+}

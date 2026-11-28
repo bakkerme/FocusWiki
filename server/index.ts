@@ -104,6 +104,7 @@ async function main(): Promise<void> {
   }
   const hub = createHubApp({
     registry,
+    enrollmentWatch: enrollmentFile ? { file: enrollmentFile } : undefined,
     gitSocketPath: process.env.FOCUSWIKI_GIT_SOCKET,
     proposalAuth: enrollmentFile ? proposalAuth : undefined,
     clientDistDir,

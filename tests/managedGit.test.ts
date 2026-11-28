@@ -693,6 +693,100 @@ describe('managed Git service', () => {
       .send({ reviewId: review.body.reviewId, message: 'Wrong origin', paths: ['README.md'] })
       .expect(502);
   });
+
+  it('live-reloads enrollment.json additions, removals, atomic renames, and keeps last valid config on invalid edits', async () => {
+    const localReposDir = path.join(root, 'local-repos');
+    const localDocDir = path.join(localReposDir, 'notes');
+    fs.mkdirSync(localDocDir, { recursive: true, mode: 0o770 });
+    fs.writeFileSync(path.join(localDocDir, 'README.md'), '# Live Local Notes\n');
+
+    const base = upstream();
+    const service: ProposalService = {
+      enforcesManagedBase: true,
+      getRepoToken: vi.fn(async () => 'fictional-read-token'),
+      reviewProposal: vi.fn(async () => ({
+        reviewId: 'live-review', snapshotDigest: 'live-snapshot', diff: 'live diff', commitScopeNote: '',
+        files: [], status: {
+          branch: 'main', headSha: base, headSubject: '', isClean: true, changedFiles: []
+        }
+      })),
+      publishProposal: vi.fn(async () => ({
+        url: 'https://git.invalid.ts.net/fictional-lan/lan-docs/pulls/5', sha: base
+      }))
+    };
+
+    runner = await startGitRunner({
+      enrollmentFile,
+      reposDir,
+      stateDir,
+      socketPath,
+      proposalService: service,
+      enrollmentPollIntervalMs: 50
+    });
+    const client = new GitSocketClient(socketPath);
+    await vi.waitFor(async () => {
+      expect((await client.statuses()).amber).toMatchObject({ state: 'ready', headSha: base });
+    }, { timeout: 10_000 });
+
+    hub = createHubApp({
+      registry: new ProjectRegistry([], {
+        projects: loadEnrollmentEntries(enrollmentFile),
+        reposDir,
+        localReposDir
+      }),
+      enrollmentWatch: { file: enrollmentFile, pollIntervalMs: 50 },
+      gitSocketPath: socketPath,
+      proposalAuth: (_req, res, next) => {
+        res.locals.proposalActor = 'fictional-reviewer';
+        next();
+      },
+      enableWatcher: true
+    });
+
+    const broadcastSpy = vi.spyOn(hub.watcherHub, 'broadcast');
+
+    // 1. Add a Forgejo repo and a local repo via atomic rename (new inode).
+    const forgejoEntry = {
+      id: 'lan-docs',
+      name: 'LAN Docs',
+      provider: 'forgejo' as const,
+      remote: 'https://git.invalid.ts.net/fictional-lan/lan-docs.git',
+      branch: 'main',
+      defaultDoc: 'README.md'
+    };
+    const localEntry = { id: 'notes', name: 'Live Notes', local: true as const, defaultDoc: 'README.md' };
+    const tmpEnrollment = path.join(root, 'enrollment.next.json');
+    fs.writeFileSync(tmpEnrollment, JSON.stringify({ projects: [entry, forgejoEntry, localEntry] }), { mode: 0o644 });
+    fs.renameSync(tmpEnrollment, enrollmentFile);
+
+    await vi.waitFor(async () => {
+      const statuses = await client.statuses();
+      expect(statuses['lan-docs']).toMatchObject({ state: 'ready', headSha: base });
+      const res = await request(hub!.app).get('/api/projects').expect(200);
+      const ids = res.body.projects.map((p: { id: string }) => p.id);
+      expect(ids).toEqual(['amber', 'lan-docs', 'notes']);
+      const lanDocs = res.body.projects.find((p: { id: string }) => p.id === 'lan-docs');
+      expect(lanDocs.git).toMatchObject({ state: 'ready', headSha: base });
+    }, { timeout: 10_000 });
+    expect(broadcastSpy).toHaveBeenCalledWith(expect.objectContaining({ type: 'projects:updated', reason: 'updated' }));
+
+    // 2. Write broken JSON in place -> both web and git-worker keep last valid config.
+    fs.writeFileSync(enrollmentFile, '{ broken json');
+    await new Promise((resolve) => setTimeout(resolve, 180));
+    expect(Object.keys(await client.statuses()).sort()).toEqual(['amber', 'lan-docs']);
+    const duringBroken = await request(hub.app).get('/api/projects').expect(200);
+    expect(duringBroken.body.projects.map((p: { id: string }) => p.id)).toEqual(['amber', 'lan-docs', 'notes']);
+
+    // 3. Recover with valid JSON removing `amber` -> disappears from both web and git-worker without deleting files.
+    fs.writeFileSync(enrollmentFile, JSON.stringify({ projects: [forgejoEntry, localEntry] }));
+    await vi.waitFor(async () => {
+      expect(Object.keys(await client.statuses())).toEqual(['lan-docs']);
+      const res = await request(hub!.app).get('/api/projects').expect(200);
+      expect(res.body.projects.map((p: { id: string }) => p.id)).toEqual(['lan-docs', 'notes']);
+    }, { timeout: 10_000 });
+    await request(hub.app).get('/api/projects/amber/git/diff').expect(404);
+    expect(fs.existsSync(path.join(workTree, 'README.md'))).toBe(true);
+  });
 });
 
 it('bounds the queue, withdraws canceled work, and serializes jobs on the same checkout', async () => {

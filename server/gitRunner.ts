@@ -3,7 +3,10 @@ import fs from 'node:fs';
 import net from 'node:net';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { directoriesOverlap, enrollmentBinding, isLocalProject, loadEnrollmentEntries, type EnrolledProject } from './enrollment.js';
+import {
+  directoriesOverlap, enrollmentBinding, isLocalProject, loadEnrollmentEntries, watchEnrollmentFile,
+  type EnrolledProject, type EnrollmentEntry
+} from './enrollment.js';
 import {
   DEFAULT_GIT_SOCKET, GitRpcError, MAX_GIT_REQUEST_BYTES, MAX_GIT_RESPONSE_BYTES, isGitSha,
   parseGitRequest, proposalBranch, unwrapReviewId, type GitRequest, type GitResult, type ProposalService, type PublishedProposal
@@ -105,34 +108,72 @@ export async function startGitRunner(options: {
   stateDir: string;
   socketPath: string;
   proposalService?: ProposalService;
+  enrollmentPollIntervalMs?: number;
 }): Promise<{ close(): Promise<void> }> {
   const socketPath = path.resolve(options.socketPath);
   const socketDir = path.dirname(socketPath);
   const reposDir = path.resolve(options.reposDir);
   const stateDir = path.resolve(options.stateDir);
-  const enrollmentFile = fs.realpathSync(options.enrollmentFile);
   const roots = [reposDir, stateDir, socketDir];
-  if (roots.some((root, index) => roots.slice(index + 1).some((other) => directoriesOverlap(root, other)) ||
-      directoriesOverlap(root, enrollmentFile))) {
+  const checkEnrollmentPath = () => {
+    const resolved = fs.realpathSync(options.enrollmentFile);
+    if (roots.some((root) => directoriesOverlap(root, resolved))) {
+      throw new Error('Git state, working files, runtime socket and enrollment must use separate paths.');
+    }
+  };
+  if (roots.some((root, index) => roots.slice(index + 1).some((other) => directoriesOverlap(root, other)))) {
     throw new Error('Git state, working files, runtime socket and enrollment must use separate paths.');
   }
+  checkEnrollmentPath();
   workerDirectory(stateDir, true);
   workerDirectory(reposDir);
   workerDirectory(socketDir);
   await prepareWorkerSocket(socketPath);
   const allEntries = loadEnrollmentEntries(options.enrollmentFile);
-  const enrolled = allEntries.filter((entry): entry is EnrolledProject => !isLocalProject(entry));
-  const localCount = allEntries.length - enrolled.length;
   const stageRoot = path.join(reposDir, '.staging');
   if (!fs.existsSync(stageRoot)) fs.mkdirSync(stageRoot, { recursive: true, mode: 0o700 });
   workerDirectory(stageRoot, true);
 
   const proposal = options.proposalService ?? await loadProposalService();
-  const bindings = new Map(enrolled.map((project) => [project.id, enrollmentBinding(project)]));
-  const projects = new Map(enrolled.map((project) => [
-    project.id, new ManagedRepository(project, reposDir, stateDir, proposal)
-  ]));
+  const bindings = new Map<string, string>();
+  const projects = new Map<string, ManagedRepository>();
   const queue = new GitQueue();
+
+  function reconcileEnrollment(nextEntries: EnrollmentEntry[]): {
+    enrolled: EnrolledProject[];
+    localCount: number;
+    added: number;
+    removed: number;
+    rebound: number;
+  } {
+    const enrolled = nextEntries.filter((entry): entry is EnrolledProject => !isLocalProject(entry));
+    const localCount = nextEntries.length - enrolled.length;
+    const nextIds = new Set(enrolled.map((project) => project.id));
+    let added = 0;
+    let removed = 0;
+    let rebound = 0;
+
+    for (const id of [...projects.keys()]) {
+      if (!nextIds.has(id)) {
+        projects.delete(id);
+        bindings.delete(id);
+        removed++;
+      }
+    }
+    for (const project of enrolled) {
+      const nextBinding = enrollmentBinding(project);
+      if (projects.has(project.id) && bindings.get(project.id) === nextBinding) {
+        continue;
+      }
+      if (projects.has(project.id)) rebound++;
+      else added++;
+      bindings.set(project.id, nextBinding);
+      projects.set(project.id, new ManagedRepository(project, reposDir, stateDir, proposal));
+    }
+    return { enrolled, localCount, added, removed, rebound };
+  }
+
+  const initial = reconcileEnrollment(allEntries);
 
   async function dispatch(request: GitRequest, signal: AbortSignal): Promise<GitResult> {
     if (request.verb === 'statuses') {
@@ -145,6 +186,9 @@ export async function startGitRunner(options: {
       throw new GitRpcError('proposal_unavailable');
     }
     return queue.run(request.projectId, signal, async (jobSignal) => {
+      if (projects.get(request.projectId) !== project || bindings.get(request.projectId) !== request.binding) {
+        throw new GitRpcError('unknown_git_project');
+      }
       if (request.verb === 'update') {
         return project.update(jobSignal);
       }
@@ -269,15 +313,17 @@ export async function startGitRunner(options: {
     throw err;
   }
 
-  const entries = [...projects];
   log.info('Loaded enrolled projects', {
-    count: enrolled.length,
-    localSkipped: localCount || undefined,
-    projects: enrolled.map((p) => `${p.id}@${p.branch}`).join(',') || 'none',
+    count: initial.enrolled.length,
+    localSkipped: initial.localCount || undefined,
+    projects: initial.enrolled.map((p) => `${p.id}@${p.branch}`).join(',') || 'none',
     proposalService: Boolean(proposal)
   });
   let cursor = 0;
   const refresh = () => {
+    const entries = [...projects];
+    if (entries.length === 0) return;
+    if (cursor >= entries.length) cursor = 0;
     for (let checked = 0; checked < entries.length; checked++) {
       const [id, project] = entries[cursor];
       cursor = (cursor + 1) % entries.length;
@@ -288,9 +334,30 @@ export async function startGitRunner(options: {
   };
   refresh();
   const background = setInterval(refresh, 500);
+  const enrollmentWatcher = watchEnrollmentFile(options.enrollmentFile, {
+    initialEntries: allEntries,
+    pollIntervalMs: options.enrollmentPollIntervalMs,
+    onReload: (nextEntries) => {
+      checkEnrollmentPath();
+      const summary = reconcileEnrollment(nextEntries);
+      log.info('Reloaded enrolled projects', {
+        count: summary.enrolled.length,
+        localSkipped: summary.localCount || undefined,
+        added: summary.added || undefined,
+        removed: summary.removed || undefined,
+        rebound: summary.rebound || undefined,
+        projects: summary.enrolled.map((p) => `${p.id}@${p.branch}`).join(',') || 'none'
+      });
+      refresh();
+    },
+    onError: (reason) => {
+      log.warn('Failed to reload enrollment.json; keeping last valid configuration', { reason });
+    }
+  });
 
   return {
     async close() {
+      enrollmentWatcher.close();
       clearInterval(background);
       queue.close();
       for (const socket of sockets) socket.destroy();
