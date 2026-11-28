@@ -215,6 +215,19 @@ export class ManagedRepository {
 
     let phase = 'refresh';
     try {
+      if (exists(this.metadataDir) && this.canResetUninstalledBinding()) {
+        phase = 'init';
+        log.info('Resetting uninstalled repository binding to match updated enrollment', {
+          project: this.project.id,
+          branch: this.context.branch,
+          remote: this.context.remote
+        });
+        fs.rmSync(this.metadataDir, { recursive: true, force: true });
+        if (exists(this.workingStage)) {
+          workerDirectory(this.workingStage, true);
+          fs.rmSync(this.workingStage, { recursive: true, force: true });
+        }
+      }
       if (!exists(this.metadataDir)) {
         // An existing tree may contain uncommitted work or legacy Git metadata. Never adopt it.
         if (exists(this.context.workTree)) {
@@ -342,15 +355,68 @@ export class ManagedRepository {
     return `refs/remotes/origin/${this.context.branch}`;
   }
 
+  private canResetUninstalledBinding(): boolean {
+    if (exists(this.installedFile) || exists(this.context.workTree)) return false;
+    workerDirectory(this.metadataDir, true);
+    try {
+      if (fs.readFileSync(path.join(this.metadataDir, 'binding.json'), 'utf8') !== this.binding) return true;
+      if (fs.readFileSync(path.join(this.context.gitDir, 'HEAD'), 'utf8') !== `ref: ${this.localRef}\n`) return true;
+      return false;
+    } catch {
+      return true;
+    }
+  }
+
+  private describeBindingMismatch(rawBinding: string): string {
+    try {
+      const bound = JSON.parse(rawBinding) as { remote?: unknown; branch?: unknown };
+      const boundRemote = typeof bound?.remote === 'string' ? bound.remote : undefined;
+      const boundBranch = typeof bound?.branch === 'string' ? bound.branch : undefined;
+      if (boundRemote && boundBranch) {
+        const remoteDiff = boundRemote !== this.context.remote;
+        const branchDiff = boundBranch !== this.context.branch;
+        if (branchDiff && !remoteDiff) {
+          return `Existing checkout is bound to branch "${boundBranch}", not "${this.context.branch}". Use a new project id or remove ${this.metadataDir}.`;
+        }
+        if (remoteDiff && !branchDiff) {
+          return `Existing checkout is bound to ${boundRemote}, not ${this.context.remote}. Use a new project id or remove ${this.metadataDir}.`;
+        }
+        if (remoteDiff && branchDiff) {
+          return `Existing checkout is bound to ${boundRemote} (${boundBranch}), not ${this.context.remote} (${this.context.branch}). Use a new project id or clear git-state.`;
+        }
+      }
+    } catch {
+      // Fall through to generic mismatch error.
+    }
+    return `Managed checkout binding in ${this.metadataDir} does not match current enrollment.`;
+  }
+
   private checkBinding(): void {
     workerDirectory(this.metadataDir, true);
-    if (fs.readFileSync(path.join(this.metadataDir, 'binding.json'), 'utf8') !== this.binding) {
-      throw new GitRpcError('git_not_ready');
+    let rawBinding: string;
+    try {
+      rawBinding = fs.readFileSync(path.join(this.metadataDir, 'binding.json'), 'utf8');
+    } catch {
+      throw new GitRpcError('git_not_ready', `Managed checkout binding file is missing in ${this.metadataDir}.`);
+    }
+    if (rawBinding !== this.binding) {
+      throw new GitRpcError('git_not_ready', this.describeBindingMismatch(rawBinding));
     }
     const gitDir = fs.lstatSync(this.context.gitDir);
-    if (!gitDir.isDirectory() || gitDir.uid !== process.geteuid!() || (gitDir.mode & 0o022) ||
-        fs.readFileSync(path.join(this.context.gitDir, 'HEAD'), 'utf8') !== `ref: ${this.localRef}\n`) {
-      throw new GitRpcError('git_not_ready');
+    if (!gitDir.isDirectory() || gitDir.uid !== process.geteuid!() || (gitDir.mode & 0o022)) {
+      throw new GitRpcError('git_not_ready', 'Managed Git metadata directory has unsafe ownership or permissions.');
+    }
+    let head: string;
+    try {
+      head = fs.readFileSync(path.join(this.context.gitDir, 'HEAD'), 'utf8');
+    } catch {
+      throw new GitRpcError('git_not_ready', `Managed Git HEAD file is missing in ${this.context.gitDir}.`);
+    }
+    if (head !== `ref: ${this.localRef}\n`) {
+      throw new GitRpcError(
+        'git_not_ready',
+        `Managed Git HEAD (${head.trim() || '<empty>'}) does not match enrolled branch ref (ref: ${this.localRef}).`
+      );
     }
   }
 
