@@ -832,6 +832,71 @@ describe('managed Git service', () => {
     const recoveredProjects = await request(hub.app).get('/api/projects').expect(200);
     expect(recoveredProjects.body.projects[0].git.lastError).toBeUndefined();
   });
+
+  it('auto-resets uninstalled binding metadata on enrollment fix, but fails closed with details for existing checkouts', async () => {
+    const base = upstream();
+    // Move upstream branch from main to master so initial enrollment on main fails fetch.
+    git(fixture.source, ['branch', '-m', 'main', 'master']);
+
+    const service = companion(base);
+    runner = await startGitRunner({
+      enrollmentFile,
+      reposDir,
+      stateDir,
+      socketPath,
+      proposalService: service,
+      enrollmentDebounceMs: 30
+    });
+    const client = new GitSocketClient(socketPath);
+    hub = createHubApp({
+      registry: new ProjectRegistry([], { projects: loadEnrollmentEntries(enrollmentFile), reposDir }),
+      enrollmentWatch: { file: enrollmentFile, debounceMs: 30 },
+      gitSocketPath: socketPath,
+      proposalAuth: (_req, res, next) => {
+        res.locals.proposalActor = 'fictional-reviewer';
+        next();
+      },
+      enableWatcher: true
+    });
+
+    const writeEnrollment = (projects: unknown[]) => {
+      const tmp = path.join(root, 'enrollment.next.json');
+      fs.writeFileSync(tmp, JSON.stringify({ projects }), { mode: 0o644 });
+      fs.renameSync(tmp, enrollmentFile);
+    };
+
+    // 1. Initial sync on wrong branch ("main") creates metadata dir & binding.json, then fails fetch.
+    await vi.waitFor(async () => {
+      const status = (await client.statuses()).amber;
+      expect(status).toMatchObject({ state: 'unavailable', fetchState: 'unavailable', branch: 'main' });
+      expect(status?.lastError).toContain('[fetch]');
+    }, { timeout: 10_000 });
+    expect(fs.existsSync(path.join(stateDir, 'amber', 'binding.json'))).toBe(true);
+    expect(fs.existsSync(workTree)).toBe(false);
+
+    // 2. Fix enrollment.json branch to "master" -> worker resets uninstalled metadata and checks out cleanly.
+    const masterEntry = { ...entry, branch: 'master' };
+    writeEnrollment([masterEntry]);
+    await vi.waitFor(async () => {
+      const status = (await client.statuses()).amber;
+      expect(status).toMatchObject({ state: 'ready', branch: 'master', headSha: base, fetchState: 'current' });
+      expect(status?.lastError).toBeUndefined();
+    }, { timeout: 10_000 });
+    expect(fs.readFileSync(path.join(workTree, 'README.md'), 'utf8')).toBe('# Amber Observatory\n');
+
+    // 3. With a real checkout on disk (plus a local draft), changing branch under the same id must fail closed with a clear message.
+    fs.writeFileSync(path.join(workTree, 'README.md'), '# Uncommitted draft\n');
+    writeEnrollment([{ ...entry, branch: 'main' }]);
+    await vi.waitFor(async () => {
+      const status = (await client.statuses()).amber;
+      expect(status).toMatchObject({ state: 'unavailable', branch: 'main' });
+      expect(status?.lastError).toContain('[binding]');
+      expect(status?.lastError).toContain('bound to branch "master", not "main"');
+      const projectsRes = await request(hub!.app).get('/api/projects').expect(200);
+      expect(projectsRes.body.projects[0].git.lastError).toContain('bound to branch "master", not "main"');
+    }, { timeout: 10_000 });
+    expect(fs.readFileSync(path.join(workTree, 'README.md'), 'utf8')).toBe('# Uncommitted draft\n');
+  });
 });
 
 it('bounds the queue, withdraws canceled work, and serializes jobs on the same checkout', async () => {
