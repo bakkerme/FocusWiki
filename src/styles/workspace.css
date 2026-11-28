@@ -3681,6 +3681,19 @@ textarea.markdown-source-editor.is-wrapped {
   border: 1px solid var(--line-border);
 }
 
+.empty-workspace-card .workspace-error-detail {
+  margin-top: 14px;
+  padding: 10px 12px;
+  border-radius: 6px;
+  border: 1px solid var(--conflict-garnet);
+  background: var(--conflict-wash);
+  color: var(--conflict-garnet);
+  font-family: var(--font-code);
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
 .empty-workspace-actions {
   display: flex;
   flex-wrap: wrap;

@@ -187,7 +187,12 @@ describe('managed Git service', () => {
     const list = await request(hub.app).get('/api/projects').expect(200);
     expect(list.body.projects[0]).toMatchObject({
       workingTreeAvailable: true,
-      git: { state: 'unavailable', isClean: null, headSha: '' },
+      git: {
+        state: 'unavailable',
+        isClean: null,
+        headSha: '',
+        lastError: expect.stringMatching(/Git worker is unreachable/)
+      },
       docs: [{ path: 'README.md' }]
     });
     await request(hub.app).get('/api/projects/amber/doc').expect(200);
@@ -786,6 +791,46 @@ describe('managed Git service', () => {
     }, { timeout: 10_000 });
     await request(hub.app).get('/api/projects/amber/git/diff').expect(404);
     expect(fs.existsSync(path.join(workTree, 'README.md'))).toBe(true);
+  });
+
+  it('surfaces sanitized sync errors on project status and clears them after recovery', async () => {
+    const base = upstream();
+    let shouldFail = true;
+    const service = companion(base);
+    service.getRepoToken = vi.fn(async () => {
+      if (shouldFail) {
+        throw new Error('Non-GitHub remote requires FOCUSWIKI_FORGEJO_ORIGIN; Authorization: Bearer secret-should-redact');
+      }
+      return 'fictional-read-token';
+    });
+
+    const client = await start(service);
+    hub = app('allow');
+
+    await vi.waitFor(async () => {
+      const status = (await client.statuses()).amber;
+      expect(status).toMatchObject({ state: 'unavailable', fetchState: 'unavailable' });
+      expect(status?.lastError).toContain('[token]');
+      expect(status?.lastError).toContain('FOCUSWIKI_FORGEJO_ORIGIN');
+      expect(status?.lastError).not.toContain('secret-should-redact');
+    }, { timeout: 10_000 });
+
+    const failingProjects = await request(hub.app).get('/api/projects').expect(200);
+    expect(failingProjects.body.projects[0].git.lastError).toContain('FOCUSWIKI_FORGEJO_ORIGIN');
+    expect(failingProjects.body.projects[0].git.lastError).not.toContain('secret-should-redact');
+
+    shouldFail = false;
+    const now = Date.now();
+    vi.spyOn(Date, 'now').mockImplementation(() => now + 65_000);
+
+    await vi.waitFor(async () => {
+      const status = (await client.statuses()).amber;
+      expect(status).toMatchObject({ state: 'ready', headSha: base, fetchState: 'current' });
+      expect(status?.lastError).toBeUndefined();
+    }, { timeout: 10_000 });
+
+    const recoveredProjects = await request(hub.app).get('/api/projects').expect(200);
+    expect(recoveredProjects.body.projects[0].git.lastError).toBeUndefined();
   });
 });
 

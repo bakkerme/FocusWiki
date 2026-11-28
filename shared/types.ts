@@ -119,6 +119,7 @@ export type ProjectGitStatus = (
 ) & {
   fetchState?: 'pending' | 'current' | 'unavailable';
   fetchedAt?: string;
+  lastError?: string;
 };
 
 export interface ProjectSummary extends ProjectConfig {

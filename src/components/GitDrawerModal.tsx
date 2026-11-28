@@ -835,6 +835,15 @@ export function GitDrawerModal({ project, activeDocPath, onClose, onStatusChange
           <div className="notice-banner conflict change-review-banner" role="alert">{error}</div>
         )}
 
+        {projectStatus.lastError && (
+          <div
+            className="notice-banner conflict change-review-banner"
+            role={error ? 'status' : 'alert'}
+          >
+            <span>Last sync error: {projectStatus.lastError}</span>
+          </div>
+        )}
+
         {loading ? (
           <div className="change-review-empty" role="status">Inspecting files saved on disk…</div>
         ) : review && changedCount > 0 ? (
